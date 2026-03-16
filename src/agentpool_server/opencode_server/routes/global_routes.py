@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import TYPE_CHECKING, Any
 
-import anyenv
 from fastapi import APIRouter
 from sse_starlette.sse import EventSourceResponse
 
@@ -98,7 +98,11 @@ def _extract_session_id(event: Event) -> str | None:  # noqa: PLR0911
 
 
 def _serialize_event(event: Event, wrap_payload: bool = False) -> str:
-    """Serialize event, optionally wrapping in payload structure."""
+    """Serialize event, optionally wrapping in payload structure.
+
+    Uses ensure_ascii=False to preserve Unicode characters (Chinese, emoji, etc.)
+    in the JSON output instead of escaping them as \\uXXXX sequences.
+    """
     event_data = event.model_dump(by_alias=True, exclude_none=True)
 
     # Add sessionId at top level if available (for subagent session tracking)
@@ -107,8 +111,8 @@ def _serialize_event(event: Event, wrap_payload: bool = False) -> str:
         event_data["sessionId"] = session_id
 
     if wrap_payload:
-        return anyenv.dump_json({"payload": event_data})
-    return anyenv.dump_json(event_data)
+        return json.dumps({"payload": event_data}, ensure_ascii=False)
+    return json.dumps(event_data, ensure_ascii=False)
 
 
 async def _event_generator(
