@@ -37,6 +37,7 @@ from agentpool_config.hooks import (
 )
 from agentpool_config.toolsets import ToolsetConfig
 from agentpool_config.skills import SkillsConfig, DEFAULT_SKILLS_PATHS
+from agentpool_config.skill_commands import SkillSlashConfig, SkillCommandConfig
 from agentpool_config.resolution import (
     ConfigLayer,
     ConfigSource,
@@ -66,6 +67,8 @@ AnyToolConfig = Annotated[
 ]
 __all__ = [
     "DEFAULT_SKILLS_PATHS",
+    "SkillSlashConfig",
+    "SkillCommandConfig",
     "AnyToolConfig",
     "BaseEventHandlerConfig",
     "BaseHookConfig",

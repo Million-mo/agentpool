@@ -93,6 +93,8 @@ class ServerState:
     event_managers: dict[str, Any] = field(default_factory=dict)
     # Provider authentication service
     auth_service: Any = field(default_factory=create_default_auth_service)
+    # Skill command bridge for OpenCode
+    skill_bridge: Any = field(default=None)
 
     def __post_init__(self) -> None:
         """Initialize derived state."""
