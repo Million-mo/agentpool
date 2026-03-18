@@ -13,8 +13,10 @@ from agentpool.diagnostics.lsp_manager import LSPManager
 from agentpool.utils.time_utils import now_ms
 from agentpool_server.opencode_server.provider_auth import create_default_auth_service
 
+
 if TYPE_CHECKING:
     from fsspec.asyn import AsyncFileSystem
+    from slashed import CommandStore
 
     from agentpool.agents.base_agent import BaseAgent
     from agentpool.delegation import AgentPool
@@ -95,6 +97,8 @@ class ServerState:
     auth_service: Any = field(default_factory=create_default_auth_service)
     # Skill command bridge for OpenCode
     skill_bridge: Any = field(default=None)
+    # Command store for slash commands
+    command_store: CommandStore | None = field(default=None)
 
     def __post_init__(self) -> None:
         """Initialize derived state."""

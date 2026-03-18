@@ -277,6 +277,9 @@ def chat_message_to_opencode(  # noqa: PLR0915
         # Process all model messages to extract parts
         tool_calls: dict[str, ToolPart] = {}
         for model_msg in msg.messages:
+            # Handle case where message might be a dict (loaded from storage)
+            if isinstance(model_msg, dict):
+                continue  # Skip dict messages that can't be processed
             for p in model_msg.parts:
                 match p:
                     case PydanticTextPart(content=content):
