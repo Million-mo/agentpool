@@ -207,7 +207,9 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
         from agentpool_config.session import MemoryConfig
 
         self.model_settings = model_settings
-        memory_cfg = session if isinstance(session, MemoryConfig) else MemoryConfig.from_value(session)
+        memory_cfg = (
+            session if isinstance(session, MemoryConfig) else MemoryConfig.from_value(session)
+        )
         # Collect MCP servers from config
         all_mcp_servers = list(mcp_servers) if mcp_servers else []
         if agent_config and agent_config.mcp_servers:
@@ -446,7 +448,10 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
         from llmling_models_config import StringModelConfig
 
         model_config = config.model
-        if isinstance(model_config, StringModelConfig) and model_config.identifier in manifest.model_variants:
+        if (
+            isinstance(model_config, StringModelConfig)
+            and model_config.identifier in manifest.model_variants
+        ):
             # The identifier is a model_variants key, use the variant config
             model_config = manifest.model_variants[model_config.identifier]
 
@@ -805,94 +810,120 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
         if deps is not None:
             agent_deps.data = deps
 
-        # Wrap agent run in try-except to handle GeneratorExit at both levels
-        try:
-            async with agentlet.iter(
-                prompts,
-                deps=agent_deps,
-                message_history=[m for run in history_list for m in run.to_pydantic_ai()],
-                usage_limits=self._default_usage_limits,
-            ) as agent_run:
-                pending_tcs: dict[str, BaseToolCallPart] = {}
-                try:
+        # Run the entire agent iteration in an isolated task to prevent CancelScope
+        # issues when consumer breaks from iteration. This ensures all pydantic-ai
+        # context managers (CancelScope, TaskGroup, ContextVar) exit in the correct task.
+        event_queue: asyncio.Queue[RichAgentStreamEvent[OutputDataT] | None] = asyncio.Queue()
+        iteration_done = asyncio.Event()
+        iteration_error: BaseException | None = None
+        response_msg: ChatMessage[Any] | None = None
+        response_time: float = 0.0
+
+        async def agent_iteration_task() -> None:
+            """Background task that runs agentlet.iter() and feeds events to queue."""
+            nonlocal iteration_error, response_msg
+            try:
+                async with agentlet.iter(
+                    prompts,
+                    deps=agent_deps,
+                    message_history=[m for run in history_list for m in run.to_pydantic_ai()],
+                    usage_limits=self._default_usage_limits,
+                ) as agent_run:
+                    pending_tcs: dict[str, BaseToolCallPart] = {}
                     async for node in agent_run:
-                        if self._cancelled:
+                        if self._cancelled or iteration_done.is_set():
                             self.log.info("Stream cancelled by user")
                             break
                         if isinstance(node, End):
                             break
 
-                        # Stream events from model request or tool call nodes
+                        # Stream events from node (model request or tool call)
                         if isinstance(node, ModelRequestNode | CallToolsNode):
-                            # Handle GeneratorExit to prevent CancelScope issues when
-                            # yield is interrupted by consumer breaking the iteration
-                            try:
-                                async with (
-                                    node.stream(agent_run.ctx) as stream,
-                                    merge_queue_into_iterator(stream, self._event_queue) as merged,  # type: ignore[arg-type]
-                                ):
+                            async with node.stream(agent_run.ctx) as stream:
+                                async with merge_queue_into_iterator(
+                                    stream, self._event_queue
+                                ) as merged:  # type: ignore[arg-type]
                                     async for event in merged:
-                                        if self._cancelled:
+                                        if self._cancelled or iteration_done.is_set():
                                             break
-                                        yield event
-                                        if combined := process_tool_event(self.name, event, pending_tcs, message_id):
-                                            yield combined
-                            except GeneratorExit:
-                                # Consumer stopped iteration early (e.g., by break)
-                                # Avoid re-raising to prevent cleanup in wrong context
-                                self._cancelled = True
-                                self.log.debug("GeneratorExit caught in node stream, cancelling gracefully")
-                                # Do not re-raise - let finally blocks clean up normally
-                except asyncio.CancelledError:
-                    self.log.info("Stream cancelled via task cancellation")
-                    self._cancelled = True
+                                        await event_queue.put(event)
+                                        if combined := process_tool_event(
+                                            self.name, event, pending_tcs, message_id
+                                        ):
+                                            await event_queue.put(combined)
 
-                # Build response message
-                response_time = time.perf_counter() - start_time
-                if self._cancelled:
-                    partial_content = extract_text_from_messages(agent_run.all_messages(), include_interruption_note=True)
-                    response_msg = ChatMessage(
-                        content=partial_content,
-                        role="assistant",
-                        name=self.name,
-                        message_id=message_id,
-                        session_id=self.session_id,
-                        parent_id=user_msg.message_id,
-                        response_time=response_time,
-                        finish_reason="stop",
-                    )
-                    yield StreamCompleteEvent(message=response_msg)
-                    return
+                    # Build response message
+                    response_time = time.perf_counter() - start_time
+                    if self._cancelled:
+                        partial_content = extract_text_from_messages(
+                            agent_run.all_messages(), include_interruption_note=True
+                        )
+                        response_msg = ChatMessage(
+                            content=partial_content,
+                            role="assistant",
+                            name=self.name,
+                            message_id=message_id,
+                            session_id=self.session_id,
+                            parent_id=user_msg.message_id,
+                            response_time=response_time,
+                            finish_reason="stop",
+                        )
+                        await event_queue.put(StreamCompleteEvent(message=response_msg))
+                    elif agent_run.result:
+                        response_msg = await ChatMessage.from_run_result(
+                            agent_run.result,
+                            agent_name=self.name,
+                            message_id=message_id,
+                            session_id=self.session_id,
+                            parent_id=user_msg.message_id,
+                            response_time=time.perf_counter() - start_time,
+                            metadata=None,
+                        )
+                    else:
+                        raise RuntimeError("Stream completed without producing a result")
+            except asyncio.CancelledError:
+                self.log.info("Agent iteration task cancelled")
+            except BaseException as e:
+                iteration_error = e
+            finally:
+                # Signal end of iteration
+                await event_queue.put(None)
 
-                if agent_run.result:
-                    response_msg = await ChatMessage.from_run_result(
-                        agent_run.result,
-                        agent_name=self.name,
-                        message_id=message_id,
-                        session_id=self.session_id,
-                        parent_id=user_msg.message_id,
-                        response_time=response_time,
-                        metadata=None,
-                    )
-                else:
-                    raise RuntimeError("Stream completed without producing a result")
-        except GeneratorExit:
-            # Handle GeneratorExit at agentlet.iter() level
-            self.log.debug("GeneratorExit caught at agent run level, cancelling gracefully")
+        # Start the agent iteration task
+        iteration_task = asyncio.create_task(agent_iteration_task())
+
+        try:
+            # Yield events from the queue
+            while True:
+                try:
+                    event = await asyncio.wait_for(event_queue.get(), timeout=0.1)
+                    if event is None:  # End of stream
+                        break
+                    yield event
+                except TimeoutError:
+                    # Check if we should exit
+                    if self._cancelled:
+                        break
+                    continue
+
+            # Re-raise any error from iteration task
+            if iteration_error is not None:
+                raise iteration_error
+
+        finally:
+            # Signal iteration to stop
+            iteration_done.set()
             self._cancelled = True
-            # Yield a cancellation event to notify consumer
-            response_time = time.perf_counter() - start_time
-            response_msg = ChatMessage(
-                content="*Stream cancelled by user*",
-                role="assistant",
-                name=self.name,
-                message_id=message_id,
-                session_id=self.session_id,
-                parent_id=user_msg.message_id,
-                response_time=response_time,
-                finish_reason="stop",
-            )
-            yield StreamCompleteEvent(message=response_msg)
+            # Cancel task if still running
+            if not iteration_task.done():
+                iteration_task.cancel()
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(iteration_task),
+                        timeout=2.0,
+                    )
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    pass  # Cleanup will happen in background
 
         # Send additional enriched completion event
         yield StreamCompleteEvent(message=response_msg)
@@ -957,10 +988,14 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
             self.to_structured(output_type)
         async with AsyncExitStack() as stack:
             if tools is not None:  # Tools
-                await stack.enter_async_context(self.tools.temporary_tools(tools, exclusive=replace_tools))
+                await stack.enter_async_context(
+                    self.tools.temporary_tools(tools, exclusive=replace_tools)
+                )
 
             if history is not None:  # History
-                await stack.enter_async_context(self.conversation.temporary_state(history, replace_history=replace_history))
+                await stack.enter_async_context(
+                    self.conversation.temporary_state(history, replace_history=replace_history)
+                )
 
             if pause_routing:  # Routing
                 await stack.enter_async_context(self.connections.paused_routing())
@@ -1069,7 +1104,11 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
                     if cwd is not None and session_data.cwd != cwd:
                         continue
                     # Fetch title from conversation storage if not in metadata
-                    if not session_data.title and (storage := self.agent_pool.storage) and (title := await storage.get_session_title(session_data.session_id)):
+                    if (
+                        not session_data.title
+                        and (storage := self.agent_pool.storage)
+                        and (title := await storage.get_session_title(session_data.session_id))
+                    ):
                         session_data = session_data.with_metadata(title=title)
                     result.append(session_data)
                     # Check limit
