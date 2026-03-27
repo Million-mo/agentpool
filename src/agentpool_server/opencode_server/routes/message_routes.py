@@ -233,16 +233,39 @@ async def _process_message(  # noqa: PLR0915
     # Handle model selection if requested
     original_model: str | None = None
     if request.model and request.model.model_id and request.model.provider_id:
-        requested_model = f"{request.model.provider_id}:{request.model.model_id}"
+        provider_id = request.model.provider_id
+        model_id = request.model.model_id
+
+        # Handle synthetic "agent" provider for model_variants
+        # OpenCode TUI sends provider_id="agent" for model_variants
+        if provider_id == "agent":
+            # For model_variants, use just the model_id (variant name)
+            requested_model = model_id
+        else:
+            requested_model = f"{provider_id}:{model_id}"
+
         try:
             available_models = await agent.get_available_models()
+            is_valid = False
+
             if available_models:
                 valid_ids = [m.id_override if m.id_override else m.id for m in available_models]
                 if requested_model in valid_ids:
-                    # Store original model to restore later
-                    original_model = agent.model_name
-                    await agent.set_model(requested_model)
-                    logger.info("Switched to requested model", model=requested_model)
+                    is_valid = True
+
+            # Also check model_variants from manifest
+            if (
+                not is_valid
+                and state.pool
+                and requested_model in state.pool.manifest.model_variants
+            ):
+                is_valid = True
+
+            if is_valid:
+                # Store original model to restore later
+                original_model = agent.model_name
+                await agent.set_model(requested_model)
+                logger.info("Switched to requested model", model=requested_model)
         except Exception:  # noqa: BLE001
             # Agent doesn't support model selection, ignore
             pass

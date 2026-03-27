@@ -322,6 +322,17 @@ async def update_config(state: StateDep, config_update: Config) -> Config:
 
     # Update only the fields that were provided
     update_data = config_update.model_dump(exclude_unset=True)
+
+    # Sync model change to agent if provided
+    if "model" in update_data and update_data["model"] is not None:
+        new_model = update_data["model"]
+        if state.agent is not None:
+            try:
+                await state.agent.set_model(new_model)
+                logger.info(f"Agent model updated to: {new_model}")
+            except Exception as e:
+                logger.warning(f"Failed to update agent model: {e}")
+
     for field_name, value in update_data.items():
         setattr(state.config, field_name, value)
 

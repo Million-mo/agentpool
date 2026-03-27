@@ -1059,11 +1059,21 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
             await self.update_state(config_id="mode", value_id=mode_id)
 
         elif category_id == "model":
-            # Validate model exists
+            # Validate model exists (check both tokonomics models and model_variants)
+            is_valid = False
             if models := await self.get_available_models():
                 valid_ids = [m.pydantic_ai_id for m in models]
-                if mode_id not in valid_ids:
-                    raise UnknownModeError(mode_id, valid_ids)
+                if mode_id in valid_ids:
+                    is_valid = True
+            # Also check model_variants from manifest
+            if (
+                not is_valid
+                and self.agent_pool
+                and mode_id in self.agent_pool.manifest.model_variants
+            ):
+                is_valid = True
+            if not is_valid:
+                raise UnknownModeError(mode_id, valid_ids if models else [])
             # Set the model directly
             self._model, settings = self._resolve_model_string(mode_id)
             if settings:
