@@ -360,10 +360,13 @@ async def _process_message_locked(  # noqa: PLR0915
 
         # Strategy: First try to use model_id as a variant name
         # OpenCode TUI sends variant names as model_id (e.g., "ack-dev", "qwen35")
-        # The provider_id is the first part of the identifier (e.g., "openai-chat")
+        # The provider_id is first part of identifier (e.g., "openai-chat")
         requested_model = model_id  # Try variant name first
 
         logger.info(f"Model selection requested: provider={provider_id}, model_id={model_id}")
+        logger.info(
+            f"Model selection requested: provider={provider_id}, model_id={model_id}, resolved={requested_model}"
+        )
 
         try:
             available_models = await agent.get_available_models()

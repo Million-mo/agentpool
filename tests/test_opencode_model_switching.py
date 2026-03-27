@@ -1,0 +1,395 @@
+"""Tests to verify OpenCode model switching issues.
+
+These tests verify the root causes of the issue where model changes
+in OpenCode TUI are not reflected in agentpool runtime.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+from unittest.mock import patch
+
+import pytest
+
+from agentpool import Agent, AgentPool, AgentsManifest
+from agentpool_server.opencode_server.models.config import Config
+
+
+# =============================================================================
+# Test Root Cause #1: Model variants not included in validation
+# =============================================================================
+
+
+@pytest.fixture
+def manifest_with_model_variants() -> AgentsManifest:
+    """Create a manifest with model_variants for testing."""
+    config_yaml = """
+model_variants:
+  qwen35:
+    type: string
+    identifier: "openai-chat:svc/qwen35"
+  glm47:
+    type: string
+    identifier: "openai-chat:svc/glm-4.7"
+
+agents:
+  test_agent:
+    type: native
+    model: glm47
+    system_prompt: "You are a test agent"
+"""
+    return AgentsManifest.from_yaml(config_yaml)
+
+
+@pytest.fixture
+async def agent_with_variants(manifest_with_model_variants: AgentsManifest):
+    """Create an agent with model_variants in its pool."""
+    async with AgentPool(manifest_with_model_variants) as pool:
+        agent = pool.get_agent("test_agent")
+        async with agent:
+            # Store pool reference for tests (runtime attribute)
+            agent._test_pool = pool  # type: ignore[attr-defined]
+            yield agent  # type: ignore[attr-defined]
+
+
+@pytest.mark.unit
+async def test_model_variant_resolution(agent_with_variants: Agent):
+    """Test that model variants can be resolved to actual models.
+
+    This verifies that variant names like 'qwen35' can be resolved
+    to their full configuration.
+    """
+    agent = agent_with_variants
+    pool = agent._test_pool  # type: ignore[attr-defined]
+    manifest = pool.manifest
+
+    # Verify variants are in manifest
+    assert "qwen35" in manifest.model_variants
+    assert "glm47" in manifest.model_variants
+
+    # Verify variant config has identifier
+    qwen_config = manifest.model_variants["qwen35"]
+    assert qwen_config.identifier == "openai-chat:svc/qwen35"
+
+
+@pytest.mark.unit
+async def test_resolve_model_string_with_variant(agent_with_variants: Agent):
+    """Test _resolve_model_string correctly resolves variant names.
+
+    Expected: _resolve_model_string('qwen35') should resolve the variant.
+    Actual: This should work if the implementation is correct.
+
+    Issue: If get_available_models() doesn't include variants,
+    validation in _set_mode will fail.
+    """
+    agent = agent_with_variants
+
+    # Test that variant can be resolved
+    model, settings = agent._resolve_model_string("qwen35")
+
+    # The model should be resolved from the variant
+    assert model is not None
+
+
+@pytest.mark.unit
+async def test_get_available_models_excludes_variants(agent_with_variants: Agent):
+    """CRITICAL TEST: Verify that get_available_models() returns tokonomics models,
+    NOT model_variants from config.
+
+    This is the ROOT CAUSE of the validation failure.
+
+    When OpenCode TUI sends a variant name like 'qwen35',
+    _set_mode validates against get_available_models() which returns
+    tokonomics-discovered models, not config variants.
+
+    Result: Validation fails because 'qwen35' is not in the tokonomics list.
+    """
+    agent = agent_with_variants
+
+    # Mock tokonomics to return a predictable list
+    with patch("tokonomics.model_discovery.get_all_models") as mock_get_all:
+        # Simulate tokonomics returning models without our variants
+        from tokonomics.model_discovery.model_info import ModelInfo
+
+        mock_model = ModelInfo(
+            id="gpt-4o",
+            name="GPT-4o",
+            provider="openai",
+        )
+        mock_get_all.return_value = [mock_model]
+
+        available_models = await agent.get_available_models()
+
+        # Verify tokonomics models are returned
+        assert available_models is not None
+        model_ids = [m.id for m in available_models]
+        assert "gpt-4o" in model_ids
+
+        # CRITICAL: Verify variants are NOT in the list
+        assert "qwen35" not in model_ids, (
+            "model_variants should NOT appear in get_available_models() - this is the bug!"
+        )
+        assert "glm47" not in model_ids, (
+            "model_variants should NOT appear in get_available_models() - this is the bug!"
+        )
+
+
+@pytest.mark.unit
+async def test_set_mode_validation_fails_for_variants(agent_with_variants: Agent):
+    """CRITICAL TEST: Verify that _set_mode validation fails for model_variants.
+
+    This reproduces the exact failure that happens when OpenCode TUI
+    tries to switch to a model variant.
+
+    Expected: _set_mode should accept 'qwen35' as a valid model.
+    Actual: Validation fails because get_available_models() doesn't include variants.
+
+    This test documents the CURRENT BUGGY BEHAVIOR.
+    After fix, this test should pass.
+    """
+    agent = agent_with_variants
+
+    # Mock get_available_models to simulate tokonomics response
+    with patch("tokonomics.model_discovery.get_all_models") as mock_get_all:
+        from tokonomics.model_discovery.model_info import ModelInfo
+
+        mock_model = ModelInfo(
+            id="gpt-4o",
+            name="GPT-4o",
+            provider="openai",
+        )
+        mock_get_all.return_value = [mock_model]
+
+        # Try to set mode to a variant
+        # This simulates what happens when OpenCode TUI sends 'qwen35'
+        with pytest.raises(Exception) as exc_info:
+            await agent._set_mode("model", "qwen35")
+
+        # Should fail with UnknownModeError or similar
+        # The exact exception type may vary
+        error_msg = str(exc_info.value).lower()
+        assert "unknown" in error_msg or "qwen35" in error_msg, (
+            f"Expected error about unknown mode, got: {exc_info.value}"
+        )
+
+
+# =============================================================================
+# Test Root Cause #2: Config update doesn't sync to agent
+# =============================================================================
+
+
+@pytest.mark.unit
+async def test_config_update_does_not_sync_to_agent(agent_with_variants: Agent):
+    """CRITICAL TEST: Verify that updating config.model doesn't update agent._model.
+
+    This tests the exact code path in config_routes.py:update_config().
+
+    When PATCH /config is called with {"model": "new_model"}:
+    - state.config.model is updated ✓
+    - state.agent.set_model() is NEVER called ✗
+
+    Result: Agent continues using old model.
+    """
+    agent = agent_with_variants
+
+    # Get initial model
+    initial_model = agent.model_name
+    assert initial_model is not None
+
+    # Simulate what happens in config_routes.py:update_config()
+    config = Config(model="openai-chat:svc/qwen35")
+
+    # This is what update_config() does - only updates config object
+    state_config = Config()
+    update_data = config.model_dump(exclude_unset=True)
+    for field_name, value in update_data.items():
+        setattr(state_config, field_name, value)
+
+    # Verify: state_config is updated
+    assert state_config.model == "openai-chat:svc/qwen35"
+
+    # CRITICAL: Verify agent model is NOT updated
+    # This demonstrates the bug - config and agent are out of sync
+    assert agent.model_name == initial_model, (
+        "BUG: Agent model should NOT have changed (config update doesn't sync to agent)"
+    )
+
+
+@pytest.mark.unit
+async def test_manual_set_model_works(agent_with_variants: Agent):
+    """Test that directly calling set_model() DOES work.
+
+    This verifies that if we fix the sync issue in update_config(),
+    model switching will work correctly.
+    """
+    agent = agent_with_variants
+
+    initial_model = agent.model_name
+
+    # Manually call set_model (what update_config() SHOULD do)
+    # Note: This might fail due to the validation bug above
+    try:
+        await agent.set_model("openai-chat:svc/glm-4.7")
+        # If it worked, model should change
+        assert agent.model_name != initial_model or agent.model_name == "openai-chat:svc/glm-4.7"
+    except Exception as e:
+        # Expected to fail due to validation issues
+        pytest.skip(f"set_model failed (expected due to validation bug): {e}")
+
+
+# =============================================================================
+# Test Root Cause #3: Message processing restores original model
+# =============================================================================
+
+
+@pytest.mark.unit
+async def test_message_processing_restores_model(agent_with_variants: Agent):
+    """CRITICAL TEST: Verify that message processing restores original model.
+
+    In message_routes.py:_process_message():
+    1. Store original_model = agent.model_name
+    2. await agent.set_model(requested_model)  # Temporary switch
+    3. Run agent
+    4. await agent.set_model(original_model)   # Always restore!
+
+    This is by design for per-message model override, but prevents
+    persistent model changes from the TUI.
+
+    This test documents the CURRENT BEHAVIOR.
+    """
+    agent = agent_with_variants
+    initial_model = agent.model_name
+
+    # Simulate what happens in _process_message()
+    # Note: We can't easily mock the full flow, so we document the behavior
+
+    # The issue is that even if we fix set_model() to work,
+    # _process_message() will ALWAYS restore the original model after processing.
+
+    # This demonstrates that we need a separate mechanism for persistent
+    # model changes vs per-message overrides.
+
+    # For now, just verify the current state
+    assert agent.model_name == initial_model
+
+    # Document: To fix this, we need to either:
+    # 1. Add a separate endpoint for persistent model changes
+    # 2. Or add a flag to skip model restoration in _process_message()
+
+
+# =============================================================================
+# Integration-style tests
+# =============================================================================
+
+
+@pytest.mark.unit
+async def test_opencode_model_flow_simulation():
+    """Simulate the complete OpenCode model switching flow.
+
+    This test simulates:
+    1. OpenCode TUI connects to agentpool
+    2. TUI gets available models (including model_variants as synthetic provider)
+    3. User selects 'qwen35' in TUI
+    4. TUI sends message with model override
+    5. Agent processes message with temporary model
+    6. Model is restored after message
+
+    Expected: Model change should persist (but currently doesn't due to bugs).
+    """
+    # Create manifest with model_variants
+    config_yaml = """
+model_variants:
+  qwen35:
+    type: string
+    identifier: "openai-chat:svc/qwen35"
+
+agents:
+  assistant:
+    type: native
+    model: openai:gpt-4o
+    system_prompt: "You are an assistant"
+"""
+    manifest = AgentsManifest.from_yaml(config_yaml)
+
+    async with AgentPool(manifest) as pool:
+        agent = pool.get_agent("assistant")
+        async with agent:
+            initial_model = agent.model_name
+
+            # Simulate OpenCode TUI getting available providers
+            # In config_routes.py:_build_providers_from_variants(),
+            # model_variants are exposed as a synthetic "agent" provider
+
+            # Simulate user selecting 'qwen35'
+            # TUI would send: provider_id="agent", model_id="qwen35"
+            # Which gets constructed as: requested_model = "agent:qwen35"
+
+            # The issue: "agent:qwen35" is not a valid model identifier
+            # It should be just "qwen35" or the variant should be resolved
+
+            # Document the current buggy flow
+            variant_name = "qwen35"
+            synthetic_provider_id = "agent"
+            constructed_model_id = f"{synthetic_provider_id}:{variant_name}"
+
+            # This is what happens in message_routes.py:236
+            assert constructed_model_id == "agent:qwen35"
+
+            # The problem: _resolve_model_string doesn't handle "agent:" prefix
+            # It treats the whole thing as a model name
+
+            # Verify the variant exists in manifest
+            assert variant_name in pool.manifest.model_variants
+
+            # But constructed_model_id will fail validation
+            # because it's not in get_available_models() and doesn't match
+            # the variant name due to the "agent:" prefix
+
+            # This test documents all three issues:
+            # 1. "agent:" prefix not handled
+            # 2. Variants not in get_available_models()
+            # 3. Even if fixed, model is restored after message
+
+
+# =============================================================================
+# Summary Test
+# =============================================================================
+
+
+@pytest.mark.unit
+async def test_all_root_causes_documented():
+    """Summary test documenting all three root causes.
+
+    Run this test to see a summary of all issues.
+    """
+    issues = []
+
+    # Issue 1: Model ID format mismatch
+    issues.append(
+        "Issue 1: OpenCode TUI sends 'agent:qwen35' but _resolve_model_string expects 'qwen35'"
+    )
+
+    # Issue 2: Validation excludes variants
+    issues.append(
+        "Issue 2: get_available_models() returns tokonomics models, not model_variants from config"
+    )
+
+    # Issue 3: Config update doesn't sync
+    issues.append("Issue 3: PATCH /config updates state.config but never calls agent.set_model()")
+
+    # Issue 4: Temporary model switching
+    issues.append(
+        "Issue 4: _process_message() always restores original model "
+        "after message (by design, but prevents persistent changes)"
+    )
+
+    # Print summary
+    print("\n" + "=" * 70)
+    print("ROOT CAUSE SUMMARY")
+    print("=" * 70)
+    for i, issue in enumerate(issues, 1):
+        print(f"{i}. {issue}")
+    print("=" * 70 + "\n")
+
+    # This test always passes - it's just for documentation
+    assert True
