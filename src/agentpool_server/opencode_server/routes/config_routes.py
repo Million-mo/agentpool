@@ -326,12 +326,19 @@ async def update_config(state: StateDep, config_update: Config) -> Config:
     # Sync model change to agent if provided
     if "model" in update_data and update_data["model"] is not None:
         new_model = update_data["model"]
+        logger.info(f"PATCH /config received model update: {new_model}")
         if state.agent is not None:
             try:
+                logger.info(f"Calling agent.set_model({new_model})...")
                 await state.agent.set_model(new_model)
-                logger.info(f"Agent model updated to: {new_model}")
+                logger.info(f"Agent model successfully updated to: {new_model}")
             except Exception as e:
                 logger.warning(f"Failed to update agent model: {e}")
+                import traceback
+
+                logger.warning(f"Traceback: {traceback.format_exc()}")
+        else:
+            logger.warning("state.agent is None, cannot update model")
 
     for field_name, value in update_data.items():
         setattr(state.config, field_name, value)

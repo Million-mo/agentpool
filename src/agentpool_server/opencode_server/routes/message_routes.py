@@ -244,6 +244,10 @@ async def _process_message(  # noqa: PLR0915
         else:
             requested_model = f"{provider_id}:{model_id}"
 
+        logger.info(
+            f"Model selection requested: provider={provider_id}, model_id={model_id}, resolved={requested_model}"
+        )
+
         try:
             available_models = await agent.get_available_models()
             is_valid = False
@@ -252,6 +256,7 @@ async def _process_message(  # noqa: PLR0915
                 valid_ids = [m.id_override if m.id_override else m.id for m in available_models]
                 if requested_model in valid_ids:
                     is_valid = True
+                    logger.info(f"Model {requested_model} found in tokonomics models")
 
             # Also check model_variants from manifest
             if (
@@ -260,14 +265,25 @@ async def _process_message(  # noqa: PLR0915
                 and requested_model in state.pool.manifest.model_variants
             ):
                 is_valid = True
+                logger.info(f"Model {requested_model} found in manifest model_variants")
 
             if is_valid:
                 # Store original model to restore later
                 original_model = agent.model_name
+                logger.info(f"Switching model from {original_model} to {requested_model}")
                 await agent.set_model(requested_model)
                 logger.info("Switched to requested model", model=requested_model)
-        except Exception:  # noqa: BLE001
+            else:
+                logger.warning(
+                    f"Model {requested_model} is not valid (not in tokonomics or model_variants)"
+                )
+                if state.pool:
+                    logger.warning(
+                        f"Available model_variants: {list(state.pool.manifest.model_variants.keys())}"
+                    )
+        except Exception as e:  # noqa: BLE001
             # Agent doesn't support model selection, ignore
+            logger.warning(f"Failed to switch model: {e}")
             pass
 
     # --- Stream via adapter ---

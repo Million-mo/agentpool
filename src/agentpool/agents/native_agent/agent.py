@@ -1059,12 +1059,14 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
             await self.update_state(config_id="mode", value_id=mode_id)
 
         elif category_id == "model":
+            self.log.info(f"_set_mode called for model: {mode_id}")
             # Validate model exists (check both tokonomics models and model_variants)
             is_valid = False
             if models := await self.get_available_models():
                 valid_ids = [m.pydantic_ai_id for m in models]
                 if mode_id in valid_ids:
                     is_valid = True
+                    self.log.info(f"Model {mode_id} validated against tokonomics")
             # Also check model_variants from manifest
             if (
                 not is_valid
@@ -1072,12 +1074,18 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
                 and mode_id in self.agent_pool.manifest.model_variants
             ):
                 is_valid = True
+                self.log.info(f"Model {mode_id} validated against model_variants")
             if not is_valid:
+                self.log.warning(
+                    f"Model {mode_id} validation failed. Available variants: {list(self.agent_pool.manifest.model_variants.keys()) if self.agent_pool else 'N/A'}"
+                )
                 raise UnknownModeError(mode_id, valid_ids if models else [])
             # Set the model directly
+            old_model = self._model
             self._model, settings = self._resolve_model_string(mode_id)
             if settings:
                 self.model_settings = settings
+            self.log.info(f"Model changed from {old_model} to {self._model}")
             await self.update_state(config_id="model", value_id=mode_id)
         else:
             raise UnknownCategoryError(category_id, ["mode", "model"])
