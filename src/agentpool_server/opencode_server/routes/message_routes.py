@@ -384,17 +384,83 @@ async def send_message_async(session_id: str, request: MessageRequest, state: St
     """Send a message asynchronously without waiting for response.
 
     Starts the agent processing in the background and returns immediately.
-    Messages to the same session are queued and processed sequentially using
-    per-session locks to prevent race conditions and event interleaving.
+    If the session is busy, the message is queued using agent.queue() and
+    will be processed after the current run completes.
 
     Client should listen to SSE events to get updates.
 
     Returns 204 No Content immediately.
     """
-    # Create background task to process the message
-    # Lock is acquired inside _process_message
+    # 1. Create user message immediately (UI shows QUEUED status)
+    session = await get_or_load_session(state, session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    user_msg_id = identifier.ascending("message", request.message_id)
+    user_message = UserMessage(
+        id=user_msg_id,
+        session_id=session_id,
+        time=TimeCreated.now(),
+        agent=request.agent or "default",
+        model=request.model,
+        variant=request.variant,
+    )
+
+    user_msg_with_parts = MessageWithParts(info=user_message)
+    for part in request.parts:
+        match part:
+            case TextPartInput(text=text):
+                created: Part = user_msg_with_parts.add_text_part(text)
+            case FilePartInput(mime=mime, url=url, filename=filename, source=source):
+                created = user_msg_with_parts.add_file_part(
+                    mime,
+                    url,
+                    filename=filename,
+                    source=source,
+                )
+            case AgentPartInput(name=name, source=source):
+                created = user_msg_with_parts.add_agent_part(name, source=source)
+            case SubtaskPartInput(
+                prompt=subtask_prompt, description=desc, agent=subtask_agent, model=subtask_model
+            ):
+                created = user_msg_with_parts.add_subtask_part(
+                    subtask_prompt,
+                    desc,
+                    subtask_agent,
+                    model=subtask_model,
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+        await state.broadcast_event(PartUpdatedEvent.create(created))
+    state.messages[session_id].append(user_msg_with_parts)
+    await persist_message_to_storage(state, user_msg_with_parts, session_id)
+    await state.broadcast_event(MessageUpdatedEvent.create(user_message))
+
+    # 2. Extract user prompt for queuing/processing
+    user_prompt = await extract_user_prompt_from_parts(
+        request.parts,
+        fs=state.fs,
+        tools=state.agent.tools,
+    )
+
+    # 3. Check if session is busy
+    current_status = state.session_status.get(session_id)
+    is_busy = current_status is not None and current_status.type == "busy"
+
+    if is_busy:
+        # Session is busy → queue the prompt using agent.queue_prompt()
+        # The agent will automatically process queued prompts after current run
+        logger.info("Session busy, queuing prompt via agent.queue_prompt()", session_id=session_id)
+        agent = state.agent
+        if request.agent and state.agent.agent_pool is not None:
+            agent = state.agent.agent_pool.all_agents.get(request.agent, state.agent)
+        agent.queue_prompt(user_prompt)
+        return
+
+    # 4. Session is idle → start background task to process
+    logger.info("Session idle, starting background task", session_id=session_id)
     state.create_background_task(
-        _process_message(session_id, request, state),
+        _process_message_locked(session_id, request, state, user_msg_id, user_msg_with_parts),
         name=f"process_message_{session_id}",
     )
 
