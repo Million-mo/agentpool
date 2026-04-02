@@ -6,6 +6,8 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Self
 
 from pydantic_ai import RunUsage
+from sqlalchemy import insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlmodel import SQLModel, desc, select
 
@@ -153,7 +155,11 @@ class SQLModelProvider(StorageProvider):
         model: str | None = None,
         parent_session_id: str | None = None,
     ) -> None:
-        """Log conversation to database."""
+        """Log conversation to database.
+
+        Uses upsert semantics to handle duplicate session IDs gracefully.
+        If the session already exists, it will be silently ignored.
+        """
         from agentpool_storage.sql_provider.models import Conversation
 
         async with AsyncSession(self.engine) as session:
@@ -170,6 +176,21 @@ class SQLModelProvider(StorageProvider):
                     )
 
             now = start_time or get_now()
+
+            # Use upsert to avoid UNIQUE constraint violations
+            # First check if session already exists
+            existing = await session.execute(
+                select(Conversation).where(Conversation.id == session_id)
+            )
+            if existing.scalar_one_or_none():
+                # Session already exists, skip insertion
+                logger.debug(
+                    "Session already exists, skipping log_session",
+                    session_id=session_id,
+                )
+                return
+
+            # Insert new session
             convo = Conversation(
                 id=session_id,
                 agent_name=node_name,

@@ -51,6 +51,7 @@ from agentpool_storage.opencode_provider import helpers
 
 if TYPE_CHECKING:
     from agentpool.messaging import ChatMessage, TokenCost
+    from agentpool.sessions.models import SessionData
     from agentpool_config.session import SessionQuery
     from agentpool_storage.models import QueryFilters, StatsFilters
 
@@ -417,7 +418,7 @@ class OpenCodeStorageProvider(StorageProvider):
             msg_parts_map = {oc_msg.id: self._read_parts(oc_msg.id) for oc_msg in oc_messages}
             for oc_msg in oc_messages:
                 parts = msg_parts_map.get(oc_msg.id, [])
-                chat_msg = helpers.to_chat_message(oc_msg, parts, session_id)
+                chat_msg = helpers.to_chat_message(msg=oc_msg, parts=parts)
 
                 # Apply filters
                 if query.agents and chat_msg.name not in query.agents:
@@ -489,7 +490,7 @@ class OpenCodeStorageProvider(StorageProvider):
             total_tokens = 0
             for oc_msg in oc_messages:
                 parts = msg_parts_map.get(oc_msg.id, [])
-                chat_msg = helpers.to_chat_message(oc_msg, parts, session_id)
+                chat_msg = helpers.to_chat_message(msg=oc_msg, parts=parts)
                 chat_messages.append(chat_msg)
 
                 # Only assistant messages have tokens and cost
@@ -601,7 +602,7 @@ class OpenCodeStorageProvider(StorageProvider):
         messages: list[ChatMessage[str]] = []
         for oc_msg in self._read_messages(session_id):
             parts = self._read_parts(oc_msg.id)
-            chat_msg = helpers.to_chat_message(oc_msg, parts, session_id)
+            chat_msg = helpers.to_chat_message(msg=oc_msg, parts=parts)
             messages.append(chat_msg)
 
         # Sort by timestamp
@@ -629,7 +630,7 @@ class OpenCodeStorageProvider(StorageProvider):
             for oc_msg in self._read_messages(sid):
                 if oc_msg.id == message_id:
                     parts = self._read_parts(oc_msg.id)
-                    return helpers.to_chat_message(oc_msg, parts, sid)
+                    return helpers.to_chat_message(msg=oc_msg, parts=parts)
 
         return None
 
@@ -662,7 +663,7 @@ class OpenCodeStorageProvider(StorageProvider):
                 if not oc_msg:
                     break
                 parts = self._read_parts(oc_msg.id)
-                chat_msg = helpers.to_chat_message(oc_msg, parts, session_id)
+                chat_msg = helpers.to_chat_message(msg=oc_msg, parts=parts)
                 ancestors.append(chat_msg)
                 current_id = chat_msg.parent_id
             ancestors.reverse()
@@ -748,6 +749,152 @@ class OpenCodeStorageProvider(StorageProvider):
         (self.messages_path / new_session_id).mkdir(parents=True, exist_ok=True)
         (self.parts_path / new_session_id).mkdir(parents=True, exist_ok=True)
         return fork_point_id
+
+    # Session persistence methods (required by StorageProvider base class)
+
+    async def load_session(self, session_id: str) -> SessionData | None:
+        """Load session data by ID.
+
+        Loads session metadata and all associated messages from OpenCode storage.
+
+        Args:
+            session_id: Session identifier
+
+        Returns:
+            SessionData if session was found and loaded, None otherwise
+        """
+        from agentpool.sessions.models import SessionData
+
+        # Find session file
+        session_path = next(
+            (p for sid, p in self._list_sessions() if sid == session_id),
+            None,
+        )
+        if not session_path:
+            return None
+
+        # Read session metadata
+        oc_session = helpers.read_session(session_path)
+        if not oc_session:
+            return None
+
+        # Load all messages for this session
+        messages = await self.get_session_messages(session_id)
+
+        # Get agent name from first message if available, otherwise use default
+        agent_name = messages[0].name if messages else "default"
+
+        return SessionData(
+            session_id=session_id,
+            agent_name=agent_name or "default",
+            project_id=oc_session.project_id,
+            parent_id=oc_session.parent_id,
+            cwd=oc_session.directory,
+            created_at=ms_to_datetime(oc_session.time.created),
+            last_active=ms_to_datetime(oc_session.time.updated),
+            metadata={
+                "title": oc_session.title,
+                "version": oc_session.version,
+            },
+        )
+
+    async def save_session(self, data: SessionData) -> None:
+        """Save or update session data.
+
+        For OpenCode storage, sessions are created implicitly when messages
+        are logged. This method updates session metadata if the session exists.
+
+        Args:
+            data: Session data to save
+        """
+        # Find existing session file
+        session_path = next(
+            (p for sid, p in self._list_sessions() if sid == data.session_id),
+            None,
+        )
+        if not session_path:
+            # Session doesn't exist yet - it will be created when first message is logged
+            logger.debug(
+                "Session not found for save_session, will be created on first message",
+                session_id=data.session_id,
+            )
+            return
+
+        # Read existing session
+        oc_session = helpers.read_session(session_path)
+        if not oc_session:
+            return
+
+        # Update metadata
+        if data.metadata.get("title"):
+            oc_session.title = data.metadata["title"]
+        oc_session.time.updated = datetime_to_ms(get_now())
+
+        # Write back
+        dct = oc_session.model_dump(by_alias=True)
+        session_path.write_text(anyenv.dump_json(dct, indent=True), encoding="utf-8")
+
+    async def delete_session(self, session_id: str) -> bool:
+        """Delete a session and all its messages.
+
+        Args:
+            session_id: Session identifier
+
+        Returns:
+            True if session was deleted, False if not found
+        """
+        import shutil
+
+        # Find session file
+        session_path = next(
+            (p for sid, p in self._list_sessions() if sid == session_id),
+            None,
+        )
+        if not session_path:
+            return False
+
+        # Delete session file
+        session_path.unlink(missing_ok=True)
+
+        # Delete message directory
+        msg_dir = self.messages_path / session_id
+        if msg_dir.exists():
+            shutil.rmtree(msg_dir, ignore_errors=True)
+
+        # Delete parts directory
+        parts_dir = self.parts_path / session_id
+        if parts_dir.exists():
+            shutil.rmtree(parts_dir, ignore_errors=True)
+
+        return True
+
+    async def list_session_ids(
+        self,
+        *,
+        pool_id: str | None = None,
+        agent_name: str | None = None,
+    ) -> list[str]:
+        """List session IDs, optionally filtered.
+
+        Args:
+            pool_id: Filter by pool/manifest ID (not used in OpenCode storage)
+            agent_name: Filter by agent name
+
+        Returns:
+            List of session IDs
+        """
+        session_ids: list[str] = []
+        for session_id, session_path in self._list_sessions():
+            # Check agent filter if specified
+            # Note: OpenCode session files don't store agent name directly,
+            # so we need to check the first message's agent
+            if agent_name:
+                messages = await self.get_session_messages(session_id)
+                first_agent = messages[0].name if messages else None
+                if first_agent != agent_name:
+                    continue
+            session_ids.append(session_id)
+        return session_ids
 
 
 if __name__ == "__main__":

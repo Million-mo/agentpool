@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 from decimal import Decimal
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pydantic import TypeAdapter
@@ -41,6 +42,7 @@ from agentpool_server.opencode_server.models.parts import (
     ToolPart,
     ToolStateCompleted,
 )
+from agentpool_server.opencode_server.models.session import Session
 
 
 if TYPE_CHECKING:
@@ -300,3 +302,69 @@ def to_chat_message(
         messages=pydantic_messages,
         provider_details=provider_details,
     )
+
+
+def read_session(session_path: Path) -> Session | None:
+    """Read a session from a JSON file.
+
+    Args:
+        session_path: Path to the session JSON file
+
+    Returns:
+        Session model if successful, None if file is invalid or missing
+    """
+    import anyenv
+
+    if not isinstance(session_path, Path):
+        session_path = Path(session_path)
+
+    if not session_path.exists():
+        return None
+
+    try:
+        content = session_path.read_text(encoding="utf-8")
+        data = anyenv.load_json(content)
+        return Session.model_validate(data)
+    except (anyenv.JsonLoadError, Exception) as e:
+        logger.warning("Failed to parse session file", path=str(session_path), error=str(e))
+        return None
+
+
+def convert_user_content_to_parts(
+    *,
+    content: str | list[str] | Any,
+    message_id: str,
+    session_id: str,
+    part_counter_start: int = 0,
+) -> list[TextPart]:
+    """Convert UserContent to list of OpenCode TextPart objects.
+
+    Args:
+        content: String or list of strings (UserContent)
+        message_id: ID of the parent message
+        session_id: ID of the session
+        part_counter_start: Starting counter for generating unique part IDs
+
+    Returns:
+        List of TextPart objects
+    """
+    from agentpool.utils.identifiers import ascending
+    from agentpool_server.opencode_server.models.parts import TimeStartEndOptional
+
+    parts: list[TextPart] = []
+    texts = [content] if isinstance(content, str) else content
+
+    for i, text in enumerate(texts):
+        if not text:
+            continue
+        part_id = ascending("part")
+        part = TextPart(
+            id=part_id,
+            message_id=message_id,
+            session_id=session_id,
+            text=text,
+            time=TimeStartEndOptional(start=0),  # Will be set properly by caller
+        )
+        parts.append(part)
+
+    return parts
