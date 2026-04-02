@@ -82,6 +82,7 @@ _PARAM_NAME_MAP: dict[str, str] = {
 def to_mcp_status(status: MCPServerStatus) -> MCPStatus:
     return MCPStatus(
         name=status.name,
+        display_name=status.display_name or status.name,
         status=to_opencode_mcp_status(status.status),
         error=status.error,
     )

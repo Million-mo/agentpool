@@ -87,7 +87,6 @@ from agentpool.agents.claude_code_agent.converters import (
     confirmation_result_to_native,
     convert_mcp_servers_to_sdk_format,
     convert_to_opencode_metadata,
-    
     to_thinking_config,
 )
 from agentpool.agents.claude_code_agent.exceptions import raise_if_usage_limit_reached
@@ -483,6 +482,7 @@ class ClaudeCodeAgent[TDeps = None, TResult = str](BaseAgent[TDeps, TResult]):
                     result[name] = MCPServerStatus(
                         name=name,
                         status=status,
+                        display_name=name,
                         server_type=server.get("type", "unknown"),
                         server_name=server_info.get("name"),
                         server_version=server_info.get("version"),
@@ -491,7 +491,9 @@ class ClaudeCodeAgent[TDeps = None, TResult = str](BaseAgent[TDeps, TResult]):
         # Fallback: report from config
         for name, config in self._mcp_servers.items():
             server_type = config.get("type", "unknown")
-            result[name] = MCPServerStatus(name=name, status="connected", server_type=server_type)
+            result[name] = MCPServerStatus(
+                name=name, display_name=name, status="connected", server_type=server_type
+            )
         return result
 
     def _get_client(
