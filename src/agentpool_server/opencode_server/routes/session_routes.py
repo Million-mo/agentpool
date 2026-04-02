@@ -504,6 +504,12 @@ async def get_or_load_session(state: ServerState, session_id: str) -> Session | 
         )
         for chat_msg in state.agent.conversation.chat_messages
     ]
+    # Create input provider for this session if not exists
+    if session_id not in state.input_providers:
+        input_provider = OpenCodeInputProvider(state, session_id)
+        state.input_providers[session_id] = input_provider
+    # Set input provider on agent to ensure correct session routing
+    state.agent._input_provider = state.input_providers[session_id]
     return session
 
 
