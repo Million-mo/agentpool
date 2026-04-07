@@ -98,15 +98,9 @@ def opencode_command(
                         for name, config in nodes.items()
                     }
 
-        manifest = AgentsManifest.model_validate(resolved.data)
-        manifest = manifest.model_copy(
-            update={
-                "config_file_path": resolved.primary_path,
-                " AgentsManifest.model_validate(被移除",
-                "agents": update_with_path(manifest.agents),
-                "teams": update_with_path(manifest.teams),
-                }
-            )
+         manifest = AgentsManifest.model_validate(resolved.data)
+            except Exception as e:
+            raise t.BadParameter(f"Invalid merged configuration: {e}") from e
             logger.info("Server starting", url=f"http://{host}:{port}")
             await server.run_async()
 
