@@ -165,7 +165,7 @@ class SkillsInstructionProvider(ResourceProvider):
         desc = escape(str(skill.description)) if hasattr(skill, "description") else ""
         path = str(skill.skill_path) if hasattr(skill, "skill_path") else ""
 
-        return f"""  <skill id="{escape(name)}" name="{escape(name)}" description="{desc}">
+        return f"""  <skill_content id="{escape(name)}" name="{escape(name)}">
     <instructions>
       <skill-instruction>
       Base directory for this skill: {path}/
@@ -178,4 +178,4 @@ class SkillsInstructionProvider(ResourceProvider):
       $ARGUMENTS
       </user-request>
     </instructions>
-  </skill>"""
+  </skill_content>"""

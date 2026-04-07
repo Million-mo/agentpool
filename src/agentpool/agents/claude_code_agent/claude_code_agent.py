@@ -919,8 +919,9 @@ class ClaudeCodeAgent[TDeps = None, TResult = str](BaseAgent[TDeps, TResult]):
             assert first_msg.subtype == "init"
             self._sdk_session_id = first_msg.data["session_id"]
             # Merge SDK messages with event queue for real-time tool event streaming
+            agent_ctx = self.get_context(run_ctx=run_ctx, input_provider=input_provider)
             async with (
-                self._tool_bridge.set_run_context(deps, input_provider, prompt=prompts),
+                self._tool_bridge.set_run_context(agent_ctx, prompt=prompts),
                 merge_queue_into_iterator(stream, self._event_queue) as events,
             ):
                 async for event_or_message in events:

@@ -475,8 +475,9 @@ class ACPAgent[TDeps = None](BaseAgent[TDeps, str]):
 
         tool_metadata: dict[str, dict[str, Any]] = {}
         try:
+            agent_ctx = self.get_context(run_ctx=run_ctx, input_provider=input_provider)
             async with (
-                self._tool_bridge.set_run_context(deps, input_provider, prompt=prompts),
+                self._tool_bridge.set_run_context(agent_ctx, prompt=prompts),
                 merge_queue_into_iterator(poll_acp_events(), run_ctx.event_queue) as merged_events,
             ):
                 async for event in merged_events:

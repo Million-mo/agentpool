@@ -401,7 +401,8 @@ class CodexAgent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT])
                 yield event
 
         try:
-            async with self._tool_bridge.set_run_context(deps, input_provider, prompt=prompts):
+            agent_ctx = self.get_context(run_ctx=run_ctx, input_provider=input_provider)
+            async with self._tool_bridge.set_run_context(agent_ctx, prompt=prompts):
                 raw_stream = self._client.turn_stream(
                     self._sdk_session_id,
                     input_items,
