@@ -46,14 +46,6 @@ from acp.schema import (
     Usage,
     UsageUpdate,
 )
-    AgentMessageChunk,
-    AgentPlanUpdate,
-    AgentThoughtChunk,
-    ContentToolCallContent,
-    ToolCallLocation,
-    ToolCallProgress,
-    ToolCallStart,
-)
 from acp.utils import generate_tool_title, infer_tool_kind, to_acp_content_blocks
 from agentpool.agents.events import (
     CompactionEvent,
@@ -947,7 +939,9 @@ class ACPEventConverter:
             case StreamCompleteEvent():
                 header_key = f"`{source_name}`:{depth}"
                 self._subagent_headers.discard(header_key)
-                yield AgentMessageChunk.text(f"\n{indent}---\n", message_id=self._current_message_id)
+                yield AgentMessageChunk.text(
+                    f"\n{indent}---\n", message_id=self._current_message_id
+                )
 
             case (
                 BuiltinToolCallEvent()  # depracated
