@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING, Annotated, Any, Self
@@ -624,9 +625,10 @@ class AgentsManifest(Schema):
                     for name, config in nodes.items()
                 }
 
+            absolute_config_path = os.path.abspath(path_str)
             return agent_def.model_copy(
                 update={
-                    "config_file_path": path_str,
+                    "config_file_path": absolute_config_path,
                     "agents": update_with_path(agent_def.agents),
                     "teams": update_with_path(agent_def.teams),
                 }
