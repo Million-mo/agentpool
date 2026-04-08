@@ -175,36 +175,18 @@ class SQLModelProvider(StorageProvider):
                         session_id=session_id,
                     )
 
-            existing = await session.execute(
-                select(Conversation.id).where(Conversation.id == session_id)  # type: ignore[call-overload]
-            )
-            if existing.scalar_one_or_none() is not None:
-                return
-
             now = start_time or get_now()
 
             # Use upsert to avoid UNIQUE constraint violations
-            # First check if session already exists
-            existing = await session.execute(
-                select(Conversation).where(Conversation.id == session_id)
-            )
-            if existing.scalar_one_or_none():
-                # Session already exists, skip insertion
-                logger.debug(
-                    "Session already exists, skipping log_session",
-                    session_id=session_id,
-                )
-                return
-
-            # Insert new session
-            convo = Conversation(
+            stmt = sqlite_insert(Conversation).values(
                 id=session_id,
                 agent_name=node_name,
                 parent_id=parent_session_id,
+                title=None,
                 start_time=now,
-                model=model,
             )
-            session.add(convo)
+            stmt = stmt.on_conflict_do_nothing(index_elements=["id"])
+            await session.execute(stmt)
             await session.commit()
 
     async def update_session_title(self, session_id: str, title: str) -> None:
