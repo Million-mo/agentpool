@@ -595,7 +595,7 @@ class ClaudeCodeAgent[TDeps = None, TResult = str](BaseAgent[TDeps, TResult]):
 
         # Handle AskUserQuestion specially - this is Claude asking for clarification
         if tool_name == "AskUserQuestion":
-            agent_ctx = self.get_context()
+            agent_ctx = self.get_context(run_ctx=self._current_run_ctx)
             return await handle_clarifying_questions(agent_ctx, input_data, context)
         # Auto-grant if bypassPermissions mode is active
         if self._permission_mode == "bypassPermissions":
@@ -631,7 +631,10 @@ class ClaudeCodeAgent[TDeps = None, TResult = str](BaseAgent[TDeps, TResult]):
             display_name = _strip_mcp_prefix(tool_name)
             self.log.debug("Permission request", tool_name=display_name, tool_call_id=tool_call_id)
             ctx = self.get_context(
-                tool_call_id=tool_call_id, tool_input=input_data, tool_name=tool_name
+                tool_call_id=tool_call_id,
+                tool_input=input_data,
+                tool_name=tool_name,
+                run_ctx=self._current_run_ctx,
             )
             result = await self._input_provider.get_tool_confirmation(
                 context=ctx,
@@ -890,6 +893,8 @@ class ClaudeCodeAgent[TDeps = None, TResult = str](BaseAgent[TDeps, TResult]):
         model_messages: list[ModelResponse | ModelRequest] = [request]
         current_response_parts: list[TextPart | ThinkingPart | ToolCallPart] = []
         pending_tool_calls: dict[str, ToolUseBlock] = {}
+        # tool_use_id -> display tool name for claude_message_to_events when ToolResult is alone
+        tool_call_display_names: dict[str, str] = {}
         # Track tool calls that already had ToolCallStartEvent emitted (via StreamEvent)
         emitted_tool_starts: set[str] = set()
         tool_accumulator = ToolCallAccumulator()
@@ -954,6 +959,7 @@ class ClaudeCodeAgent[TDeps = None, TResult = str](BaseAgent[TDeps, TResult]):
                                 case ToolUseBlock(id=tc_id, name=name, input=input_data):
                                     pending_tool_calls[tc_id] = block
                                     display_name = _strip_mcp_prefix(name)
+                                    tool_call_display_names[tc_id] = display_name
                                     tool_call_part = ToolCallPart(
                                         tool_name=display_name, args=input_data, tool_call_id=tc_id
                                     )
@@ -1090,6 +1096,8 @@ class ClaudeCodeAgent[TDeps = None, TResult = str](BaseAgent[TDeps, TResult]):
                                 tc_id = content_block.get("id", "")
                                 raw_tool_name = content_block.get("name", "")
                                 tool_name = _strip_mcp_prefix(raw_tool_name)
+                                if tc_id:
+                                    tool_call_display_names[tc_id] = tool_name
                                 tool_accumulator.start(tc_id, tool_name)
                                 # Track for permission matching - callback uses raw name
                                 self._pending_tool_call_ids[raw_tool_name] = tc_id
@@ -1144,7 +1152,11 @@ class ClaudeCodeAgent[TDeps = None, TResult = str](BaseAgent[TDeps, TResult]):
                     # Convert to events and yield
                     # (skip AssistantMessage - already streamed via StreamEvent)
                     if not isinstance(message, AssistantMessage):
-                        for event in claude_message_to_events(message, agent_name=self.name):
+                        async for event in claude_message_to_events(
+                            message,
+                            agent_name=self.name,
+                            tool_names_by_id=tool_call_display_names,
+                        ):
                             yield event
 
                     # Check for result (end of response) and capture usage info
