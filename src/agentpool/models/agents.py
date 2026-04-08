@@ -265,6 +265,7 @@ class NativeAgentConfig(BaseAgentConfig):
         event_handlers: Sequence[AnyEventHandlerType] | None = None,
         input_provider: InputProvider | None = None,
         pool: AgentPool[Any] | None = None,
+        # type: ignore[valid-type] - TDeps is a type variable, mypy doesn't recognize it as valid type
         deps_type: type[TDeps] | None = None,  # type: ignore[valid-type]
     ) -> Agent[TDeps, Any]:
         from agentpool.agents.native_agent import Agent

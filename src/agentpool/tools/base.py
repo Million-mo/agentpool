@@ -181,7 +181,9 @@ class Tool[TOutputType = Any]:
                 description=schema_override.get("description", tool_def.description),
                 parameters_json_schema=schema_override.get(
                     "parameters", tool_def.parameters_json_schema
-                ),
+                )
+                if isinstance(schema_override.get("parameters"), dict)
+                else tool_def.parameters_json_schema,
             )
             return new_def
 
@@ -231,6 +233,8 @@ class Tool[TOutputType = Any]:
 
         # Try primary path with pydantic_ai.function_schema
         try:
+            # pydantic-ai function_schema is internal API but needed for schema generation
+            # This is the standard way to generate schemas for tools in pydantic-ai
             from pydantic_ai._function_schema import (  # type: ignore[attr-defined]
                 GenerateJsonSchema,
                 function_schema,
@@ -280,6 +284,7 @@ class Tool[TOutputType = Any]:
             )
 
             # Use schemez to generate JSON schema
+            # type: ignore is needed because schemez is not strictly typed
             schema = schemez.create_schema(  # type: ignore
                 func,
                 name_override=self.name,
@@ -289,7 +294,9 @@ class Tool[TOutputType = Any]:
 
             # Return only the parameters part (the "object" schema)
             # Use model_dump - schemez.FunctionSchema has this method (pydantic-compatible)
+            # type: ignore[attr-defined] is needed because schemez is a third-party library
             schema_dump = getattr(schema, "model_dump")()  # noqa: B009, type: ignore[attr-defined]
+            # type: ignore[no-any-return] is needed because mypy can't infer the return type
             return schema_dump["parameters"]  # type: ignore[no-any-return]
         else:
             return schema.json_schema

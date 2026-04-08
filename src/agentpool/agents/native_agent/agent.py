@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from types import TracebackType
 
     from exxec import ExecutionEnvironment
-    from pydantic_ai import BaseToolCallPart, UsageLimits, UserContent
+    from pydantic_ai import AgentBuiltinTool, BaseToolCallPart, UsageLimits, UserContent
     from pydantic_ai.models import Model
     from pydantic_ai.output import OutputSpec
     from pydantic_ai.settings import ModelSettings
@@ -145,7 +145,7 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
         env: ExecutionEnvironment | StrPath | None = None,
         hooks: AgentHooks | None = None,
         tool_confirmation_mode: ToolConfirmationMode = "per_tool",
-        builtin_tools: Sequence[AbstractBuiltinTool] | None = None,  # type: ignore[name-defined]
+        builtin_tools: Sequence[AgentBuiltinTool] | None = None,
         usage_limits: UsageLimits | None = None,
         providers: Sequence[ProviderType] | None = None,
         commands: Sequence[BaseCommand] | None = None,
