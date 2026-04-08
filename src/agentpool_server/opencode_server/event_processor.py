@@ -25,6 +25,7 @@ from pydantic_ai.messages import (
 from agentpool.agents.events import (
     FileContentItem,
     LocationContentItem,
+    RunStartedEvent,
     SpawnSessionStart,
     StreamCompleteEvent,
     SubAgentEvent,
@@ -52,6 +53,7 @@ from agentpool_server.opencode_server.models import (
     MessageWithParts,
     PartDeltaEvent,
     PartUpdatedEvent,
+    SessionStatusEvent,
     TimeCreated,
     TokenCache,
     Tokens,
@@ -185,6 +187,12 @@ class EventProcessor:
             case SpawnSessionStart() as spawn_event:
                 async for e in self._process_spawn_start(spawn_event, ctx):
                     yield e
+
+            case RunStartedEvent() as run_started_event:
+                yield SessionStatusEvent.create(
+                    session_id=run_started_event.session_id,
+                    status_type="busy",
+                )
 
     def _process_text_start(
         self,
