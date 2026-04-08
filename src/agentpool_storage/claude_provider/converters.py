@@ -17,7 +17,6 @@ from clawd_code_sdk.storage.models import (
     ClaudeUserEntry,
     ClaudeUserMessage,
 )
-from pydantic_ai import RunUsage
 from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
@@ -27,7 +26,7 @@ from pydantic_ai.messages import (
     ToolReturnPart,
     UserPromptPart,
 )
-from pydantic_ai.usage import RequestUsage
+from pydantic_ai.usage import RequestUsage, RunUsage
 
 from agentpool.messaging import ChatMessage, TokenCost
 from agentpool.utils.time_utils import get_now, parse_iso_timestamp

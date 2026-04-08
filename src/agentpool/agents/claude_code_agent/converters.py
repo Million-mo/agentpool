@@ -52,7 +52,7 @@ from agentpool_server.opencode_server.models.tool_metadata import (
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import AsyncIterator, Iterator, Sequence
 
     from clawd_code_sdk import PermissionResult, ThinkingConfig
     from clawd_code_sdk.models import (
@@ -512,3 +512,55 @@ def build_sdk_hooks_from_agent_hooks(
         result["PostToolUse"] = [HookMatcher(matcher="*", hooks=[on_post_tool_use])]  # type: ignore[list-item]
 
     return result
+
+
+def to_claude_system_prompt(prompt: str | None) -> str | None:
+    """Convert agent system prompt to Claude SDK format.
+
+    Args:
+        prompt: System prompt string or None
+
+    Returns:
+        Formatted system prompt for Claude SDK, or None if input is None
+    """
+    return prompt
+
+
+def to_output_format(output_type: type) -> dict[str, Any] | None:
+    """Convert output type to Claude SDK output format.
+
+    Args:
+        output_type: Type hint for structured output
+
+    Returns:
+        Output format dict for Claude SDK, or None for str or None
+    """
+    if output_type is None or output_type is str:
+        return None
+    # For structured output, Claude SDK expects JSON schema
+    return {"type": "json_object"}
+
+
+async def claude_message_to_events(
+    message: Any,
+    agent_name: str,
+) -> AsyncIterator[Any]:
+    """Convert Claude SDK messages to agentpool events.
+
+    Args:
+        message: SDK message (UserMessage, SystemMessage, etc.)
+        agent_name: Name of the agent
+
+    Yields:
+        List of agentpool events
+    """
+    from pydantic_ai import TextPartDelta
+
+    from agentpool.agents.events import PartDeltaEvent
+
+    # Process based on message type
+    if hasattr(message, "content") and isinstance(message.content, str):
+        # Text message converts to PartDeltaEvent with TextPartDelta
+        text_delta = TextPartDelta(content_delta=message.content)
+        yield PartDeltaEvent(index=0, delta=text_delta)
+    # Add more message type handlers as needed

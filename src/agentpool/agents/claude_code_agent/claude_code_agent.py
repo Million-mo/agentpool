@@ -70,7 +70,6 @@ from pydantic_ai import (
     ModelRequest,
     ModelResponse,
     PartEndEvent,
-    RunUsage,
     TextPart,
     TextPartDelta,
     ThinkingPart,
@@ -80,18 +79,21 @@ from pydantic_ai import (
     ToolReturnPart,
     UserPromptPart,
 )
-from pydantic_ai.usage import RequestUsage
+from pydantic_ai.usage import RequestUsage, RunUsage
 
 from agentpool.agents.base_agent import BaseAgent
-from agentpool.agents.context import AgentRunContext
 from agentpool.agents.claude_code_agent.converters import (
+    claude_message_to_events,
     confirmation_result_to_native,
     convert_mcp_servers_to_sdk_format,
     convert_to_opencode_metadata,
+    to_claude_system_prompt,
+    to_output_format,
     to_thinking_config,
 )
 from agentpool.agents.claude_code_agent.exceptions import raise_if_usage_limit_reached
 from agentpool.agents.claude_code_agent.static_info import models_to_category
+from agentpool.agents.context import AgentRunContext
 from agentpool.agents.events import (
     PartDeltaEvent,
     PartStartEvent,
@@ -145,6 +147,7 @@ if TYPE_CHECKING:
         ClaudeCodeCommandInfo,
         ClaudeCodeServerInfo,
     )
+    from agentpool.agents.context import AgentRunContext
     from agentpool.agents.events import RichAgentStreamEvent
     from agentpool.agents.modes import ModeCategory
     from agentpool.common_types import AnyEventHandlerType, StrPath
@@ -351,10 +354,8 @@ class ClaudeCodeAgent[TDeps = None, TResult = str](BaseAgent[TDeps, TResult]):
         self._hook_manager = ClaudeCodeHookManager(
             agent=self,
             agent_hooks=hooks,
-            event_queue=self._event_queue,
-            get_session_id=lambda: self.session_id,
-            injection_manager=self._injection_manager,
             set_mode=self._set_mode,
+            env=self.env,
         )
 
     @classmethod
@@ -922,7 +923,7 @@ class ClaudeCodeAgent[TDeps = None, TResult = str](BaseAgent[TDeps, TResult]):
             agent_ctx = self.get_context(run_ctx=run_ctx, input_provider=input_provider)
             async with (
                 self._tool_bridge.set_run_context(agent_ctx, prompt=prompts),
-                merge_queue_into_iterator(stream, self._event_queue) as events,
+                merge_queue_into_iterator(stream, run_ctx.event_queue) as events,
             ):
                 async for event_or_message in events:
                     # Check if it's a queued event (from tools via EventEmitter)
@@ -1385,7 +1386,11 @@ class ClaudeCodeAgent[TDeps = None, TResult = str](BaseAgent[TDeps, TResult]):
         without loading full message content.
         """
         # Use fast metadata listing - avoids parsing all message content
-        metadata_list = self._claude_storage.list_session_metadata(project_path=cwd)
+        # Run in thread pool to avoid blocking event loop
+        metadata_list = await asyncio.to_thread(
+            self._claude_storage.list_session_metadata,
+            project_path=cwd,
+        )
         result: list[SessionData] = []
         default_cwd = str(self.env.cwd or Path.cwd())
         for meta in metadata_list:
