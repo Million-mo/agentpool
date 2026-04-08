@@ -12,12 +12,7 @@ from anyenv.signals import Signal
 from pydantic import BaseModel
 
 from agentpool.log import get_logger
-from agentpool.messaging import ChatMessage
 from agentpool.utils.identifiers import generate_session_id
-from agentpool.utils.tasks import TaskManager
-from agentpool_config.session import SessionQuery
-from agentpool_config.storage import StorageConfig
-from agentpool.messaging import ChatMessage
 from agentpool.utils.tasks import TaskManager
 from agentpool_config.session import SessionQuery
 from agentpool_config.storage import StorageConfig
@@ -283,81 +278,6 @@ class StorageManager:
             prompt=initial_prompt,
             on_title_generated=on_title_generated,
         )
-
-    @method_spawner
-    async def save_session(self, data: SessionData) -> None:
-        """Save or update session data in the primary provider.
-
-        Args:
-            data: Session data to persist
-        """
-        provider = self.get_project_provider()  # Reuses first provider
-        await provider.save_session(data)
-        self._session_logged.add(data.session_id)
-
-    @method_spawner
-    async def load_session(self, session_id: str) -> SessionData | None:
-        """Load session data by ID.
-
-        Args:
-            session_id: Session identifier
-
-        Returns:
-            Session data if found, None otherwise
-        """
-        provider = self.get_project_provider()
-        return await provider.load_session(session_id)
-
-    @method_spawner
-    async def delete_session(self, session_id: str) -> bool:
-        """Delete a session from all providers.
-
-        Args:
-            session_id: Session identifier
-
-        Returns:
-            True if session was deleted from at least one provider
-        """
-        deleted = False
-        for provider in self.providers:
-            try:
-                if await provider.delete_session(session_id):
-                    deleted = True
-            except Exception:
-                logger.exception(
-                    "Error deleting session",
-                    provider=provider.__class__.__name__,
-                    session_id=session_id,
-                )
-        return deleted
-
-    @method_spawner
-    async def list_session_ids(
-        self,
-        pool_id: str | None = None,
-        agent_name: str | None = None,
-    ) -> list[str]:
-        """List session IDs, optionally filtered.
-
-        Args:
-            pool_id: Filter by pool/manifest ID
-            agent_name: Filter by agent name
-
-        Returns:
-            List of session IDs
-        """
-        provider = self.get_project_provider()
-        return await provider.list_session_ids(pool_id=pool_id, agent_name=agent_name)
-
-    async def save_session(self, data: SessionData) -> None:
-        """Save or update session data in the primary provider.
-
-        Args:
-            data: Session data to persist
-        """
-        provider = self.get_project_provider()
-        await provider.save_session(data)
-        self._session_logged.add(data.session_id)
 
     @method_spawner
     async def log_command(
