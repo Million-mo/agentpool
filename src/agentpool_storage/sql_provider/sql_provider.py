@@ -228,6 +228,7 @@ class SQLModelProvider(StorageProvider):
             if dialect_name in ("sqlite", "postgresql") and hasattr(
                 stmt, "on_conflict_do_nothing"
             ):
+                # Conversation.id is the primary key (indexed); required for ON CONFLICT target.
                 stmt = stmt.on_conflict_do_nothing(index_elements=["id"])
             elif dialect_name in ("mysql", "mariadb") and hasattr(
                 stmt, "on_duplicate_key_update"

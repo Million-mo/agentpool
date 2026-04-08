@@ -175,17 +175,24 @@ class Tool[TOutputType = Any]:
             """Apply schema_override values to tool definition."""
             from pydantic_ai.tools import ToolDefinition
 
-            # Create new ToolDefinition with overridden values
-            new_def = ToolDefinition(
+            raw_params = schema_override.get("parameters")
+            if raw_params is not None and not isinstance(raw_params, dict):
+                logger.warning(
+                    "schema_override.parameters must be a dict; keeping original parameters schema",
+                    tool=schema_override.get("name", tool_def.name),
+                    parameters_type=type(raw_params).__name__,
+                )
+                parameters_json_schema = tool_def.parameters_json_schema
+            elif isinstance(raw_params, dict):
+                parameters_json_schema = raw_params
+            else:
+                parameters_json_schema = tool_def.parameters_json_schema
+
+            return ToolDefinition(
                 name=schema_override.get("name", tool_def.name),
                 description=schema_override.get("description", tool_def.description),
-                parameters_json_schema=schema_override.get(
-                    "parameters", tool_def.parameters_json_schema
-                )
-                if isinstance(schema_override.get("parameters"), dict)
-                else tool_def.parameters_json_schema,
+                parameters_json_schema=parameters_json_schema,
             )
-            return new_def
 
         return prepare_override
 

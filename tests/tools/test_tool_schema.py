@@ -928,6 +928,47 @@ async def test_prepare_with_schema_override() -> None:
     )
 
 
+@pytest.mark.asyncio
+async def test_schema_override_parameters_non_dict_keeps_original_schema() -> None:
+    """PR #10: non-dict schema_override.parameters falls back; dict override still applies."""
+    from unittest.mock import MagicMock
+
+    from pydantic_ai import RunContext
+    from pydantic_ai.tools import ToolDefinition
+
+    original_schema = {"type": "object", "properties": {"x": {"type": "integer"}}}
+    tool_def = ToolDefinition(
+        name="orig",
+        description="desc",
+        parameters_json_schema=original_schema,
+    )
+
+    bad_override: OpenAIFunctionDefinition = {
+        "name": "bad_params_tool",
+        "parameters": "not-a-dict",
+    }
+
+    def tool_fn(x: int) -> str:
+        return str(x)
+
+    bad_tool = FunctionTool.from_callable(tool_fn, schema_override=bad_override)
+    prepare_bad = bad_tool._get_effective_prepare()
+    assert prepare_bad is not None
+    ctx = MagicMock(spec=RunContext)
+    out_bad = await prepare_bad(ctx, tool_def)
+    assert out_bad.parameters_json_schema == original_schema
+
+    good_override: OpenAIFunctionDefinition = {
+        "name": "good",
+        "parameters": {"type": "object", "properties": {"y": {"type": "string"}}},
+    }
+    good_tool = FunctionTool.from_callable(tool_fn, schema_override=good_override)
+    prepare_good = good_tool._get_effective_prepare()
+    assert prepare_good is not None
+    out_good = await prepare_good(ctx, tool_def)
+    assert out_good.parameters_json_schema == good_override["parameters"]
+
+
 if __name__ == "__main__":
     import pytest
 
