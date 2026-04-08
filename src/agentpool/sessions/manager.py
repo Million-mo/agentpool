@@ -66,8 +66,22 @@ class SessionManager:
         child_session_id = generate_session_id()
 
         if self.store:
-            # Store the parent-child relationship
-            pass  # Implementation depends on storage provider
+            from agentpool.sessions.models import SessionData
+            from agentpool.utils.time_utils import get_now
+
+            # Create session data with parent-child relationship
+            session_data = SessionData(
+                session_id=child_session_id,
+                agent_name=agent_name,
+                parent_id=parent_session_id,
+                pool_id=self.pool.manifest.name if self.pool.manifest else None,
+                cwd=None,
+                created_at=get_now(),
+                last_active=get_now(),
+            )
+
+            # Persist to store
+            await self.store.save(session_data)
 
         logger.debug(
             "Created child session",

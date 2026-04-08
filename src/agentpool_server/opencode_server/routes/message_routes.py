@@ -413,21 +413,7 @@ async def _process_message_locked(  # noqa: PLR0915
         on_file_paths=lambda paths: _warmup_lsp_for_files(state, paths),
     )
 
-    async def run_with_model():
-        try:
-            iterator = agent.run_stream(user_prompt, session_id=session_id)
-            async for oc_event in adapter.process_stream(iterator):
-                await state.broadcast_event(oc_event)
-        finally:
-            # Restore original model if we changed it
-            if original_model is not None:
-                with contextlib.suppress(Exception):
-                    await agent.set_model(original_model)
-                    logger.info("Restored original model", model=original_model)
-
-    await run_with_model()
-
-    async def run_with_model():
+    async def run_with_model() -> None:
         try:
             iterator = agent.run_stream(*user_prompt, session_id=session_id)
             async for oc_event in adapter.process_stream(iterator):
