@@ -146,14 +146,14 @@ def test_hook_manager_with_env():
     """Test ClaudeCodeHookManager with execution environment."""
 
     from agentpool.agents.claude_code_agent.hook_manager import ClaudeCodeHookManager
-    from exxec import ExecutionEnvironment
+    from exxec.mock_provider import MockExecutionEnvironment
 
     class MockAgent:
         name = "test_agent"
 
     agent = MockAgent()
 
-    env = ExecutionEnvironment()
+    env = MockExecutionEnvironment()
 
     hook_manager = ClaudeCodeHookManager(
         agent=agent,

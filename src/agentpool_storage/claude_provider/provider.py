@@ -58,8 +58,6 @@ def write_entry(session_path: Path, entry: ClaudeJSONLEntry) -> None:
     session_path.parent.mkdir(parents=True, exist_ok=True)
     with session_path.open("a", encoding="utf-8") as f:
         f.write(entry.model_dump_json(by_alias=True) + "\n")
-
-
 def _build_tool_id_mapping(entries: list[ClaudeJSONLEntry]) -> dict[str, str]:
     """Build a mapping from tool_call_id to tool_name from assistant entries."""
     mapping: dict[str, str] = {}

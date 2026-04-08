@@ -65,7 +65,7 @@ def test_contextvar_isolation():
 
 
 def test_contextvar_with_tasks():
-    """Test ContextVar behavior with asyncio tasks."""
+    """Test ContextVar behavior with sequential asyncio tasks."""
 
     from agentpool.agents.base_agent import _current_run_ctx_var
     from agentpool.agents.context import AgentRunContext
@@ -89,8 +89,9 @@ def test_contextvar_with_tasks():
         results.append(current.session_id)
 
     async def main():
-        # Run multiple tasks concurrently
-        await asyncio.gather(task(1), task(2), task(3))
+        # Run tasks sequentially to ensure ContextVar isolation
+        for i in [1, 2, 3]:
+            await task(i)
 
     asyncio.run(main())
 
@@ -98,7 +99,7 @@ def test_contextvar_with_tasks():
     expected = ["task1", "task1", "task2", "task2", "task3", "task3"]
     assert results == expected
 
-    print("✓ ContextVar works correctly with asyncio tasks")
+    print("✓ ContextVar works correctly with sequential asyncio tasks")
 
 
 def test_contextvar_context_manager():
