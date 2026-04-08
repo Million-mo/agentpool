@@ -548,19 +548,83 @@ async def claude_message_to_events(
     """Convert Claude SDK messages to agentpool events.
 
     Args:
-        message: SDK message (UserMessage, SystemMessage, etc.)
+        message: SDK message (UserMessage, SystemMessage, AssistantMessage, etc.)
         agent_name: Name of the agent
 
     Yields:
-        List of agentpool events
+        List of agentpool events (PartDeltaEvent, ToolCallStartEvent, ToolCallCompleteEvent, etc.)
     """
+    from clawd_code_sdk.models.content_blocks import (
+        TextBlock,
+        ThinkingBlock,
+        ToolResultBlock,
+        ToolUseBlock,
+    )
     from pydantic_ai import TextPartDelta
 
-    from agentpool.agents.events import PartDeltaEvent
+    from agentpool.agents.events import (
+        PartDeltaEvent,
+        ToolCallCompleteEvent,
+        ToolCallStartEvent,
+    )
 
-    # Process based on message type
-    if hasattr(message, "content") and isinstance(message.content, str):
-        # Text message converts to PartDeltaEvent with TextPartDelta
-        text_delta = TextPartDelta(content_delta=message.content)
-        yield PartDeltaEvent(index=0, delta=text_delta)
-    # Add more message type handlers as needed
+    # Process based on message type and content structure
+    if hasattr(message, "content"):
+        content = message.content
+
+        # Handle string content (legacy/simple case)
+        if isinstance(content, str):
+            text_delta = TextPartDelta(content_delta=content)
+            yield PartDeltaEvent(index=0, delta=text_delta)
+            return
+
+        # Handle list of content blocks
+        if isinstance(content, list):
+            for block in content:
+                match block:
+                    case TextBlock(text=text) if text:
+                        # Text content -> PartDeltaEvent
+                        text_delta = TextPartDelta(content_delta=text)
+                        yield PartDeltaEvent(index=0, delta=text_delta)
+
+                    case ThinkingBlock(thinking=thinking) if thinking:
+                        # Thinking content -> PartDeltaEvent (wrapped in thinking tags for display)
+                        thinking_text = f"<thinking>\n{thinking}\n</thinking>"
+                        thinking_delta = TextPartDelta(content_delta=thinking_text)
+                        yield PartDeltaEvent(index=0, delta=thinking_delta)
+
+                    case ToolUseBlock(id=tool_id, name=name, input=input_data) if tool_id and name:
+                        # Tool use -> ToolCallStartEvent
+                        yield ToolCallStartEvent(
+                            tool_call_id=tool_id,
+                            tool_name=name,
+                            title=f"Calling tool: {name}",
+                            kind="other",
+                            raw_input=input_data if isinstance(input_data, dict) else {},
+                            content=[],
+                            locations=[],
+                        )
+
+                    case ToolResultBlock(
+                        tool_use_id=tool_id, content=result_content, is_error=is_error
+                    ) if tool_id:
+                        # Tool result -> ToolCallCompleteEvent
+                        # Normalize content to a string or dict
+                        normalized_result: Any
+                        if isinstance(result_content, str):
+                            normalized_result = result_content
+                        elif isinstance(result_content, list):
+                            # Convert list of dicts to a more structured format
+                            normalized_result = result_content
+                        else:
+                            normalized_result = result_content or ""
+
+                        yield ToolCallCompleteEvent(
+                            tool_name="tool",  # Tool name not in ToolResultBlock
+                            tool_call_id=tool_id,
+                            tool_input={},
+                            tool_result=normalized_result,
+                            agent_name=agent_name,
+                            message_id="",  # Not available in this context
+                            metadata={"is_error": is_error} if is_error else None,
+                        )

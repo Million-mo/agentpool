@@ -194,6 +194,95 @@ def test_converter_imports():
     print("✓ All converter functions are importable")
 
 
+@pytest.mark.asyncio
+async def test_claude_message_to_events_content_blocks():
+    """Test claude_message_to_events with different content block types."""
+
+    from agentpool.agents.claude_code_agent.converters import claude_message_to_events
+    from agentpool.agents.events import (
+        PartDeltaEvent,
+        ToolCallStartEvent,
+        ToolCallCompleteEvent,
+    )
+    from clawd_code_sdk.models.content_blocks import (
+        TextBlock,
+        ThinkingBlock,
+        ToolUseBlock,
+        ToolResultBlock,
+    )
+
+    # Test message with TextBlock
+    class MockTextMessage:
+        content = [TextBlock(text="Hello, world!")]
+
+    events = []
+    async for event in claude_message_to_events(MockTextMessage(), agent_name="test_agent"):
+        events.append(event)
+
+    assert len(events) == 1
+    assert isinstance(events[0], PartDeltaEvent)
+    assert events[0].delta.content_delta == "Hello, world!"
+
+    # Test message with ThinkingBlock
+    class MockThinkingMessage:
+        content = [ThinkingBlock(thinking="This is thinking content", signature="sig")]
+
+    events = []
+    async for event in claude_message_to_events(MockThinkingMessage(), agent_name="test_agent"):
+        events.append(event)
+
+    assert len(events) == 1
+    assert isinstance(events[0], PartDeltaEvent)
+    assert "<thinking>" in events[0].delta.content_delta
+    assert "This is thinking content" in events[0].delta.content_delta
+
+    # Test message with ToolUseBlock
+    class MockToolUseMessage:
+        content = [ToolUseBlock(id="tool_123", name="bash", input={"command": "ls -la"})]
+
+    events = []
+    async for event in claude_message_to_events(MockToolUseMessage(), agent_name="test_agent"):
+        events.append(event)
+
+    assert len(events) == 1
+    assert isinstance(events[0], ToolCallStartEvent)
+    assert events[0].tool_name == "bash"
+    assert events[0].tool_call_id == "tool_123"
+    assert events[0].raw_input == {"command": "ls -la"}
+
+    # Test message with ToolResultBlock
+    class MockToolResultMessage:
+        content = [
+            ToolResultBlock(tool_use_id="tool_123", content="Command output", is_error=False)
+        ]
+
+    events = []
+    async for event in claude_message_to_events(MockToolResultMessage(), agent_name="test_agent"):
+        events.append(event)
+
+    assert len(events) == 1
+    assert isinstance(events[0], ToolCallCompleteEvent)
+    assert events[0].tool_call_id == "tool_123"
+    assert events[0].tool_result == "Command output"
+
+    # Test message with multiple content blocks
+    class MockMixedMessage:
+        content = [
+            TextBlock(text="Thinking: "),
+            ThinkingBlock(thinking="Need to check something"),
+            TextBlock(text="\n\nResult: "),
+        ]
+
+    events = []
+    async for event in claude_message_to_events(MockMixedMessage(), agent_name="test_agent"):
+        events.append(event)
+
+    assert len(events) == 3
+    assert all(isinstance(e, PartDeltaEvent) for e in events)
+
+    print("✓ claude_message_to_events handles different content block types correctly")
+
+
 if __name__ == "__main__":
     print("Testing missing function implementations...\n")
     test_to_claude_system_prompt_exists()
