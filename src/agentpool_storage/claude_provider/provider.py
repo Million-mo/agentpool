@@ -330,6 +330,14 @@ def _conversation_title_from_messages(
     return ""
 
 
+def _fallback_title_from_session_path(session_path: Path) -> str:
+    """Fallback title from the session file stem when messages yield no title."""
+    stem = session_path.stem
+    if not stem:
+        return ""
+    return stem.replace("_", " ").title()
+
+
 class ClaudeStorageProvider(StorageProvider):
     """Storage provider that reads/writes Claude Code's native format.
 
@@ -568,6 +576,8 @@ class ClaudeStorageProvider(StorageProvider):
                 else None
             )
             title = _conversation_title_from_messages(parsed.messages)
+            if not title:
+                title = _fallback_title_from_session_path(parsed.path)
             conv_data = ConversationData(
                 id=parsed.session_id,
                 agent=parsed.messages[0].name or "claude",
