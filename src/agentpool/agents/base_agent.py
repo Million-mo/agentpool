@@ -658,9 +658,8 @@ class BaseAgent[TDeps = None, TResult = str](MessageNode[TDeps, TResult]):
         # Queue the initial prompts
         run_ctx.injection_manager.insert_queued(prompts)
 
+        token = _current_run_ctx_var.set(run_ctx)
         try:
-            # Set current run context for external access (e.g., tools calling queue_prompt)
-            _current_run_ctx_var.set(run_ctx)
             # Process queued prompts until queue is empty
             while run_ctx.injection_manager.has_queued() and not run_ctx.cancelled:
                 current_prompts = run_ctx.injection_manager.pop_queued()
@@ -685,11 +684,7 @@ class BaseAgent[TDeps = None, TResult = str](MessageNode[TDeps, TResult]):
                 # After each iteration, flush unconsumed injections to queue
                 run_ctx.injection_manager.flush_pending_to_queue()
         finally:
-            # Clean up per-call injection manager (isolated from other concurrent calls)
-            # Only clear _current_run_ctx if it still points to this run (prevents
-            # affecting other concurrent calls that may have started after this one)
-            if _current_run_ctx_var.get() is run_ctx:
-                _current_run_ctx_var.set(None)
+            _current_run_ctx_var.reset(token)
             run_ctx.injection_manager.clear()
 
     async def _run_stream_once(

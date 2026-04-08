@@ -166,11 +166,11 @@ class SQLModelProvider(StorageProvider):
 
         if dialect_name == "sqlite":
             return sqlite_insert(Conversation)
-        if pg_insert is not None:
+        if dialect_name == "postgresql" and pg_insert is not None:
             return pg_insert(Conversation)
-        if mysql_insert is not None:
+        if dialect_name in ("mysql", "mariadb") and mysql_insert is not None:
             return mysql_insert(Conversation)
-        # Generic fallback without conflict handling
+        # Generic fallback (or dialect without dialect-specific insert helper)
         return insert(Conversation)
 
     async def log_session(

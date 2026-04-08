@@ -578,8 +578,9 @@ async def claude_message_to_events(
             yield PartDeltaEvent(index=0, delta=text_delta)
             return
 
-        # Handle list of content blocks
+        # Handle list of content blocks (map tool_use_id -> name from prior ToolUse in this message)
         if isinstance(content, list):
+            tool_names_by_id: dict[str, str] = {}
             for block in content:
                 match block:
                     case TextBlock(text=text) if text:
@@ -593,6 +594,7 @@ async def claude_message_to_events(
                         yield PartDeltaEvent(index=0, delta=thinking_delta)
 
                     case ToolUseBlock(id=tool_id, name=name, input=input_data) if tool_id and name:
+                        tool_names_by_id[tool_id] = name
                         # Tool use -> ToolCallStartEvent
                         yield ToolCallStartEvent(
                             tool_call_id=tool_id,
@@ -619,7 +621,7 @@ async def claude_message_to_events(
                             normalized_result = result_content or ""
 
                         yield ToolCallCompleteEvent(
-                            tool_name="tool",  # Tool name not in ToolResultBlock
+                            tool_name=tool_names_by_id.get(tool_id, "tool"),
                             tool_call_id=tool_id,
                             tool_input={},
                             tool_result=normalized_result,
