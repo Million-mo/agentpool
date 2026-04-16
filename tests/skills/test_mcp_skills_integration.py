@@ -27,7 +27,7 @@ def mock_agent_context():
     ctx.pool.skills.list_skills.return_value = []
     ctx.pool.skills.get_skill_instructions.return_value = ""
 
-    # Mock MCP-based skills (test both hyphen and underscore formats)
+    # Mock MCP-based skills (underscores are normalized to hyphens per Agent Skills Spec)
     mcp_skill_hyphen = Skill(
         name="systematic-troubleshooting",
         description="Systematic troubleshooting guide",
@@ -35,17 +35,18 @@ def mock_agent_context():
         instructions="# Troubleshooting Guide\n\nFollow these steps...",
         metadata={"skill_type": "resource", "provider": "mcp_provider"},
     )
-    mcp_skill_underscore = Skill(
-        name="systematic_troubleshooting",
-        description="Systematic troubleshooting guide (underscore)",
-        skill_path=PurePosixPath("skill://mcp_provider/systematic_troubleshooting"),
-        instructions="# Troubleshooting Guide\n\nFollow these steps...",
+    # Underscore names are normalized to hyphens at Skill creation time
+    mcp_skill_from_underscore = Skill(
+        name="equipment_operation_assistant",
+        description="Equipment operation assistant guide",
+        skill_path=PurePosixPath("skill://mcp_provider/equipment-operation-assistant"),
+        instructions="# Equipment Operation\n\nFollow these procedures...",
         metadata={"skill_type": "resource", "provider": "mcp_provider"},
     )
 
     # Mock skill_provider
     mock_provider = MagicMock()
-    mock_provider.get_skills = AsyncMock(return_value=[mcp_skill_hyphen, mcp_skill_underscore])
+    mock_provider.get_skills = AsyncMock(return_value=[mcp_skill_hyphen, mcp_skill_from_underscore])
     mock_provider.get_skill_instructions = AsyncMock(
         return_value="# Troubleshooting Guide\n\nFollow these steps..."
     )
@@ -56,7 +57,7 @@ def mock_agent_context():
     mock_resolver.list_providers.return_value = ["mcp_provider"]
     mock_provider_from_resolver = MagicMock()
     mock_provider_from_resolver.get_skills = AsyncMock(
-        return_value=[mcp_skill_hyphen, mcp_skill_underscore]
+        return_value=[mcp_skill_hyphen, mcp_skill_from_underscore]
     )
     mock_resolver.get_provider.return_value = mock_provider_from_resolver
 
@@ -64,26 +65,26 @@ def mock_agent_context():
     async def mock_resolve(uri: str):
         if "systematic-troubleshooting" in uri:
             return mcp_skill_hyphen
-        elif "systematic_troubleshooting" in uri:
-            return mcp_skill_underscore
+        elif "equipment-operation-assistant" in uri:
+            return mcp_skill_from_underscore
         raise Exception(f"Skill not found: {uri}")
 
     mock_resolver.resolve = mock_resolve
     ctx.pool.skill_resolver = mock_resolver
 
-    return ctx, mcp_skill_hyphen, mcp_skill_underscore
+    return ctx, mcp_skill_hyphen, mcp_skill_from_underscore
 
 
 @pytest.mark.asyncio
 async def test_list_skills_includes_mcp_skills(mock_agent_context):
     """Test that list_skills includes MCP-based skills."""
-    ctx, mcp_skill_hyphen, mcp_skill_underscore = mock_agent_context
+    ctx, mcp_skill_hyphen, mcp_skill_from_underscore = mock_agent_context
 
     result = await list_skills(ctx)
 
-    # Should include both MCP-based skills
+    # Should include MCP-based skills (all normalized to kebab-case)
     assert "systematic-troubleshooting" in result
-    assert "systematic_troubleshooting" in result
+    assert "equipment-operation-assistant" in result
     print(f"list_skills output:\n{result}")
 
 
@@ -101,16 +102,17 @@ async def test_load_skill_finds_mcp_skills_with_hyphen(mock_agent_context):
 
 
 @pytest.mark.asyncio
-async def test_load_skill_finds_mcp_skills_with_underscore(mock_agent_context):
-    """Test that load_skill can find MCP-based skills with underscore names."""
-    ctx, _, mcp_skill_underscore = mock_agent_context
+async def test_load_skill_normalizes_underscore_to_hyphen(mock_agent_context):
+    """Test that load_skill normalizes underscore names to hyphens per spec."""
+    ctx, _, mcp_skill_from_underscore = mock_agent_context
 
-    result = await load_skill(ctx, "systematic_troubleshooting")
+    # Calling with underscores should work because normalization converts to hyphens
+    result = await load_skill(ctx, "equipment_operation_assistant")
 
-    # Should successfully load the skill with underscore
-    assert "systematic_troubleshooting" in result
-    assert "Troubleshooting Guide" in result
-    print(f"load_skill (underscore) output:\n{result}")
+    # The skill name is normalized to kebab-case
+    assert "equipment-operation-assistant" in result
+    assert "Equipment operation assistant guide" in result
+    print(f"load_skill (underscore normalized) output:\n{result}")
 
 
 @pytest.mark.asyncio

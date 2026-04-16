@@ -197,14 +197,14 @@ async def load_skill(  # noqa: PLR0911
             instructions = skill.load_instructions()
 
         # Load reference content if specified
-        if resolved.reference_path:
+        # Check for fallback reference path from provider-less URI resolution
+        ref_path = resolved.reference_path or getattr(skill, "_resolved_reference_path", None)
+        if ref_path:
             try:
-                ref_content = await _load_reference_content(
-                    skill, resolved.reference_path, pool=ctx.pool
-                )
+                ref_content = await _load_reference_content(skill, ref_path, pool=ctx.pool)
                 instructions += ref_content
             except Exception as e:  # noqa: BLE001
-                return f"Failed to load reference {resolved.reference_path!r}: {e}"
+                return f"Failed to load reference {ref_path!r}: {e}"
     else:
         # Bare skill name - use skill_resolver to search across all providers
         # This supports dynamic skill discovery from MCP servers with proper priority

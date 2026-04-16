@@ -538,6 +538,74 @@ class TestNoPoolContext:
 
 
 # =============================================================================
+# Test Class: ProviderLessURIFallback
+# =============================================================================
+
+
+@pytest.mark.integration
+class TestProviderLessURIFallback:
+    """Test loading skills with provider-less URIs (fallback to search all providers)."""
+
+    async def test_provider_less_uri_with_reference(
+        self,
+        tmp_path: Path,
+        test_skill_with_args: UPath,
+    ) -> None:
+        """Test loading skill with provider-less URI and reference path."""
+        from agentpool.resource_providers.local import LocalResourceProvider
+        from agentpool.skills.uri_resolver import SkillURIResolver
+
+        # Create a local provider directly with the test skill directory
+        provider = LocalResourceProvider(
+            name="test_local",
+            skills_dirs=[UPath(tmp_path)],
+        )
+
+        async with provider:
+            # Create resolver and register the provider
+            resolver = SkillURIResolver()
+            resolver.register_provider("test_local", provider)
+
+            # Test provider-less URI with reference
+            # Format: skill://skill-name/references/file.md
+            uri = "skill://arg-skill/references/details.md"
+            skill = await resolver.resolve(uri)
+
+            # Should resolve to arg-skill with reference path
+            assert skill.name == "arg-skill"
+            assert hasattr(skill, "_resolved_reference_path")
+            assert skill._resolved_reference_path == "references/details.md"
+
+    async def test_provider_less_uri_without_reference(
+        self,
+        tmp_path: Path,
+        simple_skill: UPath,
+    ) -> None:
+        """Test loading skill with bare skill name (no URI scheme)."""
+        from agentpool.resource_providers.local import LocalResourceProvider
+        from agentpool.skills.uri_resolver import SkillURIResolver
+
+        # Create a local provider directly with the test skill directory
+        provider = LocalResourceProvider(
+            name="test_local",
+            skills_dirs=[UPath(tmp_path)],
+        )
+
+        async with provider:
+            # Create resolver and register the provider
+            resolver = SkillURIResolver()
+            resolver.register_provider("test_local", provider)
+
+            # Test bare skill name (no URI scheme)
+            # This is the standard format for provider-less skill loading
+            uri = "simple-skill"
+            skill = await resolver.resolve(uri)
+
+            # Should resolve to simple-skill
+            assert skill.name == "simple-skill"
+
+
+# =============================================================================
 # Test Class: ListSkillsIntegration
 # =============================================================================
 

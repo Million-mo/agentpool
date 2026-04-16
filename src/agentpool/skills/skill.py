@@ -60,6 +60,9 @@ class Skill(BaseModel):
     @classmethod
     def _validate_name(cls, v: str) -> str:
         name = unicodedata.normalize("NFKC", v.strip())
+        # Normalize underscores to hyphens per Agent Skills Spec (kebab-case).
+        # The spec mandates "lowercase letters, numbers, and hyphens only".
+        name = name.replace("_", "-")
         if not name:
             raise ValueError("Skill name must be non-empty")
         if name != name.lower():
@@ -68,10 +71,10 @@ class Skill(BaseModel):
             raise ValueError("Skill name cannot start or end with a hyphen")
         if "--" in name:
             raise ValueError("Skill name cannot contain consecutive hyphens")
-        if not all(c.isalnum() or c in "-_" for c in name):
+        if not all(c.isalnum() or c == "-" for c in name):
             msg = (
                 f"Skill name {name!r} contains invalid characters. "
-                "Only letters, digits, hyphens, and underscores are allowed."
+                "Only letters, digits, and hyphens are allowed."
             )
             raise ValueError(msg)
         return name

@@ -40,10 +40,10 @@ def temp_skills():
         dir_a.mkdir()
         dir_b.mkdir()
 
-        create_skill(dir_a, "skill_a", "Description A", "Instructions A")
-        create_skill(dir_b, "skill_b", "Description B", "Instructions B")
-        create_skill(dir_b, "conflict_skill", "Conflict from B", "Instructions Conflict B")
-        create_skill(dir_a, "conflict_skill", "Conflict from A", "Instructions Conflict A")
+        create_skill(dir_a, "skill-a", "Description A", "Instructions A")
+        create_skill(dir_b, "skill-b", "Description B", "Instructions B")
+        create_skill(dir_b, "conflict-skill", "Conflict from B", "Instructions Conflict B")
+        create_skill(dir_a, "conflict-skill", "Conflict from A", "Instructions Conflict A")
 
         yield dir_a, dir_b
 
@@ -101,10 +101,10 @@ async def test_skills_custom_path(temp_skills: tuple[Path, Path]):
         async with AgentPool(config_path) as pool:
             skills = pool.skills.list_skills()
             skill_names = [s.name for s in skills]
-            assert "skill_a" in skill_names
-            assert "skill_b" not in skill_names
+            assert "skill-a" in skill_names
+            assert "skill-b" not in skill_names
 
-            skill = pool.skills.get_skill("skill_a")
+            skill = pool.skills.get_skill("skill-a")
             assert skill.description == "Description A"
 
 
@@ -120,7 +120,7 @@ async def test_skills_disable_defaults(monkeypatch: pytest.MonkeyPatch):
     with tempfile.TemporaryDirectory() as temp_dir:
         default_dir = Path(temp_dir) / "default_skills"
         default_dir.mkdir()
-        create_skill(default_dir, "default_skill", "Default", "Instructions")
+        create_skill(default_dir, "default-skill", "Default", "Instructions")
 
         monkeypatch.setattr(skills, "DEFAULT_SKILLS_PATHS", [UPath(default_dir)])
 
@@ -141,7 +141,7 @@ async def test_skills_disable_defaults(monkeypatch: pytest.MonkeyPatch):
             async with AgentPool(config_path) as pool:
                 skills_list = pool.skills.list_skills()
                 skill_names = [s.name for s in skills_list]
-                assert "default_skill" not in skill_names
+                assert "default-skill" not in skill_names
 
 
 @pytest.mark.asyncio
@@ -168,7 +168,7 @@ async def test_skills_conflict_resolution(temp_skills: tuple[Path, Path]):
         config_path.write_text(yaml.dump(manifest_dict))
 
         async with AgentPool(config_path) as pool:
-            skill = pool.skills.get_skill("conflict_skill")
+            skill = pool.skills.get_skill("conflict-skill")
             assert skill.description == "Conflict from A"
 
     # [dir_b, dir_a] -> dir_b should win
@@ -179,7 +179,7 @@ async def test_skills_conflict_resolution(temp_skills: tuple[Path, Path]):
         config_path.write_text(yaml.dump(manifest_dict))
 
         async with AgentPool(config_path) as pool:
-            skill = pool.skills.get_skill("conflict_skill")
+            skill = pool.skills.get_skill("conflict-skill")
             assert skill.description == "Conflict from B"
 
 
@@ -195,7 +195,7 @@ async def test_skills_relative_paths():
         # In this test, we can just move dir_a inside config_dir/skills
         skills_dir = config_dir / "my_skills"
         skills_dir.mkdir()
-        create_skill(skills_dir, "rel_skill", "Relative Description", "Instructions")
+        create_skill(skills_dir, "rel-skill", "Relative Description", "Instructions")
 
         manifest_dict: dict[str, Any] = {
             "skills": {"paths": ["./my_skills"], "include_default": False},
@@ -215,7 +215,7 @@ async def test_skills_relative_paths():
         os.chdir(tempfile.gettempdir())
         try:
             async with AgentPool(config_path) as pool:
-                skill = pool.skills.get_skill("rel_skill")
+                skill = pool.skills.get_skill("rel-skill")
                 assert skill is not None
                 assert skill.description == "Relative Description"
         finally:

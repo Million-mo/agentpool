@@ -319,9 +319,8 @@ def test_validate_skill_name_rejects_consecutive_hyphens() -> None:
 
 
 def test_validate_skill_name_rejects_invalid_characters() -> None:
-    """Test that invalid characters are rejected."""
+    """Test that invalid characters are rejected (after underscore normalization)."""
     invalid_names = [
-        "my_skill",  # Underscore
         "my.skill",  # Dot
         "my/skill",  # Slash
         "my skill",  # Space
@@ -330,6 +329,18 @@ def test_validate_skill_name_rejects_invalid_characters() -> None:
     for name in invalid_names:
         with pytest.raises(SecurityError, match="invalid characters"):
             _validate_skill_name(name)
+
+
+def test_validate_skill_name_normalizes_underscores() -> None:
+    """Test that underscores are normalized to hyphens per Agent Skills Spec."""
+    result = _validate_skill_name("my_skill")
+    assert result == "my-skill"
+
+    result = _validate_skill_name("systematic_troubleshooting")
+    assert result == "systematic-troubleshooting"
+
+    result = _validate_skill_name("multi_word_skill_name")
+    assert result == "multi-word-skill-name"
 
 
 def test_validate_skill_name_rejects_empty() -> None:

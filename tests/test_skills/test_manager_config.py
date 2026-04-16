@@ -24,7 +24,7 @@ def skill_dirs():
         dir_a.mkdir()
         dir_b.mkdir()
 
-        # Skill in dir_a
+        # Skill in dir_a (underscore in name is normalized to hyphen per spec)
         skill_a = dir_a / "my_skill"
         skill_a.mkdir()
         (skill_a / "SKILL.md").write_text(
@@ -63,7 +63,7 @@ async def test_discover_skills_priority(skill_dirs: tuple[Path, Path]):
     manager = SkillsManager()
     await manager.discover_skills(config=config)
 
-    skill = manager.get_skill("my_skill")
+    skill = manager.get_skill("my-skill")
     assert skill.description == "Description from A"
 
     # Now swap priority: [dir_b, dir_a] -> B should win
@@ -71,7 +71,7 @@ async def test_discover_skills_priority(skill_dirs: tuple[Path, Path]):
     manager_swapped = SkillsManager()
     await manager_swapped.discover_skills(config=config_swapped)
 
-    skill_swapped = manager_swapped.get_skill("my_skill")
+    skill_swapped = manager_swapped.get_skill("my-skill")
     assert skill_swapped.description == "Description from B"
 
 
@@ -82,7 +82,7 @@ async def test_discover_skills_no_config(skill_dirs: tuple[Path, Path]):
     manager = SkillsManager(skills_dirs=[dir_a])
     await manager.discover_skills()
 
-    skill = manager.get_skill("my_skill")
+    skill = manager.get_skill("my-skill")
     assert skill.description == "Description from A"
 
 
