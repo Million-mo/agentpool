@@ -189,28 +189,34 @@ async def load_skill(  # noqa: PLR0911
         except Exception as e:  # noqa: BLE001
             return f"Failed to resolve skill URI {skill_name!r}: {e}"
 
-        # Get instructions from resolved skill
-        # For virtual paths (PurePosixPath), fetch from provider
-        if isinstance(skill.skill_path, PurePosixPath):
-            if ctx.pool.skill_provider is not None:
-                try:
-                    instructions = await ctx.pool.skill_provider.get_skill_instructions(skill.name)
-                except Exception as e:  # noqa: BLE001
-                    return f"Failed to load skill instructions for {skill.name!r}: {e}"
-            else:
-                instructions = ""
-        else:
-            instructions = skill.load_instructions()
-
-        # Load reference content if specified
+        # Check for reference path first
+        # When a reference file is explicitly requested via URI, load ONLY the
+        # reference content — not the main SKILL.md instructions.
         # Check for fallback reference path from provider-less URI resolution
         ref_path = resolved.reference_path or getattr(skill, "_resolved_reference_path", None)
+
         if ref_path:
+            # Reference-only loading: skip main SKILL.md content
             try:
                 ref_content = await _load_reference_content(skill, ref_path, pool=ctx.pool)
-                instructions += ref_content
+                instructions = ref_content
             except Exception as e:  # noqa: BLE001
                 return f"Failed to load reference {ref_path!r}: {e}"
+        else:
+            # Full skill loading: get main instructions
+            # For virtual paths (PurePosixPath), fetch from provider
+            if isinstance(skill.skill_path, PurePosixPath):
+                if ctx.pool.skill_provider is not None:
+                    try:
+                        instructions = await ctx.pool.skill_provider.get_skill_instructions(
+                            skill.name
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        return f"Failed to load skill instructions for {skill.name!r}: {e}"
+                else:
+                    instructions = ""
+            else:
+                instructions = skill.load_instructions()
     else:
         # Bare skill name - use skill_resolver to search across all providers
         # This supports dynamic skill discovery from MCP servers with proper priority
@@ -269,25 +275,43 @@ async def load_skill(  # noqa: PLR0911
     # Apply argument substitution
     instructions = _substitute_arguments(instructions, arguments)
 
-    # Build the response
-    header = f"# {skill.name}\n\n{skill.description}"
-    meta_lines: list[str] = []
-    if skill.license:
-        meta_lines.append(f"License: {skill.license}")
-    if skill.compatibility:
-        meta_lines.append(f"Compatibility: {skill.compatibility}")
-    if skill.allowed_tools:
-        meta_lines.append(f"Allowed tools: {skill.allowed_tools}")
-    meta = "\n".join(meta_lines)
-    parts = [header]
-    if meta:
-        parts.append(meta)
-    parts.append(instructions)
-    parts.append(f"Skill directory: {skill.skill_path}")
+    # Determine if this is a reference-only load
+    effective_ref_path = (resolved.reference_path if is_uri else None) or getattr(
+        skill, "_resolved_reference_path", None
+    )
+    is_reference_load = is_uri and effective_ref_path is not None
 
-    # Add URI information if loaded via URI
-    if is_uri and resolved.provider:
-        parts.append(f"URI: skill://{resolved.provider}/{resolved.skill_name}")
+    # Build the response
+    if is_reference_load:
+        # Reference-only: minimal header indicating source skill and reference file
+        header = f"# {skill.name} → Reference: {effective_ref_path}"
+        parts = [header]
+        parts.append(instructions)
+        parts.append(f"Skill directory: {skill.skill_path}")
+        if resolved.provider:
+            parts.append(
+                f"URI: skill://{resolved.provider}/{resolved.skill_name}/{effective_ref_path}"
+            )
+    else:
+        # Full skill load: include description, metadata, and instructions
+        header = f"# {skill.name}\n\n{skill.description}"
+        meta_lines: list[str] = []
+        if skill.license:
+            meta_lines.append(f"License: {skill.license}")
+        if skill.compatibility:
+            meta_lines.append(f"Compatibility: {skill.compatibility}")
+        if skill.allowed_tools:
+            meta_lines.append(f"Allowed tools: {skill.allowed_tools}")
+        meta = "\n".join(meta_lines)
+        parts = [header]
+        if meta:
+            parts.append(meta)
+        parts.append(instructions)
+        parts.append(f"Skill directory: {skill.skill_path}")
+
+        # Add URI information if loaded via URI
+        if is_uri and resolved.provider:
+            parts.append(f"URI: skill://{resolved.provider}/{resolved.skill_name}")
 
     return "\n\n".join(parts)
 
