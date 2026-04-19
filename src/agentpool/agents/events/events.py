@@ -632,6 +632,10 @@ class SubAgentEvent:
     """ID of the parent session that spawned this subagent."""
     tool_call_id: str | None = None
     """ID of the tool call that spawned this subagent."""
+    model_id: str | None = None
+    """Model identifier for the subagent (e.g., 'openai:gpt-4o'). Propagated to UI for display."""
+    mode: str | None = None
+    """Mode identifier for the subagent (e.g., 'code', 'ask'). Maps to OpenCode mode display."""
     path: list[str] = field(default_factory=list)
     """List of session_ids that this event has traversed, starting from source."""
     event_kind: Literal["subagent"] = "subagent"
@@ -664,6 +668,10 @@ class SpawnSessionStart:
     """Human-readable description of the spawn operation."""
     metadata: dict[str, Any] = field(default_factory=dict)
     """Additional metadata associated with the spawn operation."""
+    model_id: str | None = None
+    """Model identifier for the subagent (e.g., 'openai:gpt-4o'). Propagated to UI for display."""
+    mode: str | None = None
+    """Mode identifier for the subagent (e.g., 'code', 'ask'). Maps to OpenCode mode display."""
     event_kind: Literal["spawn_session_start"] = "spawn_session_start"
     """Event type identifier."""
 

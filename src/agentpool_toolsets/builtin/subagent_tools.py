@@ -65,6 +65,8 @@ async def _stream_task(
     parent_session_id: str | None = None,
     tool_call_id: str | None = None,
     prompt: str | None = None,
+    model_id: str | None = None,
+    mode: str | None = None,
 ) -> dict[str, Any]:
     """Stream a task's execution, emitting SubAgentEvents into parent stream.
 
@@ -79,6 +81,8 @@ async def _stream_task(
         parent_session_id: ID of the parent session
         tool_call_id: ID of the tool call
         prompt: The task prompt (for metadata)
+        model_id: Model identifier for the subagent (e.g., 'openai:gpt-4o')
+        mode: Mode identifier for the subagent (e.g., 'code', 'ask')
     """
     if batch_deltas:
         stream = batch_stream_deltas(stream)
@@ -99,6 +103,8 @@ async def _stream_task(
         depth=getattr(ctx, "current_depth", 0) + 1,
         description=f"Run {source_name} task",
         metadata={"prompt": prompt[:200]} if prompt else {},
+        model_id=model_id,
+        mode=mode,
     )
     await ctx.events.emit_event(spawn_event)
 
@@ -114,6 +120,8 @@ async def _stream_task(
                 child_session_id=event.child_session_id,
                 parent_session_id=event.parent_session_id,
                 tool_call_id=event.tool_call_id or tool_call_id,
+                model_id=event.model_id,
+                mode=event.mode,
             )
             await ctx.events.emit_event(nested_event)
         else:
@@ -126,6 +134,8 @@ async def _stream_task(
                 child_session_id=child_session_id,
                 parent_session_id=parent_session_id,
                 tool_call_id=tool_call_id,
+                model_id=model_id,
+                mode=mode,
             )
             await ctx.events.emit_event(subagent_event)
 
@@ -331,6 +341,11 @@ class SubagentTools(StaticResourceProvider):
         parent_session_id = ctx.node.session_id or identifier.ascending("session")
 
         # Emit SpawnSessionStart for both sync and async modes
+        # Extract model_id from node if it's a BaseAgent
+        node_model_id: str | None = None
+        if isinstance(node, BaseAgent):
+            node_model_id = node.model_name
+
         spawn_event = SpawnSessionStart(
             child_session_id=child_session_id,
             parent_session_id=parent_session_id,
@@ -341,6 +356,7 @@ class SubagentTools(StaticResourceProvider):
             depth=getattr(ctx, "current_depth", 0) + 1,
             description=f"Run {agent_or_team} task",
             metadata={"prompt": prompt[:200]} if prompt else {},
+            model_id=node_model_id,
         )
         await ctx.events.emit_event(spawn_event)
 
@@ -397,4 +413,5 @@ class SubagentTools(StaticResourceProvider):
             parent_session_id=parent_session_id,
             tool_call_id=ctx.tool_call_id,
             prompt=prompt,
+            model_id=node_model_id,
         )

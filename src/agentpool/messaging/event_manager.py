@@ -52,6 +52,7 @@ class EventManager:
         session_id: str | None = None,
         parent_session_id: str | None = None,
         parent: EventManager | None = None,
+        source_name: str | None = None,
     ) -> None:
         """Initialize event manager.
 
@@ -62,6 +63,7 @@ class EventManager:
             session_id: Optional session ID
             parent_session_id: Optional parent session ID
             parent: Optional parent event manager
+            source_name: Optional name of the source node (agent/team) for SubAgentEvent wrapping
         """
         self.task_manager = TaskManager()
         self.configs = configs or []
@@ -72,6 +74,7 @@ class EventManager:
         self.session_id = session_id
         self.parent_session_id = parent_session_id
         self.parent = parent
+        self.source_name = source_name
 
     def add_callback(self, callback: EventCallback) -> None:
         """Register an event callback."""
@@ -116,7 +119,7 @@ class EventManager:
             # Wrap as SubAgentEvent and forward
             child_id = source_session_id or self.session_id
             sub_event = SubAgentEvent(
-                source_name="agent",
+                source_name=self.source_name or "agent",
                 source_type="agent",
                 event=event,
                 child_session_id=child_id,

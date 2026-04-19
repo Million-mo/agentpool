@@ -196,6 +196,11 @@ class Team[TDeps = None](BaseTeam[TDeps, Any]):
                 case _:
                     raise ValueError(f"Unexpected node type: {type(node)}")
 
+            # Extract model_id from BaseAgent nodes
+            node_model_id: str | None = None
+            if isinstance(node, BaseAgent):
+                node_model_id = node.model_name
+
             async for event in node.run_stream(*prompts, **kwargs):
                 # Handle already-wrapped SubAgentEvents (nested teams)
                 if isinstance(event, SubAgentEvent):
@@ -204,6 +209,8 @@ class Team[TDeps = None](BaseTeam[TDeps, Any]):
                         source_type=event.source_type,
                         event=event.event,
                         depth=event.depth + 1,
+                        model_id=event.model_id,
+                        mode=event.mode,
                     )
                 else:
                     yield SubAgentEvent(
@@ -211,6 +218,7 @@ class Team[TDeps = None](BaseTeam[TDeps, Any]):
                         source_type=source_type,
                         event=event,
                         depth=1,
+                        model_id=node_model_id,
                     )
 
         streams = [wrap_stream(node) for node in all_nodes]

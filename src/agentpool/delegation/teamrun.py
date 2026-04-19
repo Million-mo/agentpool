@@ -269,6 +269,7 @@ class TeamRun[TDeps, TResult](BaseTeam[TDeps, TResult]):
         Yields:
             RichAgentStreamEvent, with member events wrapped in SubAgentEvent
         """
+        from agentpool.agents.base_agent import BaseAgent
         from agentpool.agents.events import StreamCompleteEvent, SubAgentEvent
         from agentpool.delegation.team import Team
 
@@ -286,6 +287,11 @@ class TeamRun[TDeps, TResult](BaseTeam[TDeps, TResult]):
                 if not isinstance(node, SupportsRunStream):
                     raise TypeError(f"Node {node.name} does not support streaming")  # noqa: TRY301
 
+                # Extract model_id from BaseAgent nodes
+                node_model_id: str | None = None
+                if isinstance(node, BaseAgent):
+                    node_model_id = node.model_name
+
                 async for event in node.run_stream(*current_message, **kwargs):
                     # Handle already-wrapped SubAgentEvents (nested teams)
                     if isinstance(event, SubAgentEvent):
@@ -294,12 +300,15 @@ class TeamRun[TDeps, TResult](BaseTeam[TDeps, TResult]):
                             source_type=event.source_type,
                             event=event.event,
                             depth=event.depth + 1,
+                            model_id=event.model_id,
+                            mode=event.mode,
                         )
                     else:
                         yield SubAgentEvent(
                             source_name=node.name,
                             source_type=source_type,
                             event=event,
+                            model_id=node_model_id,
                         )
 
                         # Extract content for next agent in chain

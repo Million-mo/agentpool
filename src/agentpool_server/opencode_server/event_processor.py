@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator
 import contextlib
 from typing import TYPE_CHECKING, Any
 
+
 from pydantic_ai import FunctionToolCallEvent
 from pydantic_ai.messages import (
     PartDeltaEvent as PydanticPartDeltaEvent,
@@ -731,7 +732,6 @@ class EventProcessor:
             wrapped_event = wrapped_event.event
 
         source_name = subagent_event.source_name
-        source_type = subagent_event.source_type
         child_session_id = subagent_event.child_session_id
 
         # 3. Ensure child session exists if ID provided
@@ -778,10 +778,13 @@ class EventProcessor:
                 session_id=child_session_id,
                 time=MessageTime(created=now_ms()),
                 agent_name=source_name,
-                model_id="subagent",
+                model_id=subagent_event.model_id or "subagent",
                 parent_id=user_msg_id,
                 provider_id="agentpool",
                 path=MessagePath(cwd=ctx.working_dir, root=ctx.working_dir),
+                mode=(
+                    subagent_event.mode or source_name
+                ) if source_name else "default",
             )
 
             child_ctx = EventProcessorContext(
@@ -808,15 +811,16 @@ class EventProcessor:
             subagent_key = f"{depth}:{source_name}:{child_session_id}"
             if not ctx.has_subagent_tool_part(subagent_key):
                 ts = TimeStart(start=now_ms())
+                tool_title = source_name
                 running_state = ToolStateRunning(
                     time=ts,
                     input={
-                        "description": f"Subagent: {source_name}",
-                        "subagent_type": source_name,
+                        "description": tool_title,
+                        "subagent_type": tool_title,
                         "prompt": "",
                     },
-                    metadata={"sessionId": child_session_id, "title": source_name},
-                    title=source_name,
+                    metadata={"sessionId": child_session_id, "title": tool_title},
+                    title=tool_title,
                 )
                 tool_part = ToolPart(
                     id=identifier.ascending("part"),
@@ -869,15 +873,16 @@ class EventProcessor:
             if ctx.has_subagent_tool_part(subagent_key):
                 existing = ctx.get_subagent_tool_part(subagent_key)
                 if existing is not None:
+                    tool_title = source_name
                     completed_state = ToolStateCompleted(
                         input={
-                            "description": f"Subagent: {source_name}",
-                            "subagent_type": source_name,
+                            "description": tool_title,
+                            "subagent_type": tool_title,
                             "prompt": "",
                         },
                         output=content,
-                        title=source_name,
-                        metadata={"sessionId": child_session_id, "title": source_name},
+                        title=tool_title,
+                        metadata={"sessionId": child_session_id, "title": tool_title},
                         time=TimeStartEndCompacted(start=now_ms(), end=now_ms()),
                     )
                     updated = ToolPart(
@@ -952,10 +957,13 @@ class EventProcessor:
             session_id=event.child_session_id,
             time=MessageTime(created=now_ms()),
             agent_name=event.source_name,
-            model_id="subagent",
+            model_id=event.model_id or "subagent",
             parent_id=user_msg_id,
             provider_id="agentpool",
             path=MessagePath(cwd=ctx.working_dir, root=ctx.working_dir),
+            mode=(
+                event.mode or event.source_name
+            ) if event.source_name else "default",
         )
 
         child_ctx = EventProcessorContext(

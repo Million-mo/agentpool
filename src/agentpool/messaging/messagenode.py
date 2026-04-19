@@ -89,6 +89,7 @@ class MessageNode[TDeps, TResult](ABC):
             event_callbacks=[_event_handler],
             session_id=self.session_id,
             parent_session_id=self.parent_session_id,
+            source_name=self._name,
         )
         name_ = f"node_{self._name}"
         self.mcp = MCPManager(name_, servers=mcp_servers, owner=self.name)
