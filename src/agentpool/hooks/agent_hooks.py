@@ -288,7 +288,7 @@ class AgentHooks:
                     combined["modified_input"] = {}
                 combined["modified_input"].update(modified)
 
-            # modified_output: last writer wins (symmetric with modified_input)
+            # modified_output is an optional full replacement; later hooks override earlier ones.
             if "modified_output" in result:
                 combined["modified_output"] = result["modified_output"]
 

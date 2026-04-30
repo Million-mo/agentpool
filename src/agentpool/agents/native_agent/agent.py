@@ -347,7 +347,7 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
             agent=self,
             agent_hooks=hooks,
         )
-        logger.info(
+        logger.debug(
             "NativeAgent hooks initialized",
             agent_name=name,
             has_hooks=hooks is not None,

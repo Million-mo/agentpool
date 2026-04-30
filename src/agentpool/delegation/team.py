@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from anyenv.async_run import as_generated
 import anyio
+from jinja2 import BaseLoader, Environment
 
 from agentpool.agents.base_agent import BaseAgent
 from agentpool.agents.events import SpawnSessionStart, SubAgentEvent
@@ -20,6 +21,7 @@ from agentpool.messaging.processing import finalize_message, prepare_prompts
 
 
 logger = get_logger(__name__)
+_PROMPT_TEMPLATE_ENV = Environment(loader=BaseLoader(), autoescape=False)  # noqa: S701
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -93,11 +95,8 @@ class Team[TDeps = None](BaseTeam[TDeps, Any]):
         if cfg is None or cfg.prompt_template is None:
             return default_prompt
 
-        from jinja2 import BaseLoader, Environment
-
-        env = Environment(loader=BaseLoader(), autoescape=False)  # noqa: S701
         prompt_str = " ".join(str(p) for p in raw_prompts if p is not None)
-        rendered = env.from_string(cfg.prompt_template).render(
+        rendered = _PROMPT_TEMPLATE_ENV.from_string(cfg.prompt_template).render(
             prompt=prompt_str,
             shared_prompt=self.shared_prompt or "",
             extra=template_vars,

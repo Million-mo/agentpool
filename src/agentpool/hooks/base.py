@@ -57,8 +57,9 @@ class HookResult(TypedDict, total=False):
     modified_output: Any
     """Replacement for tool output in post_tool_use hooks.
 
-    When set, the tool's return value is replaced entirely (not appended).
-    Symmetric with ``modified_input`` for pre_tool_use hooks.
+    This is optional. When omitted, the original tool output is preserved.
+    When set, the tool's return value is replaced entirely rather than merged
+    or appended.
     Takes precedence over ``additional_context``.
     """
 
