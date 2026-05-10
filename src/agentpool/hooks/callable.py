@@ -79,6 +79,10 @@ class CallableHook(Hook):
     ) -> HookResult:
         """Execute the callable.
 
+        Exceptions propagate to ``AgentHooks._run_hooks`` which uses
+        ``return_exceptions=True`` and reports them in the ``errors`` log.
+        The aggregate semantics remain "allow" (failed hooks don't block).
+
         Args:
             input_data: The hook input data.
             env: Unused. Callable hooks always run in-process.
@@ -86,35 +90,32 @@ class CallableHook(Hook):
         Returns:
             Hook result from callable.
         """
-        try:
-            fn = self.callable
-            # Merge input data with additional arguments
-            kwargs = {**dict(input_data), **self.arguments}
-            # Execute with timeout
-            if asyncio.iscoroutinefunction(fn):
-                result = await asyncio.wait_for(fn(**kwargs), timeout=self.timeout)
-            else:
-                # Run sync function in executor
-                loop = asyncio.get_event_loop()
-                result = await asyncio.wait_for(
-                    loop.run_in_executor(None, lambda: fn(**kwargs)),
-                    timeout=self.timeout,
-                )
+        fn = self.callable
+        kwargs = {**dict(input_data), **self.arguments}
 
-            # Normalize result
-            if result is None:
-                return HookResult(decision="allow")
+        # try:
+        if asyncio.iscoroutinefunction(fn):
+            result = await asyncio.wait_for(fn(**kwargs), timeout=self.timeout)
+        else:
+            loop = asyncio.get_event_loop()
+            result = await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: fn(**kwargs)),
+                timeout=self.timeout,
+            )
 
-            return _normalize_result(result)
-
-        except TimeoutError:
-            fn_path = self._import_path or str(self._callable)
-            logger.exception("Hook callable timed out", timeout=self.timeout, callable=fn_path)
+        if result is None:
             return HookResult(decision="allow")
-        except Exception as e:
-            fn_path = self._import_path or str(self._callable)
-            logger.exception("Hook callable failed", callable=fn_path)
-            return HookResult(decision="allow", reason=str(e))
+
+        return _normalize_result(result)
+
+        # except TimeoutError:
+        #     fn_path = self._import_path or str(self._callable)
+        #     logger.exception("Hook callable timed out", timeout=self.timeout, callable=fn_path)
+        #     return HookResult(decision="allow")
+        # except Exception as e:
+        #     fn_path = self._import_path or str(self._callable)
+        #     logger.exception("Hook callable failed", callable=fn_path)
+        #     return HookResult(decision="allow", reason=str(e))
 
 
 def _normalize_result(result: Any) -> HookResult:
