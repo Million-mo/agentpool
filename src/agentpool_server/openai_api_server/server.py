@@ -187,7 +187,7 @@ class OpenAIAPIServer(BaseServer, ProtocolEventConsumerMixin):
 
         # Each HTTP request is an independent task — use a fresh MessageHistory
         # to prevent context accumulation across requests on the shared agent.
-        from agentpool.talk.message_history import MessageHistory
+        from agentpool.messaging.message_history import MessageHistory
 
         request_history = MessageHistory()
 
