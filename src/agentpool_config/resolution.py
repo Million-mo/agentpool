@@ -181,6 +181,36 @@ def _load_yaml_data(path: JoinablePathLike) -> dict[str, Any]:
     return data
 
 
+def _resolve_tool_schema_paths(data: dict[str, Any], base_dir: str) -> None:
+    """Resolve relative ``kw_args.schemas`` paths in agent tool declarations.
+
+    Mutates *data* in place.  Walks ``agents.<name>.tools[].kw_args.schemas``
+    and converts relative paths to absolute ones rooted at *base_dir*.
+    """
+    agents = data.get("agents")
+    if not isinstance(agents, dict):
+        return
+    for agent_cfg in agents.values():
+        if not isinstance(agent_cfg, dict):
+            continue
+        tools = agent_cfg.get("tools")
+        if not isinstance(tools, list):
+            continue
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            kw_args = tool.get("kw_args")
+            if not isinstance(kw_args, dict):
+                continue
+            schemas = kw_args.get("schemas")
+            if not isinstance(schemas, dict):
+                continue
+            for key, val in schemas.items():
+                val = str(val)
+                if not os.path.isabs(val):
+                    schemas[key] = os.path.join(base_dir, val)
+
+
 def _load_package_yaml(ref: str) -> dict[str, Any]:
     """Load a YAML config fragment from an installed Python package.
 
@@ -230,6 +260,12 @@ def _load_package_yaml(ref: str) -> dict[str, Any]:
                 p = str(top_root / p)
             resolved.append(p)
         skills["paths"] = resolved
+
+    # Resolve kw_args.schemas paths relative to the YAML file's directory
+    # (``pkg_root``).  Without this, relative schema paths like
+    # ``./tools/foo.yaml`` would resolve against the host project's
+    # CONFIG_DIR at provider init time instead of the package directory.
+    _resolve_tool_schema_paths(data, str(pkg_root))
 
     return data
 
