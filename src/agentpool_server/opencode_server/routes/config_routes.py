@@ -295,19 +295,28 @@ def _infer_default_model(state: StateDep) -> str | None:
     if agent_cfg is None:
         return None
 
-    # agent_cfg.model is either a variant name (str) or a structured config.
+    # agent_cfg.model may be a raw str or a structured config (e.g.
+    # StringModelConfig with identifier).  The identifier itself can be
+    # either a variant name ("glm47") or a full model id ("openai-chat:svc/glm-4.7").
     agent_model = agent_cfg.model
     variant_name: str | None = None
 
-    if isinstance(agent_model, str) and agent_model in manifest.model_variants:
-        variant_name = agent_model
+    raw_id: str | None = None
+    if isinstance(agent_model, str):
+        raw_id = agent_model
     elif hasattr(agent_model, "identifier"):
-        # Structured config — check if any variant has the same identifier.
-        identifier = str(agent_model.identifier)
-        for vname, vcfg in manifest.model_variants.items():
-            if hasattr(vcfg, "identifier") and str(vcfg.identifier) == identifier:
-                variant_name = vname
-                break
+        raw_id = str(agent_model.identifier)
+
+    if raw_id is not None:
+        if raw_id in manifest.model_variants:
+            # Identifier is a variant name (most common case: model: glm47).
+            variant_name = raw_id
+        else:
+            # Identifier is a full model id — reverse-lookup in variants.
+            for vname, vcfg in manifest.model_variants.items():
+                if hasattr(vcfg, "identifier") and str(vcfg.identifier) == raw_id:
+                    variant_name = vname
+                    break
 
     if variant_name is None:
         return None
