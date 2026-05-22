@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Generic, TypeVar
 
 from acp.schema.base import AnnotatedObject
-from acp.schema.elicitation import ElicitationCompleteNotification  # noqa: TC001
+from acp.schema.elicitation import ElicitationCompleteNotification
 from acp.schema.session_updates import SessionUpdate
 
 
@@ -66,14 +66,14 @@ class ExtNotification(AnnotatedObject):
     """Optional parameters for the notification."""
 
 
-AgentNotification = SessionNotification | ExtNotification
+AgentNotification = SessionNotification | ElicitationCompleteNotification | ExtNotification
 """All possible notifications that an agent can send to a client.
 
 This is used internally for routing RPC notifications.
 Notifications do not expect a response.
 """
 
-ClientNotification = CancelNotification | ElicitationCompleteNotification | ExtNotification
+ClientNotification = CancelNotification | ExtNotification
 """All possible notifications that a client can send to an agent.
 
 This is used internally for routing RPC notifications.

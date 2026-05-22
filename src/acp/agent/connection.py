@@ -16,6 +16,7 @@ from acp.schema import (
     CancelNotification,
     CreateTerminalRequest,
     CreateTerminalResponse,
+    ElicitationCreateResponse,
     InitializeRequest,
     KillTerminalCommandRequest,
     KillTerminalCommandResponse,
@@ -54,6 +55,8 @@ if TYPE_CHECKING:
     from acp.schema import (
         AgentMethod,
         CreateTerminalRequest,
+        ElicitationCompleteNotification,
+        ElicitationCreateRequest,
         InitializeResponse,
         KillTerminalCommandRequest,
         ListSessionsResponse,
@@ -160,6 +163,15 @@ class AgentSideConnection(Client):
         resp = await self._conn.send_request(method, dct)
         return RequestPermissionResponse.model_validate(resp)
 
+    async def elicitation_create(
+        self, params: ElicitationCreateRequest
+    ) -> ElicitationCreateResponse:
+        """Elicit input from the client."""
+        dct = params.model_dump(by_alias=True, exclude_none=True, exclude_defaults=True)
+        method = "elicitation/create"
+        resp = await self._conn.send_request(method, dct)
+        return ElicitationCreateResponse.model_validate(resp)
+
     async def read_text_file(self, params: ReadTextFileRequest) -> ReadTextFileResponse:
         """Read text file from the client."""
         dct = params.model_dump(by_alias=True, exclude_none=True, exclude_defaults=True)
@@ -188,6 +200,11 @@ class AgentSideConnection(Client):
     async def ext_notification(self, method: str, params: dict[str, Any]) -> None:
         """Send an extension notification to the client."""
         await self._conn.send_notification(f"_{method}", params)
+
+    async def elicitation_complete(self, params: ElicitationCompleteNotification) -> None:
+        """Send elicitation complete notification to the client."""
+        dct = params.model_dump(by_alias=True, exclude_none=True)
+        await self._conn.send_notification("elicitation/complete", dct)
 
     async def terminal_output(self, params: TerminalOutputRequest) -> TerminalOutputResponse:
         """Show terminal output on the client."""

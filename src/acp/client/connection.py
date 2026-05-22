@@ -13,6 +13,8 @@ from acp.exceptions import RequestError
 from acp.schema import (
     AuthenticateResponse,
     CreateTerminalRequest,
+    ElicitationCompleteNotification,
+    ElicitationCreateRequest,
     ForkSessionResponse,
     InitializeResponse,
     KillTerminalCommandRequest,
@@ -47,6 +49,7 @@ if TYPE_CHECKING:
         CancelNotification,
         ClientMethod,
         CreateTerminalResponse,
+        ElicitationCreateResponse,
         ForkSessionRequest,
         InitializeRequest,
         KillTerminalCommandResponse,
@@ -216,6 +219,7 @@ async def _handle_client_method(  # noqa: PLR0911
     WriteTextFileResponse
     | ReadTextFileResponse
     | RequestPermissionResponse
+    | ElicitationCreateResponse
     | SessionNotification
     | CreateTerminalResponse
     | TerminalOutputResponse
@@ -236,9 +240,16 @@ async def _handle_client_method(  # noqa: PLR0911
         case "session/request_permission":
             permission_request = RequestPermissionRequest.model_validate(params)
             return await client.request_permission(permission_request)
+        case "elicitation/create":
+            elicitation_request = ElicitationCreateRequest.model_validate(params)
+            return await client.elicitation_create(elicitation_request)
         case "session/update":
             notification = SessionNotification.model_validate(params)
             await client.session_update(notification)
+            return None
+        case "elicitation/complete":
+            elicitation_notification = ElicitationCompleteNotification.model_validate(params)
+            await client.elicitation_complete(elicitation_notification)
             return None
         case "terminal/create":
             create_request = CreateTerminalRequest.model_validate(params)
