@@ -16,6 +16,13 @@ import logfire
 from pydantic_ai import Agent as PydanticAgent, CallToolsNode, ModelRequestNode
 from pydantic_ai.models import Model
 
+try:
+    from pydantic_ai import AgentRetries
+    from pydantic_ai.capabilities import NativeTool, ProcessHistory
+except ImportError:
+    AgentRetries = None  # type: ignore[misc,assignment]
+    from pydantic_ai.capabilities import BuiltinTool as NativeTool, HistoryProcessor as ProcessHistory
+
 from agentpool.agents.base_agent import BaseAgent
 from agentpool.agents.context import AgentContext
 from agentpool.agents.events import RunStartedEvent, StreamCompleteEvent
@@ -768,20 +775,38 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
         # Resolve history processors with caching
         history_processors = self._resolve_history_processors()
 
-        return PydanticAgent(
-            name=self.name,
-            model=model_,
-            model_settings=self.model_settings,
-            instructions=all_instructions,
-            retries=self._retries,
-            end_strategy=self._end_strategy,
-            output_retries=self._output_retries,
-            deps_type=AgentContext[TDeps],
-            output_type=cast(Any, final_type),
-            tools=pydantic_ai_tools,
-            builtin_tools=self._builtin_tools,
-            history_processors=history_processors,
-        )
+        # Build capabilities list from history processors and builtin tools
+        capabilities: list[Any] = []
+        if history_processors:
+            capabilities.extend(ProcessHistory(p) for p in history_processors)
+        if self._builtin_tools:
+            capabilities.extend(NativeTool(t) for t in self._builtin_tools)
+
+        # Handle retries parameter: newer pydantic-ai uses dict form for output_retries
+        if AgentRetries is not None and self._output_retries is not None:
+            retries_param: int | dict[str, int] = {
+                "tools": self._retries,
+                "output": self._output_retries,
+            }
+        else:
+            retries_param = self._retries
+
+        agent_kwargs: dict[str, Any] = {
+            "name": self.name,
+            "model": model_,
+            "model_settings": self.model_settings,
+            "instructions": all_instructions,
+            "retries": retries_param,
+            "end_strategy": self._end_strategy,
+            "deps_type": AgentContext[TDeps],
+            "output_type": cast(Any, final_type),
+            "tools": pydantic_ai_tools,
+            "capabilities": capabilities if capabilities else None,
+        }
+        if AgentRetries is None and self._output_retries is not None:
+            agent_kwargs["output_retries"] = self._output_retries
+
+        return PydanticAgent(**agent_kwargs)
 
     async def _process_node_stream(
         self,

@@ -12,8 +12,8 @@ from typing import TYPE_CHECKING, Any, assert_never, overload
 
 from pydantic_ai import (
     BinaryContent,
-    BuiltinToolCallPart,
-    BuiltinToolReturnPart,
+    NativeToolCallPart,
+    NativeToolReturnPart,
     CachePoint,
     FileUrl,
     ImageUrl,
@@ -264,18 +264,18 @@ async def _format_tool_result(
 
 async def _thread_item_to_tool_return_part(
     item: ThreadItem,
-) -> ToolReturnPart | BuiltinToolReturnPart | None:
-    """Convert a completed ThreadItem to a ToolReturnPart or BuiltinToolReturnPart.
+) -> ToolReturnPart | NativeToolReturnPart | None:
+    """Convert a completed ThreadItem to a ToolReturnPart or NativeToolReturnPart.
 
-    Codex built-in tools (bash, file changes, web search, etc.) are converted to
-    BuiltinToolReturnPart since they're provided by the remote Codex agent.
-    MCP tools are converted to ToolReturnPart (they may be from local ToolBridge).
+    Codex has its own set of builtin tools (bash, file_change, web_search, image_view)
+    that don't correspond to AgentPool tools. We model these as
+    NativeToolReturnPart since they're provided by the remote Codex agent.
 
     Args:
-        item: Completed thread item from Codex
+        item: The completed ThreadItem to convert
 
     Returns:
-        ToolReturnPart for MCP tools, BuiltinToolReturnPart for Codex built-ins, or None
+        ToolReturnPart for MCP tools, NativeToolReturnPart for Codex built-ins, or None
     """
     from codex_adapter.models import (
         ThreadItemCommandExecution,
@@ -288,13 +288,13 @@ async def _thread_item_to_tool_return_part(
     result = await _format_tool_result(item)
     match item:
         case ThreadItemCommandExecution(status="completed", id=tc_id):
-            return BuiltinToolReturnPart(tool_name="bash", content=result, tool_call_id=tc_id)
+            return NativeToolReturnPart(tool_name="bash", content=result, tool_call_id=tc_id)
         case ThreadItemFileChange(status="completed", id=tc_id):
-            return BuiltinToolReturnPart("file_change", content=result, tool_call_id=tc_id)
+            return NativeToolReturnPart("file_change", content=result, tool_call_id=tc_id)
         case ThreadItemWebSearch(id=tc_id):
-            return BuiltinToolReturnPart("web_search", content=result, tool_call_id=tc_id)
+            return NativeToolReturnPart("web_search", content=result, tool_call_id=tc_id)
         case ThreadItemImageView(id=tc_id):
-            return BuiltinToolReturnPart("image_view", content=result, tool_call_id=tc_id)
+            return NativeToolReturnPart("image_view", content=result, tool_call_id=tc_id)
         case ThreadItemMcpToolCall(status="completed", id=tc_id, tool=tool):
             # TODO: Distinguish between local (ToolBridge) and remote MCP tools
             # See matching TODO in _thread_item_to_tool_call_part
@@ -303,18 +303,18 @@ async def _thread_item_to_tool_return_part(
             return None
 
 
-def _thread_item_to_tool_call_part(item: ThreadItem) -> ToolCallPart | BuiltinToolCallPart | None:
-    """Convert a ThreadItem to a ToolCallPart or BuiltinToolCallPart.
+def _thread_item_to_tool_call_part(item: ThreadItem) -> ToolCallPart | NativeToolCallPart | None:
+    """Convert a ThreadItem to a ToolCallPart or NativeToolCallPart.
 
-    Codex built-in tools (bash, file changes, web search, etc.) are converted to
-    BuiltinToolCallPart since they're provided by the remote Codex agent.
-    MCP tools are converted to ToolCallPart (they may be from local ToolBridge).
+    Codex has its own set of builtin tools (bash, file_change, web_search, image_view)
+    that don't correspond to AgentPool tools. We model these as
+    NativeToolCallPart since they're provided by the remote Codex agent.
 
     Args:
-        item: Thread item from Codex
+        item: The ThreadItem to convert
 
     Returns:
-        ToolCallPart for MCP tools, BuiltinToolCallPart for Codex built-ins, or None
+        ToolCallPart for MCP tools, NativeToolCallPart for Codex built-ins, or None
     """
     from codex_adapter.models import (
         ThreadItemCommandExecution,
@@ -327,21 +327,21 @@ def _thread_item_to_tool_call_part(item: ThreadItem) -> ToolCallPart | BuiltinTo
     match item:
         case ThreadItemCommandExecution(command=command, cwd=cwd, id=tc_id):
             args: dict[str, Any] = {"command": command, "cwd": cwd}
-            return BuiltinToolCallPart(tool_name="bash", args=args, tool_call_id=tc_id)
+            return NativeToolCallPart(tool_name="bash", args=args, tool_call_id=tc_id)
         case ThreadItemFileChange(changes=changes, id=tc_id):
             args = {"changes": [c.model_dump() for c in changes]}
-            return BuiltinToolCallPart(tool_name="file_change", args=args, tool_call_id=tc_id)
+            return NativeToolCallPart(tool_name="file_change", args=args, tool_call_id=tc_id)
         case ThreadItemWebSearch(query=query, id=tc_id):
             args = {"query": query}
-            return BuiltinToolCallPart(tool_name="web_search", args=args, tool_call_id=tc_id)
+            return NativeToolCallPart(tool_name="web_search", args=args, tool_call_id=tc_id)
         case ThreadItemImageView(path=path, id=tc_id):
             args = {"path": path}
-            return BuiltinToolCallPart(tool_name="image_view", args=args, tool_call_id=tc_id)
+            return NativeToolCallPart(tool_name="image_view", args=args, tool_call_id=tc_id)
         case ThreadItemMcpToolCall(id=id_, tool=tool, arguments=arguments):
             # TODO: Distinguish between local (ToolBridge) and remote MCP tools
             # Currently all MCP tools use ToolCallPart, but ideally:
             # - Tools from AgentPool's ToolBridge → ToolCallPart (our tools)
-            # - Tools from Codex's own MCP servers → BuiltinToolCallPart (their tools)
+            # - Tools from Codex's own MCP servers → NativeToolCallPart (their tools)
             # This requires tracking which tools came from ToolBridge vs Codex config
             return ToolCallPart(tool_name=tool, args=arguments or {}, tool_call_id=id_)
         case (
@@ -506,9 +506,9 @@ async def event_to_part(
     TextPart
     | ThinkingPart
     | ToolCallPart
-    | BuiltinToolCallPart
+    | NativeToolCallPart
     | ToolReturnPart
-    | BuiltinToolReturnPart
+    | NativeToolReturnPart
     | None
 ):
     """Convert Codex event to part for message construction.
@@ -616,7 +616,7 @@ def _turn_to_chat_messages(turn: Turn) -> list[ChatMessage[list[UserContent]]]: 
                 display = f"[Executed: {cmd}]" + (f"\n{output[:200]}" if output else "")
                 assistant_display_parts.append(display)
                 cmd_args = {"command": cmd, "cwd": cwd}
-                bash_call = BuiltinToolCallPart(tool_name="bash", args=cmd_args, tool_call_id=tc_id)
+                bash_call = NativeToolCallPart(tool_name="bash", args=cmd_args, tool_call_id=tc_id)
                 bash_ret = ToolReturnPart(tool_name="bash", content=output, tool_call_id=tc_id)
                 assistant_responses.append(ModelResponse(parts=[bash_call]))
                 assistant_responses.append(ModelRequest(parts=[bash_ret]))
@@ -643,14 +643,14 @@ def _turn_to_chat_messages(turn: Turn) -> list[ChatMessage[list[UserContent]]]: 
                     result_text = " ".join(texts)
                 assistant_display_parts.append(f"[Tool: {tool}] {result_text[:100]}")
                 mcp_args = args if isinstance(args, dict) else {}
-                mcp_call = BuiltinToolCallPart(tool_name=tool, args=mcp_args, tool_call_id=tc_id)
+                mcp_call = NativeToolCallPart(tool_name=tool, args=mcp_args, tool_call_id=tc_id)
                 mcp_ret = ToolReturnPart(tool_name=tool, content=result_text, tool_call_id=tc_id)
                 assistant_responses.append(ModelResponse(parts=[mcp_call]))
                 assistant_responses.append(ModelRequest(parts=[mcp_ret]))
 
             case ThreadItemWebSearch(query=query, id=tc_id):
                 assistant_display_parts.append(f"[Web Search: {query}]")
-                search_call = BuiltinToolCallPart(
+                search_call = NativeToolCallPart(
                     tool_name="web_search", args={"query": query}, tool_call_id=tc_id
                 )
                 search_ret = ToolReturnPart(
@@ -661,7 +661,7 @@ def _turn_to_chat_messages(turn: Turn) -> list[ChatMessage[list[UserContent]]]: 
 
             case ThreadItemImageView(path=path, id=tc_id):
                 assistant_display_parts.append(f"[Viewed Image: {path}]")
-                view_call = BuiltinToolCallPart(
+                view_call = NativeToolCallPart(
                     tool_name="view_image", args={"path": path}, tool_call_id=tc_id
                 )
                 view_ret = ToolReturnPart(
@@ -704,7 +704,7 @@ def _turn_to_chat_messages(turn: Turn) -> list[ChatMessage[list[UserContent]]]: 
                     collab_args["receiver_thread_ids"] = receiver_thread_ids
                 if prompt:
                     collab_args["prompt"] = prompt
-                collab_call = BuiltinToolCallPart(
+                collab_call = NativeToolCallPart(
                     tool_name="collab_agent", args=collab_args, tool_call_id=tc_id
                 )
                 collab_ret = ToolReturnPart(

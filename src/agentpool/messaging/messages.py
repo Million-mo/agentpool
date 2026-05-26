@@ -13,8 +13,8 @@ from pydantic import BaseModel
 from pydantic_ai import (
     BaseToolReturnPart,
     BinaryContent,
-    BuiltinToolCallPart,
-    BuiltinToolReturnPart,
+    NativeToolCallPart,
+    NativeToolReturnPart,
     FilePart,
     FileUrl,
     ModelRequest,
@@ -391,7 +391,7 @@ class ChatMessage[TContent]:
             A ChatMessage with all fields populated from the result
         """
         # Calculate costs - prefer provider-reported cost if available
-        run_usage = result.usage()
+        run_usage = result.usage
         usage = result.response.usage
         provider_cost = (result.response.provider_details or {}).get("cost")
         if provider_cost is not None:
@@ -510,13 +510,13 @@ class ChatMessage[TContent]:
         call_parts = {
             part.tool_call_id: part
             for part in parts
-            if isinstance(part, ToolCallPart | BuiltinToolCallPart) and part.tool_call_id
+            if isinstance(part, ToolCallPart | NativeToolCallPart) and part.tool_call_id
         }
 
         tool_calls = []
         for part in parts:
             if (
-                isinstance(part, ToolReturnPart | BuiltinToolReturnPart)
+                isinstance(part, ToolReturnPart | NativeToolReturnPart)
                 and part.tool_call_id in call_parts
             ):
                 call_part = call_parts[part.tool_call_id]

@@ -16,8 +16,8 @@ from typing import TYPE_CHECKING, Any, Literal, assert_never
 import uuid
 
 from pydantic_ai import (
-    BuiltinToolCallPart,
-    BuiltinToolReturnPart,
+    NativeToolCallPart,
+    NativeToolReturnPart,
     FinalResultEvent,
     FunctionToolCallEvent,
     FunctionToolResultEvent,
@@ -439,7 +439,7 @@ class ACPEventConverter:
                 yield AgentThoughtChunk.text(delta or "\n", message_id=self._current_message_id)
 
             # Builtin tool call started (e.g., WebSearchTool, CodeExecutionTool)
-            case PartStartEvent(part=BuiltinToolCallPart() as part):
+            case PartStartEvent(part=NativeToolCallPart() as part):
                 tool_call_id = part.tool_call_id
                 tool_input = safe_args_as_dict(part, default={})
                 self._current_tool_inputs[tool_call_id] = tool_input
@@ -455,7 +455,7 @@ class ACPEventConverter:
                     )
 
             # Builtin tool completed
-            case PartStartEvent(part=BuiltinToolReturnPart(content=out, tool_call_id=tc_id)):
+            case PartStartEvent(part=NativeToolReturnPart(content=out, tool_call_id=tc_id)):
                 tool_state = self._tool_states.get(tc_id)
                 if tool_state and tool_state.has_content:
                     yield ToolCallProgress(tool_call_id=tc_id, status="completed", raw_output=out)
