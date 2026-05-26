@@ -34,6 +34,7 @@ from agentpool_server.acp_server.converters import (
 )
 from agentpool_server.acp_server.event_converter import ACPEventConverter
 from agentpool_server.acp_server.input_provider import ACPInputProvider
+from agentpool_server.opencode_server.skill_bridge import create_skill_command
 
 
 if TYPE_CHECKING:
@@ -245,7 +246,70 @@ class ACPSession:
 
             # Subscribe to state change signal for all agents
             agent.state_updated.connect(self._on_state_updated)
+        # Register skill commands from pool's skill_commands registry
+        self._register_skill_commands()
         self.log.info("Created ACP session", current_agent=self.agent.name)
+
+    def _register_skill_commands(self) -> None:
+        """Register skill commands from pool's SkillCommandRegistry to command_store.
+
+        Bridges skill commands into the session's command_store so they are
+        included in available_commands_update notifications per ACP spec.
+        """
+        pool = self.agent_pool
+        skill_registry = getattr(pool, "skill_commands", None)
+        if skill_registry is None:
+            return
+
+        self._skill_command_callback = self._on_skill_command_changed
+        # Skip scheduling updates during initial registration;
+        # the caller of create_session already schedules a consolidated update.
+        self._skill_commands_initializing = True
+        try:
+            skill_registry.on_command_change(self._skill_command_callback)
+        finally:
+            self._skill_commands_initializing = False
+
+        self.log.debug(
+            "Subscribed to skill command changes",
+            skill_count=len(skill_registry.list_items()),
+        )
+
+    def _on_skill_command_changed(self, name: str, command: Any | None) -> None:
+        """Handle skill command add/remove changes from SkillCommandRegistry.
+
+        Args:
+            name: The name of the skill command.
+            command: The SkillCommand if added, None if removed.
+        """
+        if command is None:
+            # Command removed
+            try:
+                self.command_store.unregister_command(name)
+                self.log.debug("Unregistered skill command", skill_name=name)
+            except Exception:
+                self.log.exception("Failed to unregister skill command", skill_name=name)
+        else:
+            # Command added/updated
+            try:
+                from agentpool.skills.command import SkillCommand
+
+                if isinstance(command, SkillCommand):
+                    slashed_cmd = create_skill_command(command)
+                    self.command_store.register_command(slashed_cmd)
+                    self.log.debug("Registered skill command", skill_name=name)
+            except Exception:
+                self.log.exception("Failed to register skill command", skill_name=name)
+
+        # Skip notification during initial registration
+        if getattr(self, "_skill_commands_initializing", False):
+            return
+
+        # Schedule update via TaskManager for proper lifecycle tracking
+        try:
+            self.acp_agent.tasks.create_task(self.send_available_commands_update())
+        except Exception:
+            self.log.exception("Failed to schedule command update")
 
     async def _on_state_updated(
         self, state: ModeInfo | ModelInfo | AvailableCommandsUpdate | ConfigOptionChanged
@@ -527,6 +591,15 @@ class ACPSession:
             for agent in self.agent_pool.get_agents(Agent).values():
                 if self.get_cwd_context in agent.sys_prompts.prompts:
                     agent.sys_prompts.prompts.remove(self.get_cwd_context)  # pyright: ignore[reportArgumentType]  # ty: ignore[invalid-argument-type]
+
+            # Unregister skill command callback to prevent memory leak
+            if hasattr(self, "_skill_command_callback"):
+                skill_registry = getattr(self.agent_pool, "skill_commands", None)
+                if skill_registry is not None and hasattr(skill_registry, "_command_change_handlers"):
+                    try:
+                        skill_registry._command_change_handlers.remove(self._skill_command_callback)
+                    except ValueError:
+                        pass  # Already removed
 
             # Note: Individual agents are managed by the pool's lifecycle
             # The pool will handle agent cleanup when it's closed
