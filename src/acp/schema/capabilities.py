@@ -288,6 +288,7 @@ class AgentCapabilities(AnnotatedObject):
         list_sessions: bool = False,
         resume_session: bool = False,
         close_session: bool = False,
+        fork_session: bool = False,
         providers: bool = False,
     ) -> Self:
         """Create an instance of AgentCapabilities.
@@ -302,12 +303,14 @@ class AgentCapabilities(AnnotatedObject):
             list_sessions: Whether the agent supports `session/list` (unstable).
             resume_session: Whether the agent supports `session/resume` (unstable).
             close_session: Whether the agent supports `session/close` (unstable).
+            fork_session: Whether the agent supports `session/fork` (unstable).
             providers: Whether the agent supports `providers/*` methods.
         """
         session_caps = SessionCapabilities(
             list=SessionListCapabilities() if list_sessions else None,
             resume=SessionResumeCapabilities() if resume_session else None,
             close=SessionCloseCapabilities() if close_session else None,
+            fork=SessionForkCapabilities() if fork_session else None,
         )
         return cls(
             load_session=load_session,

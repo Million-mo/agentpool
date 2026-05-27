@@ -296,6 +296,7 @@ class InitializeResponse(Response):
         list_sessions: bool = False,
         resume_session: bool = False,
         close_session: bool = False,
+        fork_session: bool = False,
         providers: bool = False,
         auth_methods: Sequence[AuthMethod] | None = None,
     ) -> Self:
@@ -315,6 +316,7 @@ class InitializeResponse(Response):
             list_sessions: Whether the agent supports `session/list` (unstable).
             resume_session: Whether the agent supports `session/resume` (unstable).
             close_session: Whether the agent supports `session/close` (unstable).
+            fork_session: Whether the agent supports `session/fork` (unstable).
             providers: Whether the agent supports `providers/*` methods.
             auth_methods: The authentication methods supported by the agent.
         """
@@ -328,6 +330,7 @@ class InitializeResponse(Response):
             list_sessions=list_sessions,
             resume_session=resume_session,
             close_session=close_session,
+            fork_session=fork_session,
             providers=providers,
         )
         return cls(
