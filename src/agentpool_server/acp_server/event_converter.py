@@ -474,17 +474,52 @@ class ACPEventConverter:
 
             # Tool call streaming delta
             case PartDeltaEvent(delta=ToolCallPartDelta() as delta):
-                if delta_part := delta.as_part():
+                delta_part = delta.as_part()
+
+                if delta_part:
+                    # We have a complete tool name - this is either a new tool call
+                    # or an update with tool_name present
                     tool_call_id = delta_part.tool_call_id
+                    tool_name = delta_part.tool_name
+
+                    # Create/get state with empty args initially
+                    state = self._get_or_create_tool_state(tool_call_id, tool_name, {})
+
+                    # Emit ToolCallStart immediately with pending status
+                    # (per ACP spec: send pending as soon as we know the tool)
+                    if not state.started:
+                        state.started = True
+                        yield ToolCallStart(
+                            tool_call_id=tool_call_id,
+                            title=state.title,
+                            kind=state.kind,
+                            raw_input=state.raw_input,
+                            status="pending",
+                        )
+
+                    # Try to get complete args - if successful, update to in_progress
                     try:
                         tool_input = delta_part.args_as_dict()
                     except ValueError:
                         pass  # Args still streaming, not valid JSON yet
                     else:
                         self._current_tool_inputs[tool_call_id] = tool_input
-                        state = self._get_or_create_tool_state(
-                            tool_call_id, delta_part.tool_name, tool_input
+                        state.raw_input = tool_input
+                        # Update title since it may depend on args
+                        state.title = generate_tool_title(tool_name, tool_input)
+                        yield ToolCallProgress(
+                            tool_call_id=tool_call_id,
+                            title=state.title,
+                            raw_input=tool_input,
+                            status="in_progress",
                         )
+                elif delta.tool_call_id:
+                    # No tool_name_delta but we have tool_call_id.
+                    # This could be a follow-up args update for an existing tool call.
+                    # We can't parse args from delta alone, but ensure start was emitted.
+                    tool_call_id = delta.tool_call_id
+                    if tool_call_id in self._tool_states:
+                        state = self._tool_states[tool_call_id]
                         if not state.started:
                             state.started = True
                             yield ToolCallStart(
