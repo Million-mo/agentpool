@@ -118,7 +118,20 @@ def create_skill_command(
                     duration_ms=round(duration_ms, 2),
                     has_instructions=True,
                 )
-                # The actual skill loading happens via context injection
+                # Inject instructions into staged_content for agent processing
+                if (
+                    hasattr(ctx, "data")
+                    and ctx.data is not None
+                    and hasattr(ctx.data, "node")
+                    and ctx.data.node is not None
+                    and hasattr(ctx.data.node, "staged_content")
+                ):
+                    ctx.data.node.staged_content.add_text(instructions)
+                    logger.debug(
+                        "Injected skill instructions into staged_content",
+                        skill_name=skill_cmd.name,
+                        instruction_length=len(instructions),
+                    )
             else:
                 await ctx.print(f"Skill {skill_cmd.name} has no instructions ({skill_uri})")
                 logger.warning(

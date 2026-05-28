@@ -512,8 +512,8 @@ class ACPSession:
                     self.log.info("Processing slash command", command=command)
                     await self.execute_slash_command(command)
 
-                # If only commands, end turn
-                if not non_command_content:
+                # If only commands and no staged content, end turn
+                if not non_command_content and len(self.agent.staged_content) == 0:
                     return "end_turn"
 
             self.log.debug("Processing prompt", content_items=len(non_command_content))
