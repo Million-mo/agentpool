@@ -17,6 +17,8 @@ from acp.schema import (
     CreateTerminalRequest,
     CreateTerminalResponse,
     ElicitationCreateResponse,
+    ForkSessionRequest,
+    ForkSessionResponse,
     InitializeRequest,
     KillTerminalCommandRequest,
     KillTerminalCommandResponse,
@@ -30,6 +32,8 @@ from acp.schema import (
     ReleaseTerminalResponse,
     RequestPermissionRequest,
     RequestPermissionResponse,
+    ResumeSessionRequest,
+    ResumeSessionResponse,
     SessionNotification,
     SetSessionConfigOptionRequest,
     SetSessionModelRequest,
@@ -63,6 +67,7 @@ if TYPE_CHECKING:
         CreateTerminalRequest,
         ElicitationCompleteNotification,
         ElicitationCreateRequest,
+        ForkSessionResponse,
         InitializeResponse,
         KillTerminalCommandRequest,
         ListSessionsResponse,
@@ -72,6 +77,7 @@ if TYPE_CHECKING:
         ReadTextFileRequest,
         ReleaseTerminalRequest,
         RequestPermissionRequest,
+        ResumeSessionResponse,
         SessionNotification,
         CloseSessionResponse,
         TerminalOutputRequest,
@@ -124,6 +130,8 @@ class AgentSideConnection(Client):
             | PromptResponse
             | LoadSessionResponse
             | ListSessionsResponse
+            | ResumeSessionResponse
+            | ForkSessionResponse
             | CloseSessionResponse
             | ListProvidersResponse
             | SetProvidersResponse
@@ -268,6 +276,8 @@ async def _agent_handler(  # noqa: PLR0911
     | PromptResponse
     | LoadSessionResponse
     | ListSessionsResponse
+    | ResumeSessionResponse
+    | ForkSessionResponse
     | CloseSessionResponse
     | ListProvidersResponse
     | SetProvidersResponse
@@ -310,6 +320,12 @@ async def _agent_handler(  # noqa: PLR0911
                 if (model_result := await agent.set_session_model(set_model_request))
                 else {}
             )
+        case "session/resume":
+            resume_request = ResumeSessionRequest.model_validate(params)
+            return await agent.resume_session(resume_request)
+        case "session/fork":
+            fork_request = ForkSessionRequest.model_validate(params)
+            return await agent.fork_session(fork_request)
         case "session/close":
             stop_request = CloseSessionRequest.model_validate(params)
             return await agent.close_session(stop_request)

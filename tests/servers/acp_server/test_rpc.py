@@ -420,5 +420,111 @@ async def test_ignore_invalid_messages(test_agent: TestAgent):
             await asyncio.wait_for(s.client_reader.readline(), timeout=0.1)
 
 
+async def test_resume_session_method_is_routed(
+    test_agent: TestAgent, caplog: pytest.LogCaptureFixture
+):
+    """RED FLAG TEST: session/resume must be routed even when advertised in capabilities.
+
+    Regression: AgentPoolACPAgent.initialize() advertises resume_session=True,
+    but _agent_handler had no case for "session/resume", causing Method not found.
+    """
+    caplog.set_level("CRITICAL")
+    async with _Server() as s:
+        assert s.client_writer is not None
+        assert s.client_reader is not None
+        assert s.server_writer is not None
+        assert s.server_reader is not None
+        _server_conn = AgentSideConnection(
+            lambda _conn: test_agent,
+            AsyncioWriterAdapter(s.server_writer),
+            AsyncioReaderAdapter(s.server_reader),
+        )
+
+        # Initialize first (required before other methods)
+        init_req = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": 1},
+        }
+        s.client_writer.write((anyenv.dump_json(init_req) + "\n").encode())
+        await s.client_writer.drain()
+        line = await asyncio.wait_for(s.client_reader.readline(), timeout=1)
+        init_resp = anyenv.load_json(line)
+        assert "result" in init_resp
+
+        # Send session/resume request
+        req = {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "session/resume",
+            "params": {"sessionId": "sess-123"},
+        }
+        s.client_writer.write((anyenv.dump_json(req) + "\n").encode())
+        await s.client_writer.drain()
+
+        line = await asyncio.wait_for(s.client_reader.readline(), timeout=1)
+        resp = anyenv.load_json(line)
+        assert resp["id"] == 2
+        # MUST NOT get Method not found (-32601)
+        method_not_found_code = -32601
+        assert resp.get("error", {}).get("code") != method_not_found_code, (
+            f"session/resume returned Method not found despite being advertised: {resp}"
+        )
+
+
+async def test_fork_session_method_is_routed(
+    test_agent: TestAgent, caplog: pytest.LogCaptureFixture
+):
+    """RED FLAG TEST: session/fork must be routed even when advertised in capabilities.
+
+    Regression: AgentPoolACPAgent.initialize() advertises fork_session=True,
+    but _agent_handler had no case for "session/fork", causing Method not found.
+    """
+    caplog.set_level("CRITICAL")
+    async with _Server() as s:
+        assert s.client_writer is not None
+        assert s.client_reader is not None
+        assert s.server_writer is not None
+        assert s.server_reader is not None
+        _server_conn = AgentSideConnection(
+            lambda _conn: test_agent,
+            AsyncioWriterAdapter(s.server_writer),
+            AsyncioReaderAdapter(s.server_reader),
+        )
+
+        # Initialize first
+        init_req = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": 1},
+        }
+        s.client_writer.write((anyenv.dump_json(init_req) + "\n").encode())
+        await s.client_writer.drain()
+        line = await asyncio.wait_for(s.client_reader.readline(), timeout=1)
+        init_resp = anyenv.load_json(line)
+        assert "result" in init_resp
+
+        # Send session/fork request
+        req = {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "session/fork",
+            "params": {"sessionId": "sess-123", "cwd": "/tmp"},
+        }
+        s.client_writer.write((anyenv.dump_json(req) + "\n").encode())
+        await s.client_writer.drain()
+
+        line = await asyncio.wait_for(s.client_reader.readline(), timeout=1)
+        resp = anyenv.load_json(line)
+        assert resp["id"] == 2
+        # MUST NOT get Method not found (-32601)
+        method_not_found_code = -32601
+        assert resp.get("error", {}).get("code") != method_not_found_code, (
+            f"session/fork returned Method not found despite being advertised: {resp}"
+        )
+
+
 if __name__ == "__main__":
     pytest.main(["-v", __file__])
