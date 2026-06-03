@@ -37,11 +37,12 @@ def test_agent_run_context_terminal_tool_state_default() -> None:
     assert ctx.terminal_tool_result is None
 
 
-def test_attempt_completion_is_terminal_tool() -> None:
-    """Native agents should stop after `attempt_completion` completes."""
-    from agentpool.agents.native_agent.helpers import TERMINAL_TOOL_NAMES
+def test_terminal_tool_metadata_marks_run_completion() -> None:
+    """Terminal-tool behavior should be declared by metadata, not by tool name."""
+    from agentpool.tools.base import TERMINAL_TOOL_METADATA_KEY, has_terminal_tool_metadata
 
-    assert "attempt_completion" in TERMINAL_TOOL_NAMES
+    assert has_terminal_tool_metadata({TERMINAL_TOOL_METADATA_KEY: "true"})
+    assert not has_terminal_tool_metadata({"name": "attempt_completion"})
 
 
 def test_run_stream_accepts_depth_param() -> None:

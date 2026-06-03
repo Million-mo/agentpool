@@ -936,10 +936,8 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
         Returns:
             The final response ChatMessage.
         """
-        from agentpool.agents.native_agent.helpers import (
-            TERMINAL_TOOL_NAMES,
-            extract_text_from_messages,
-        )
+        from agentpool.agents.native_agent.helpers import extract_text_from_messages
+        from agentpool.tools.base import is_terminal_tool
 
         history_list = message_history.get_history()
         if history_list and history_list[-1] is user_msg:
@@ -950,6 +948,11 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
         if deps is not None:
             agent_deps.data = deps
 
+        terminal_tool_names = {
+            tool.name
+            for tool in await self.tools.get_tools(state="enabled")
+            if is_terminal_tool(tool)
+        }
         history = [m for run in history_list for m in run.to_pydantic_ai()]
         response_msg: ChatMessage[Any] | None = None
 
@@ -1025,7 +1028,7 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
                                         run_ctx,
                                     ):
                                         await event_queue.put(combined)
-                                        if combined.tool_name in TERMINAL_TOOL_NAMES:
+                                        if combined.tool_name in terminal_tool_names:
                                             run_ctx.terminal_tool_name = combined.tool_name
                                             run_ctx.terminal_tool_result = combined.tool_result
                                             break
@@ -1047,7 +1050,7 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
                                             run_ctx,
                                         ):
                                             await event_queue.put(combined)
-                                            if combined.tool_name in TERMINAL_TOOL_NAMES:
+                                            if combined.tool_name in terminal_tool_names:
                                                 run_ctx.terminal_tool_name = combined.tool_name
                                                 run_ctx.terminal_tool_result = combined.tool_result
                                                 break

@@ -54,6 +54,24 @@ ToolKind = Literal[
     "other",
 ]
 
+TERMINAL_TOOL_METADATA_KEY = "agentpool_terminal"
+_TERMINAL_TOOL_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def has_terminal_tool_metadata(metadata: dict[str, str] | None) -> bool:
+    """Return whether tool metadata marks the tool as ending the current run."""
+    if not metadata:
+        return False
+    value = metadata.get(TERMINAL_TOOL_METADATA_KEY)
+    if value is None:
+        return False
+    return value.strip().lower() in _TERMINAL_TOOL_TRUE_VALUES
+
+
+def is_terminal_tool(tool: Tool[Any]) -> bool:
+    """Return whether a tool should terminate the current agent run after completion."""
+    return has_terminal_tool_metadata(tool.metadata)
+
 
 @dataclass
 class ToolResult:
