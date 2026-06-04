@@ -83,8 +83,19 @@ class TodoTracker:
     on_change: TodoChangeCallback | None = field(default=None, repr=False)
     """Optional async callback invoked when todos change."""
 
+    change_notice: str | None = None
+    """Optional user-facing notice describing the latest todo list update."""
+
+    change_version: int = 0
+    """Monotonic version incremented when a visible todo update notice changes."""
+
     _pending_tasks: set[asyncio.Task[None]] = field(default_factory=set, repr=False)
     """Track pending notification tasks to prevent garbage collection."""
+
+    def set_change_notice(self, notice: str | None) -> None:
+        """Set the latest visible todo update notice."""
+        self.change_notice = notice
+        self.change_version += 1
 
     def _notify_change(self) -> None:
         """Notify listener of changes (schedules async callback)."""

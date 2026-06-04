@@ -69,6 +69,7 @@ from agentpool_server.opencode_server.session_pool_integration import (
     set_session_status,
 )
 from agentpool_server.opencode_server.stream_adapter import OpenCodeStreamAdapter
+from agentpool_server.opencode_server.todo_utils import build_opencode_todos
 from agentpool_storage.opencode_provider import helpers
 
 
@@ -1232,10 +1233,7 @@ async def get_session_todos(session_id: str, state: StateDep) -> list[Todo]:
     cached_session = state.sessions.get(session_id)
     if cached_session is not None and cached_session.parent_id is not None:
         tracker = state.pool.todos
-        return [
-            Todo(id=e.id, content=e.content, status=e.status, priority=e.priority)
-            for e in tracker.entries
-        ]
+        return build_opencode_todos(tracker, Todo)
 
     session = await get_or_load_session(state, session_id)
     if session is None:
@@ -1243,10 +1241,7 @@ async def get_session_todos(session_id: str, state: StateDep) -> list[Todo]:
 
     # Get todos from pool's TodoTracker
     tracker = state.pool.todos
-    return [
-        Todo(id=e.id, content=e.content, status=e.status, priority=e.priority)
-        for e in tracker.entries
-    ]
+    return build_opencode_todos(tracker, Todo)
 
 
 @router.get("/{session_id}/diff")
