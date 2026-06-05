@@ -62,6 +62,7 @@ class SlowAgentMock:
         self,
         user_prompt: Any,
         session_id: str | None = None,
+        **kwargs: Any,
     ) -> AsyncIterator[Any]:
         """Simulate slow processing with concurrent run detection."""
         self.run_stream_call_count += 1

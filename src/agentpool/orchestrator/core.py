@@ -473,6 +473,8 @@ class SessionController:
                         session_id=session_id,
                         limit=self._mcp_max_processes,
                     )
+                    if input_provider is not None:
+                        base_agent._input_provider = input_provider
                     self._session_agents[session_id] = base_agent
                     session.agent = base_agent
                     return base_agent
@@ -505,6 +507,8 @@ class SessionController:
                 agent_name=agent_name,
                 agent_type=type(base_agent).__name__,
             )
+            if input_provider is not None:
+                base_agent._input_provider = input_provider
             self._session_agents[session_id] = base_agent
             session.agent = base_agent
             return base_agent
@@ -699,9 +703,9 @@ class SessionController:
         # Session has an active run - delegate after releasing the request lock
         if self._turn_runner is not None:
             if priority == "asap":
-                await self._turn_runner.inject_prompt(session_id, content)
+                await self._turn_runner.inject_prompt(session_id, content, **kwargs)
             else:
-                await self._turn_runner.queue_prompt(session_id, content)
+                await self._turn_runner.queue_prompt(session_id, content, **kwargs)
         return None
 
     def cancel_run_for_session(self, session_id: str) -> None:
@@ -1079,7 +1083,7 @@ class TurnRunner:
                 await self._drain_post_turn_injections(session_id)
                 await self._drain_post_turn_prompts(session_id)
 
-    async def inject_prompt(self, session_id: str, message: str) -> bool:
+    async def inject_prompt(self, session_id: str, message: str, **kwargs: Any) -> bool:
         """Inject a message into a session.
 
         If the session has an active turn, injects immediately.
@@ -1090,6 +1094,7 @@ class TurnRunner:
         Args:
             session_id: The session to inject into.
             message: The message to inject.
+            **kwargs: Additional arguments passed to the agent run.
 
         Returns:
             True if injected into active turn, False if queued.
@@ -1123,12 +1128,12 @@ class TurnRunner:
             self._post_turn_injections.setdefault(session_id, []).append(message)
 
         logger.debug("Queued injection for next turn, triggering auto-resume")
-        task = asyncio.create_task(self._trigger_auto_resume(session_id))
+        task = asyncio.create_task(self._trigger_auto_resume(session_id, **kwargs))
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
         return False
 
-    async def queue_prompt(self, session_id: str, *prompts: Any) -> bool:
+    async def queue_prompt(self, session_id: str, *prompts: Any, **kwargs: Any) -> bool:
         """Queue prompts for a session.
 
         Similar to inject_prompt but for full prompts.
@@ -1137,6 +1142,7 @@ class TurnRunner:
         Args:
             session_id: The session to queue prompts for.
             *prompts: Prompts to queue.
+            **kwargs: Additional arguments passed to the agent run.
 
         Returns:
             True if queued into active turn, False if stored for later.
@@ -1162,10 +1168,39 @@ class TurnRunner:
                 return False
             self._post_turn_prompts.setdefault(session_id, []).append(prompts)
 
-        task = asyncio.create_task(self._trigger_auto_resume(session_id))
+        logger.debug("Queued prompt for next turn, triggering auto-resume")
+        task = asyncio.create_task(self._trigger_auto_resume(session_id, **kwargs))
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
         return False
+
+    async def _drain_post_turn_injections(self, session_id: str) -> list[str]:
+        """Drain and return post-turn injections for a session.
+
+        Args:
+            session_id: Session to drain.
+
+        Returns:
+            List of injection messages.
+        """
+        lock = await self._get_injection_lock(session_id)
+        async with lock:
+            injections = self._post_turn_injections.pop(session_id, [])
+            return injections
+
+    async def _drain_post_turn_prompts(self, session_id: str) -> list[tuple[Any, ...]]:
+        """Drain and return post-turn prompts for a session.
+
+        Args:
+            session_id: Session to drain.
+
+        Returns:
+            List of prompt tuples.
+        """
+        lock = await self._get_injection_lock(session_id)
+        async with lock:
+            prompts = self._post_turn_prompts.pop(session_id, [])
+            return prompts
 
     async def _process_queued_work(
         self,
@@ -1181,7 +1216,7 @@ class TurnRunner:
         Args:
             session_id: The session to process queued work for.
             session: The session state.
-            **kwargs: Additional arguments passed to the agent.
+            **kwargs: Additional arguments passed to the agent run.
         """
         if session.is_closing:
             logger.debug("Session is closing, skipping queued work")
@@ -1226,17 +1261,16 @@ class TurnRunner:
 
             if injections:
                 await self._run_turn_unlocked(session_id, *injections, **kwargs)
-
             for prompt_group in prompts:
                 await self._run_turn_unlocked(session_id, *prompt_group, **kwargs)
-        else:
-            logger.warning(
-                "Auto-resume loop exceeded max iterations",
-                session_id=session_id,
-                max_iterations=self._max_auto_resume,
-            )
 
-    async def _trigger_auto_resume(self, session_id: str) -> None:
+        logger.info(
+            "Auto-resume complete",
+            session_id=session_id,
+            max_iterations=self._max_auto_resume,
+        )
+
+    async def _trigger_auto_resume(self, session_id: str, **kwargs: Any) -> None:
         """Trigger auto-resume for a session if no turn is active.
 
         Fire-and-forget task that ensures post-turn work queued after
@@ -1244,6 +1278,7 @@ class TurnRunner:
 
         Args:
             session_id: The session to trigger auto-resume for.
+            **kwargs: Additional arguments passed to the agent run.
         """
         logger.debug("_trigger_auto_resume called for %s", session_id)
         try:
@@ -1264,46 +1299,18 @@ class TurnRunner:
 
                 if self._enable_auto_resume:
                     logger.debug("Processing queued work")
-                    await self._process_queued_work(session_id, session)
+                    await self._process_queued_work(session_id, session, **kwargs)
                     logger.debug("Finished processing queued work")
                 else:
                     injections = await self._drain_post_turn_injections(session_id)
                     prompts = await self._drain_post_turn_prompts(session_id)
 
                     if injections:
-                        await self._run_turn_unlocked(session_id, *injections)
+                        await self._run_turn_unlocked(session_id, *injections, **kwargs)
                     for prompt_group in prompts:
-                        await self._run_turn_unlocked(session_id, *prompt_group)
+                        await self._run_turn_unlocked(session_id, *prompt_group, **kwargs)
         except asyncio.CancelledError:
             return
-        except Exception:
-            logger.exception("Auto-resume trigger failed", session_id=session_id)
-
-    async def _drain_post_turn_injections(self, session_id: str) -> list[str]:
-        """Drain and return post-turn injections for a session (atomic).
-
-        Args:
-            session_id: The session to drain injections from.
-
-        Returns:
-            The drained injection messages.
-        """
-        lock = await self._get_injection_lock(session_id)
-        async with lock:
-            return self._post_turn_injections.pop(session_id, [])
-
-    async def _drain_post_turn_prompts(self, session_id: str) -> list[tuple[Any, ...]]:
-        """Drain and return post-turn prompts for a session (atomic).
-
-        Args:
-            session_id: The session to drain prompts from.
-
-        Returns:
-            The drained prompt groups.
-        """
-        lock = await self._get_injection_lock(session_id)
-        async with lock:
-            return self._post_turn_prompts.pop(session_id, [])
 
 
 class SessionPool:
@@ -1575,26 +1582,36 @@ class SessionPool:
                     await process_task
             await self.event_bus.unsubscribe(session_id, queue)
 
-    async def inject_prompt(self, session_id: str, message: str) -> bool:
+    async def inject_prompt(self, session_id: str, message: str, **kwargs: Any) -> bool:
         """Inject a message into a session.
+
+        If the session has an active turn, injects immediately.
+        Otherwise, queues for the next turn and triggers auto-resume.
+
+        Does NOT acquire session.turn_lock.
 
         Args:
             session_id: The session to inject into.
             message: The message to inject.
+            **kwargs: Additional arguments passed to the agent run.
 
         Returns:
             True if injected into active turn, False if queued.
         """
-        return await self.turns.inject_prompt(session_id, message)
+        return await self.turns.inject_prompt(session_id, message, **kwargs)
 
-    async def queue_prompt(self, session_id: str, *prompts: Any) -> bool:
+    async def queue_prompt(self, session_id: str, *prompts: Any, **kwargs: Any) -> bool:
         """Queue prompts for a session.
+
+        Similar to inject_prompt but for full prompts.
+        Does NOT acquire session.turn_lock.
 
         Args:
             session_id: The session to queue prompts for.
             *prompts: Prompts to queue.
+            **kwargs: Additional arguments passed to the agent run.
 
         Returns:
             True if queued into active turn, False if stored for later.
         """
-        return await self.turns.queue_prompt(session_id, *prompts)
+        return await self.turns.queue_prompt(session_id, *prompts, **kwargs)

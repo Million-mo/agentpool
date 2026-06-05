@@ -438,7 +438,8 @@ async def _process_message_locked(  # noqa: PLR0915
             else:
                 agent = all_agents[request.agent]
     # Ensure agent is bound to this session
-    agent._input_provider = state.ensure_input_provider(session_id)
+    input_provider = state.ensure_input_provider(session_id)
+    agent._input_provider = input_provider
 
     try:
         request_variant = request.model.variant if request.model else None
@@ -508,7 +509,7 @@ async def _process_message_locked(  # noqa: PLR0915
                 # Keep behavior stable for OpenCode (see PR #10 review iterations).
                 logger.warning("Failed to switch model", error=str(e))
 
-        iterator = agent.run_stream(*user_prompt, session_id=session_id)
+        iterator = agent.run_stream(*user_prompt, session_id=session_id, input_provider=input_provider)
         async for oc_event in adapter.process_stream(iterator):
             await state.broadcast_event(oc_event)
 
