@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from agentpool.messaging import ChatMessage
 from agentpool.sessions import SessionData
 from agentpool.utils.identifiers import ascending
 from agentpool_config.storage import OpenCodeStorageConfig, SQLStorageConfig
@@ -72,6 +73,44 @@ class TestSQLProviderLogSession:
         sessions = await provider.list_session_ids()
         assert session_id_1 in sessions
         assert session_id_2 in sessions
+
+    async def test_log_message_duplicate_id_updates_existing_row(
+        self,
+        provider: SQLModelProvider,
+    ) -> None:
+        """Test that repeated message persistence updates instead of failing."""
+        session_id = "test_session_001"
+        message_id = "msg_duplicate_001"
+        await provider.log_session(session_id=session_id, node_name="test_agent")
+
+        await provider.log_message(
+            message=ChatMessage(
+                content="partial response",
+                role="assistant",
+                name="test_agent",
+                session_id=session_id,
+                message_id=message_id,
+                model_name="openai:test-model",
+            ),
+        )
+        await provider.log_message(
+            message=ChatMessage(
+                content="final response",
+                role="assistant",
+                name="test_agent",
+                session_id=session_id,
+                message_id=message_id,
+                parent_id="msg_parent_001",
+                model_name="openai:test-model",
+                finish_reason="stop",
+            ),
+        )
+
+        stored = await provider.get_message(message_id, session_id=session_id)
+        assert stored is not None
+        assert stored.content == "final response"
+        assert stored.parent_id == "msg_parent_001"
+        assert stored.finish_reason == "stop"
 
 
 class TestOpenCodeStorageProviderPathHandling:
