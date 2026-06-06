@@ -64,6 +64,7 @@ class MCPResourceProvider(ResourceProvider):
         self._prompts_cache: list[MCPClientPrompt] | None = None
         self._resources_cache: list[ResourceInfo] | None = None
         self._skills_cache: list[Skill] | None = None
+        self._client_connected = False
         self.client = MCPClient(
             config=self.server,
             sampling_callback=self._sampling_callback,
@@ -113,6 +114,9 @@ class MCPResourceProvider(ResourceProvider):
                 assert_never(unreachable)  # ty: ignore[type-assertion-failure]
 
     async def __aenter__(self) -> Self:
+        if getattr(self.server, "lazy", False):
+            return self
+
         try:
             await self.exit_stack.enter_async_context(self.client)
         except Exception as e:
@@ -120,7 +124,19 @@ class MCPResourceProvider(ResourceProvider):
             await self.__aexit__(type(e), e, e.__traceback__)
             raise RuntimeError("Failed to initialize MCP manager") from e
 
+        self._client_connected = True
         return self
+
+    async def _ensure_client_connected(self) -> None:
+        """Ensure the MCP client is connected, entering the context if needed.
+
+        Idempotent: safe to call multiple times.
+        """
+        if self._client_connected:
+            return
+
+        await self.exit_stack.enter_async_context(self.client)
+        self._client_connected = True
 
     async def __aexit__(
         self,
@@ -193,6 +209,7 @@ class MCPResourceProvider(ResourceProvider):
 
     async def get_tools(self) -> Sequence[Tool]:
         """Get cached tools with server name prefix, refreshing if necessary."""
+        await self._ensure_client_connected()
         if self._tools_cache is None:
             await self.refresh_tools_cache()
 
@@ -226,6 +243,7 @@ class MCPResourceProvider(ResourceProvider):
 
     async def get_prompts(self) -> list[MCPClientPrompt]:  # type: ignore
         """Get cached prompts, refreshing if necessary."""
+        await self._ensure_client_connected()
         if self._prompts_cache is None:
             await self.refresh_prompts_cache()
 
@@ -255,6 +273,7 @@ class MCPResourceProvider(ResourceProvider):
 
     async def get_resources(self) -> list[ResourceInfo]:
         """Get cached resources, refreshing if necessary."""
+        await self._ensure_client_connected()
         if self._resources_cache is None:
             await self.refresh_resources_cache()
 
