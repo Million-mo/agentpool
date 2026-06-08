@@ -834,11 +834,12 @@ class AgentPoolACPAgent(ACPAgent):
                     or str(uuid.uuid4()),
                 )
             else:
-                elicit_params = mcp_types.ElicitRequestFormParams(
-                    mode="form",
-                    message=msg_params.get("message", ""),
-                    requestedSchema=msg_params.get("requestedSchema"),
-                )
+                form_params: dict[str, Any] = {
+                    "mode": "form",
+                    "message": msg_params.get("message", ""),
+                    "requestedSchema": msg_params.get("requestedSchema") or {},
+                }
+                elicit_params = mcp_types.ElicitRequestFormParams(**form_params)
             result = await input_provider.get_elicitation(elicit_params)
             if isinstance(result, mcp_types.ElicitResult):
                 return result.model_dump()
@@ -938,6 +939,35 @@ class AgentPoolACPAgent(ACPAgent):
             case _:
                 return {}
 
+    async def _handle_server_to_client_message(
+        self, message: dict[str, Any], connection_id: str
+    ) -> Any:
+        """Handle messages from MCP server to ACP client.
+
+        Intercepts server-initiated elicitation/create requests and handles
+        them via the input provider instead of forwarding to the ACP client
+        (which would return {} and cause the MCP server to reject the response).
+
+        For elicitation, the response is sent directly back to the MCP server
+        via the connection's to_session, rather than being forwarded to the
+        ClientSession's read stream (which would cause ID mismatch errors).
+        """
+        inner = message.get("message", {})
+        if isinstance(inner, dict) and inner.get("method") == "elicitation/create":
+            result = await self._handle_mcp_elicitation(inner, connection_id)
+            response = {
+                "jsonrpc": "2.0",
+                "id": inner.get("id", f"elicit-{uuid.uuid4().hex[:8]}"),
+                "result": result,
+            }
+            # Send response directly back to MCP server, not to ClientSession
+            conn = self._mcp_manager.get_connection(connection_id)
+            if conn is not None:
+                await conn.handle_client_message(response)
+            return None  # Tell send_to_client not to forward to _to_session_send
+        with anyio.fail_after(30):
+            return await self.client.send_request("mcp/message", message)
+
     async def connect_acp_mcp_server(self, server: AcpMcpServer) -> str:
         """Connect to an ACP-transport MCP server by requesting connection from client.
 
@@ -966,24 +996,7 @@ class AgentPoolACPAgent(ACPAgent):
             raise ValueError(msg)
 
         async def send_to_client(message: dict[str, Any]) -> Any:
-            # message is already wrapped as {"connectionId": conn_id, "message": mcp_msg}
-            # by AcpMcpConnection.send_to_client. Pass through directly.
-            inner = message.get("message", {})
-            if isinstance(inner, dict) and inner.get("method") == "elicitation/create":
-                # Handle MCP elicitation locally instead of forwarding to ACP client.
-                # The ACP client (Zed) doesn't handle MCP-encapsulated elicitation;
-                # it returns {} which the MCP server rejects as invalid.
-                # We call _handle_mcp_elicitation directly and return the result
-                # as a JSON-RPC response so send_to_client() forwards it back
-                # to the MCP session.
-                result = await self._handle_mcp_elicitation(inner, connection_id)
-                return {
-                    "jsonrpc": "2.0",
-                    "id": inner.get("id", f"elicit-{uuid.uuid4().hex[:8]}"),
-                    "result": result,
-                }
-            with anyio.fail_after(30):
-                return await self.client.send_request("mcp/message", message)
+            return await self._handle_server_to_client_message(message, connection_id)
 
         await self._mcp_manager.create_connection(
             connection_id, server, send_to_client

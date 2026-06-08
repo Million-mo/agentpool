@@ -476,8 +476,138 @@ async def test_correlation_registry_isolates_concurrent_requests(
     await conn.close()
 
 
+async def test_handle_server_to_client_message_intercepts_elicitation(
+    acp_agent: AgentPoolACPAgent,
+    server_config: AcpMcpServer,
+) -> None:
+    """_handle_server_to_client_message intercepts elicitation/create and uses input provider.
+
+    Verifies that:
+    1. Elicitation is handled locally via input provider (not forwarded to ACP client)
+    2. Response is sent back to MCP server via handle_client_message (not returned)
+    3. Method returns None so send_to_client doesn't forward to _to_session_send
+    """
+    # Setup connection so handle_client_message can be called
+    conn = AcpMcpConnection(
+        connection_id="conn-elicit",
+        server_config=server_config,
+        send_to_client=AsyncMock(),
+    )
+    await conn.open()
+    acp_agent._mcp_manager._connections["conn-elicit"] = conn
+
+    # Mock the input provider on the default agent
+    mock_input_provider = AsyncMock()
+    mock_input_provider.get_elicitation = AsyncMock(
+        return_value=ElicitResult(action="accept", content={"value": True})
+    )
+    acp_agent.default_agent._input_provider = mock_input_provider  # type: ignore[attr-defined]
+
+    # Mock the ACP client to verify it's NOT called for elicitation
+    mock_client_send = AsyncMock(return_value={})
+    acp_agent.client.send_request = mock_client_send  # type: ignore[method-assign]
+
+    wrapped_msg = {
+        "connectionId": "conn-elicit",
+        "message": {
+            "jsonrpc": "2.0",
+            "id": "elicit-req-1",
+            "method": "elicitation/create",
+            "params": {
+                "mode": "form",
+                "message": "Do you accept?",
+                "elicitationId": "elicit-req-1",
+            },
+        },
+    }
+
+    result = await acp_agent._handle_server_to_client_message(wrapped_msg, "conn-elicit")
+
+    # Give handle_client_message time to send
+    await asyncio.sleep(0.1)
+
+    # Should return None so send_to_client doesn't forward to _to_session_send
+    assert result is None
+
+    # Input provider should be called
+    mock_input_provider.get_elicitation.assert_awaited_once()
+
+    # ACP client should NOT be called for elicitation
+    mock_client_send.assert_not_awaited()
+
+    # Response should be sent to MCP server (via handle_client_message)
+    # The to_session stream should have the JSON-RPC response
+    from_session_dict = await asyncio.wait_for(conn.to_session.receive(), timeout=1.0)
+    assert from_session_dict["jsonrpc"] == "2.0"
+    assert from_session_dict["id"] == "elicit-req-1"
+    assert from_session_dict["result"]["action"] == "accept"
+
+    await conn.close()
+
+
+async def test_handle_server_to_client_message_forwards_non_elicitation(
+    acp_agent: AgentPoolACPAgent,
+    server_config: AcpMcpServer,
+) -> None:
+    """_handle_server_to_client_message forwards non-elicitation messages to ACP client."""
+    mock_client_send = AsyncMock(return_value={"result": "ok"})
+    acp_agent.client.send_request = mock_client_send  # type: ignore[method-assign]
+
+    wrapped_msg = {
+        "connectionId": "conn-regular",
+        "message": {
+            "jsonrpc": "2.0",
+            "id": "req-1",
+            "method": "tools/list",
+            "params": {},
+        },
+    }
+
+    result = await acp_agent._handle_server_to_client_message(wrapped_msg, "conn-regular")
+
+    # Should forward to ACP client and return its response
+    assert result == {"result": "ok"}
+    mock_client_send.assert_awaited_once_with("mcp/message", wrapped_msg)
+
+
+async def test_handle_server_to_client_message_elicitation_no_input_provider(
+    acp_agent: AgentPoolACPAgent,
+    server_config: AcpMcpServer,
+) -> None:
+    """When no input provider is available, elicitation returns decline action."""
+    # Ensure no input provider is set
+    if hasattr(acp_agent.default_agent, "_input_provider"):
+        delattr(acp_agent.default_agent, "_input_provider")
+
+    mock_client_send = AsyncMock(return_value={})
+    acp_agent.client.send_request = mock_client_send  # type: ignore[method-assign]
+
+    wrapped_msg = {
+        "connectionId": "conn-no-provider",
+        "message": {
+            "jsonrpc": "2.0",
+            "id": "elicit-req-2",
+            "method": "elicitation/create",
+            "params": {
+                "mode": "form",
+                "message": "Do you accept?",
+            },
+        },
+    }
+
+    result = await acp_agent._handle_server_to_client_message(wrapped_msg, "conn-no-provider")
+
+    # Should return JSON-RPC response with decline action
+    assert result["jsonrpc"] == "2.0"
+    assert result["id"] == "elicit-req-2"
+    assert result["result"]["action"] == "decline"
+
+    # ACP client should NOT be called
+    mock_client_send.assert_not_awaited()
+
+
 # ---------------------------------------------------------------------------
-# Elicitation and Notification Paths
+# Notification Paths
 # ---------------------------------------------------------------------------
 
 
@@ -559,7 +689,7 @@ async def test_ext_method_elicitation_create_flat_format(
         "method": "elicitation/create",
         "params": {
             "mode": "form",
-            "message": "功能测试: 您是否确认继续？",
+            "message": "功能测试: 您是否确认继续?",
             "elicitationId": "elicit-flat-1",
             "requestedSchema": {"type": "object", "properties": {"confirmed": {"type": "boolean"}}},
         },
