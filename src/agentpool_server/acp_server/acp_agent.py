@@ -864,6 +864,24 @@ class AgentPoolACPAgent(ACPAgent):
 
                 connection_id = params.get("connectionId", "")
                 message = params.get("message", {})
+
+                # Handle flat format where MCP message fields are directly in params
+                # (some ACP clients send {"connectionId": ..., "method": ..., "params": ...}
+                #  instead of {"connectionId": ..., "message": {"method": ...}})
+                if not message and "method" in params:
+                    message = {
+                        "jsonrpc": params.get("jsonrpc", "2.0"),
+                        "method": params["method"],
+                    }
+                    if "id" in params:
+                        message["id"] = params["id"]
+                    if "params" in params:
+                        message["params"] = params["params"]
+                    if "result" in params:
+                        message["result"] = params["result"]
+                    if "error" in params:
+                        message["error"] = params["error"]
+
                 conn = self._mcp_manager.get_connection(connection_id)
                 if conn is None:
                     logger.warning(

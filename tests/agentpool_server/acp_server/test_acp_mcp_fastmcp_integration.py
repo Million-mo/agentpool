@@ -524,6 +524,58 @@ async def test_ext_method_elicitation_create_bypasses_registry(
     await conn.close()
 
 
+async def test_ext_method_elicitation_create_flat_format(
+    acp_agent: AgentPoolACPAgent,
+    server_config: AcpMcpServer,
+) -> None:
+    """elicitation/create in flat format (no 'message' wrapper) routes correctly.
+
+    Regression test for production bug where ACP client sends:
+    {"connectionId": "...", "method": "elicitation/create", "params": {...}}
+    instead of wrapped format:
+    {"connectionId": "...", "message": {"method": "elicitation/create", ...}}
+
+    Without this fix, ext_method falls through to notification path and returns {}.
+    """
+    conn = AcpMcpConnection(
+        connection_id="conn-elicit-flat",
+        server_config=server_config,
+        send_to_client=AsyncMock(),
+    )
+    await conn.open()
+    acp_agent._mcp_manager._connections["conn-elicit-flat"] = conn
+
+    # Mock the input provider
+    mock_input_provider = AsyncMock()
+    mock_input_provider.get_elicitation = AsyncMock(
+        return_value=ElicitResult(action="accept", content={"confirmed": True})
+    )
+    acp_agent.default_agent._input_provider = mock_input_provider  # type: ignore[attr-defined]
+
+    # Flat format: no "message" wrapper, MCP fields directly in params
+    flat_params = {
+        "connectionId": "conn-elicit-flat",
+        "jsonrpc": "2.0",
+        "method": "elicitation/create",
+        "params": {
+            "mode": "form",
+            "message": "功能测试: 您是否确认继续？",
+            "elicitationId": "elicit-flat-1",
+            "requestedSchema": {"type": "object", "properties": {"confirmed": {"type": "boolean"}}},
+        },
+        "_meta": {"toolCallId": "call_xxx", "toolCallIdInferred": True},
+    }
+
+    result = await acp_agent.ext_method("mcp/message", flat_params)
+
+    # Should route to _handle_mcp_elicitation and return proper result
+    assert result.get("action") == "accept"
+    assert result.get("content") == {"confirmed": True}
+    mock_input_provider.get_elicitation.assert_awaited_once()
+
+    await conn.close()
+
+
 async def test_elicitation_create_forwarded_to_acp_client(
     acp_agent: AgentPoolACPAgent,
     server_config: AcpMcpServer,
