@@ -210,13 +210,6 @@ class AcpMcpConnection:
                 request_id=message.get("id"),
             )
             return message  # Dropped, don't forward to ACP client
-            # Response has an id but no pending request matched — drop it
-            logger.warning(
-                "Dropping unmatched MCP response: no pending request for id",
-                connection_id=self.connection_id,
-                request_id=message["id"],
-            )
-            return message
 
         wrapped = {"connectionId": self.connection_id, "message": message}
         result = await self._send_to_client(wrapped)
