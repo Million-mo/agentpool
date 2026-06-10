@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 import inspect
 import os
 import sys
+import types
 from pathlib import Path
 import re
 import warnings
@@ -73,13 +74,21 @@ if TYPE_CHECKING:
     from agentpool_config.mcp_server import MCPServerConfig
 
     # Union type for state updates emitted via state_updated signal
-    type StateUpdate = ModeInfo | ModelInfo | AvailableCommandsUpdate | ConfigOptionChanged | ToastInfo
+    type StateUpdate = (
+        ModeInfo | ModelInfo | AvailableCommandsUpdate | ConfigOptionChanged | ToastInfo
+    )
 
 
 # ContextVar for per-execution isolation of _current_run_ctx (RFC-0021 compliance)
 _current_run_ctx_var: ContextVar[AgentRunContext | None] = ContextVar(
     "_current_run_ctx_var",
     default=None,
+)
+
+# ContextVar for SessionPool bypass flag (set by TurnRunner before agent calls)
+_bypass_session_pool: ContextVar[bool] = ContextVar(
+    "_bypass_session_pool",
+    default=False,
 )
 
 
@@ -116,34 +125,32 @@ def _is_slash_command(text: str) -> bool:
 def _should_bypass_session_pool() -> bool:
     """Detect if the caller should bypass SessionPool delegation.
 
-    Two cases require bypass:
-    1. AG-UI adapter code: AG-UI uses direct streaming and must not go
-       through SessionPool to preserve its event handling.
-    2. SessionPool internal turns: When run()/run_stream() is called from
+    Three cases require bypass:
+    1. SessionPool internal turns: When run()/run_stream() is called from
        within a TurnRunner turn (e.g., via message forwarding), delegating
        back to SessionPool would cause a deadlock on the per-session turn_lock.
+       Detected via _bypass_session_pool ContextVar set by TurnRunner.
+    2. AG-UI adapter code: AG-UI uses direct streaming and must not go
+       through SessionPool to preserve its event handling.
+    3. AG-UI server frame detection (permanent — see docs/audit/agui-bypass-audit.md).
 
-    Uses sys._getframe() to walk the call stack efficiently and identify
-    these frames. This avoids the overhead of inspect.stack() which
-    constructs full FrameInfo objects for every frame.
+    The AG-UI bypass is permanent because AG-UI protocol requires direct agent
+    access for protocol-specific event transformation (AGUIEventStream).
+    Routing AG-UI through SessionPool would require a complex adapter layer
+    with high risk of breaking AG-UI compatibility.
 
     Returns:
         True if SessionPool delegation should be bypassed, False otherwise.
     """
-    frame = sys._getframe(1)
+    # Case 1: ContextVar set by TurnRunner before agent calls
+    if _bypass_session_pool.get():
+        return True
+
+    # Cases 2 & 3: AG-UI stack inspection (permanent — see docs/audit/agui-bypass-audit.md)
+    frame: types.FrameType | None = sys._getframe(1)
     while frame:
-        # Avoid inspect.getmodule() which performs expensive sys.modules lookups.
-        # frame.f_globals.get("__name__") is O(1) and sufficient for module detection.
         module_name = frame.f_globals.get("__name__", "")
-        # AG-UI adapter bypass
         if "agui" in module_name:
-            return True
-        # SessionPool internal turn bypass (prevents turn_lock deadlock)
-        if "orchestrator" in module_name and frame.f_code.co_name in (
-            "_run_turn_unlocked",
-            "run_loop",
-            "run_turn",
-        ):
             return True
         if "agui_server" in frame.f_code.co_filename:
             return True
@@ -272,8 +279,7 @@ class BaseAgent[TDeps = None, TResult = str](MessageNode[TDeps, TResult]):
         self._input_provider = input_provider
         if input_provider is not None:
             warnings.warn(
-                "BaseAgent._input_provider is deprecated. "
-                "Use SessionState.input_provider instead.",
+                "BaseAgent._input_provider is deprecated. Use SessionState.input_provider instead.",
                 DeprecationWarning,
                 stacklevel=2,
             )
@@ -628,9 +634,10 @@ class BaseAgent[TDeps = None, TResult = str](MessageNode[TDeps, TResult]):
         turn is active and access the run context without relying on
         private attributes.
 
-        Uses two-level fallback:
-        1. SessionPool lookup when pooled (via session_id or agent_pool)
-        2. ContextVar (_current_run_ctx_var) for standalone execution
+        Uses three-level fallback:
+        1. ContextVar (_current_run_ctx_var) for the current task
+        2. SessionPool lookup when pooled (via session_id or agent_pool)
+        3. _background_run_ctx for background task state
 
         Args:
             session_id: Optional session ID for SessionPool lookup.
@@ -640,7 +647,12 @@ class BaseAgent[TDeps = None, TResult = str](MessageNode[TDeps, TResult]):
         Returns:
             The active run context, or None if no turn is running.
         """
-        # Level 1: SessionPool lookup when pooled and session has active run
+        # Level 1: ContextVar for the current task (highest precedence)
+        run_ctx = _current_run_ctx_var.get()
+        if run_ctx is not None and not run_ctx.completed:
+            return run_ctx
+
+        # Level 2: SessionPool lookup when pooled and session has active run
         if self.agent_pool is not None:
             session_pool = self.agent_pool.session_pool
             if session_pool is not None:
@@ -651,11 +663,11 @@ class BaseAgent[TDeps = None, TResult = str](MessageNode[TDeps, TResult]):
                         run_handle = session_pool.get_run(session.current_run_id)
                         if run_handle is not None and not run_handle.run_ctx.completed:
                             return run_handle.run_ctx
-                # No active run in SessionPool for this session — fall through to ContextVar
-        # Level 2: ContextVar for standalone execution
-        run_ctx = _current_run_ctx_var.get()
-        if run_ctx is not None and not run_ctx.completed:
-            return run_ctx
+
+        # Level 3: Background run context (lowest precedence)
+        if self._background_run_ctx is not None and not self._background_run_ctx.completed:
+            return self._background_run_ctx
+
         return None
 
     def is_turn_active(self) -> bool:
@@ -774,8 +786,21 @@ class BaseAgent[TDeps = None, TResult = str](MessageNode[TDeps, TResult]):
                         return
                     # No active run: delegate to SessionPool for auto-resume
                     self.task_manager.fire_and_forget(
+                        session_pool.receive_request(effective_session_id, message, priority="asap")
+                    )
+                    return
+                # FALLBACK: effective_session_id is None but session_pool exists.
+                # This happens when BackgroundTaskProvider calls inject_prompt
+                # after the lead agent's run has ended (no active run context
+                # and agent's _events.session_id is None for shared agents).
+                # Try to find the most recently active session for this agent.
+                session_pool = self.agent_pool.session_pool
+                sessions = session_pool.sessions.find_sessions_by_agent_name(self.name)
+                if sessions:
+                    most_recent = max(sessions, key=lambda s: s.last_active_at)
+                    self.task_manager.fire_and_forget(
                         session_pool.receive_request(
-                            effective_session_id, message, priority="asap"
+                            most_recent.session_id, message, priority="asap"
                         )
                     )
                     return
@@ -803,6 +828,22 @@ class BaseAgent[TDeps = None, TResult = str](MessageNode[TDeps, TResult]):
                 _session_pool.inject_prompt(effective_session_id, message)
             )
             return
+
+        # FALLBACK for shared agents: effective_session_id is None but session_pool exists.
+        # This handles the case where BackgroundTaskProvider calls inject_prompt
+        # after background task completion when the agent has no fixed session_id.
+        if self.agent_pool is not None:
+            _session_pool = self.agent_pool.session_pool
+            if _session_pool is not None:
+                sessions = _session_pool.sessions.find_sessions_by_agent_name(self.name)
+                if sessions:
+                    most_recent = max(sessions, key=lambda s: s.last_active_at)
+                    self.task_manager.fire_and_forget(
+                        _session_pool.receive_request(
+                            most_recent.session_id, message, priority="asap"
+                        )
+                    )
+                    return
 
         # No pool or session_id available — log warning
         self.log.warning(
@@ -881,14 +922,9 @@ class BaseAgent[TDeps = None, TResult = str](MessageNode[TDeps, TResult]):
         Yields:
             Stream events during execution
         """
-        warnings.warn(
-            f"{self.__class__.__name__}.run_stream() is deprecated. "
-            "Use SessionPool.run_stream() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-
-        # SessionPool delegation (bypass for AG-UI which uses direct path)
+        # When SessionPool is available and the caller is not bypassing it,
+        # delegate to SessionPool for turn management and event routing.
+        # AG-UI bypass is permanent — see docs/audit/agui-bypass-audit.md.
         if (
             not _should_bypass_session_pool()
             and self.agent_pool is not None
@@ -900,7 +936,7 @@ class BaseAgent[TDeps = None, TResult = str](MessageNode[TDeps, TResult]):
             session_pool = self.agent_pool.session_pool
 
             # If the session already exists but belongs to a different agent,
-            # fall through to the legacy path so THIS agent runs.
+            # fall through to direct execution so THIS agent runs.
             existing_session = session_pool.sessions.get_session(effective_session_id)
             if existing_session is None or existing_session.agent_name == self.name:
                 # Ensure session exists in SessionPool
@@ -929,7 +965,65 @@ class BaseAgent[TDeps = None, TResult = str](MessageNode[TDeps, TResult]):
                         )
                 return
 
-        # Legacy path (standalone mode or AG-UI bypass)
+        # Direct execution path for AG-UI bypass and standalone mode.
+        # AG-UI requires direct agent access for protocol-specific event
+        # transformation (AGUIEventStream). Standalone agents run without
+        # an AgentPool / SessionPool.
+        async for event in self._run_stream_direct(
+            *prompts,
+            store_history=store_history,
+            message_id=message_id,
+            session_id=session_id,
+            parent_session_id=parent_session_id,
+            parent_id=parent_id,
+            message_history=message_history,
+            input_provider=input_provider,
+            wait_for_connections=wait_for_connections,
+            deps=deps,
+            event_handlers=event_handlers,
+            depth=depth,
+        ):
+            yield event
+
+    async def _run_stream_direct(
+        self,
+        *prompts: PromptCompatible,
+        store_history: bool = True,
+        message_id: str | None = None,
+        session_id: str | None = None,
+        parent_session_id: str | None = None,
+        parent_id: str | None = None,
+        message_history: MessageHistory | None = None,
+        input_provider: InputProvider | None = None,
+        wait_for_connections: bool | None = None,
+        deps: TDeps | None = None,
+        event_handlers: Sequence[AnyEventHandlerType] | None = None,
+        depth: int = 0,
+    ) -> AsyncIterator[RichAgentStreamEvent[TResult]]:
+        """Direct streaming execution bypassing SessionPool delegation.
+
+        This path is used for:
+        1. AG-UI protocol streaming (permanent bypass — see docs/audit/agui-bypass-audit.md)
+        2. Standalone agents without an AgentPool / SessionPool
+        3. TurnRunner internal turns (deadlock prevention via ContextVar)
+
+        Args:
+            *prompts: Input prompts (various formats supported)
+            store_history: Whether to store in history
+            message_id: Optional message ID
+            session_id: Optional conversation ID
+            parent_session_id: Optional parent conversation ID
+            parent_id: Optional parent message ID
+            message_history: Optional message history
+            input_provider: Optional input provider
+            wait_for_connections: Whether to wait for connected agents
+            deps: Optional dependencies
+            event_handlers: Optional event handlers
+            depth: Current delegation depth (0 = top-level run)
+
+        Yields:
+            Stream events during execution
+        """
         from agentpool.utils.identifiers import generate_session_id
 
         # Initialize session_id once for the entire run (including queued prompts)
@@ -1162,7 +1256,11 @@ class BaseAgent[TDeps = None, TResult = str](MessageNode[TDeps, TResult]):
                 )
 
             # Emit signal (always - for event handlers)
-            await self.message_sent.emit(final_message)
+            # Skip when running through session pool; run()/run_stream() will emit
+            if not _should_bypass_session_pool():
+                await self.message_sent.emit(final_message)
+            # Route to connected agents (always - they decide what to do with it)
+            await self.connections.route_message(final_message, wait=wait_for_connections)
             # Conditional persistence based on store_history
             # TODO: Verify store_history semantics across all use cases:
             #   - Should subagent tool calls set store_history=False?
@@ -1175,8 +1273,6 @@ class BaseAgent[TDeps = None, TResult = str](MessageNode[TDeps, TResult]):
                 # Use extend_last=True to include both user_msg and final_message in _last_messages
                 await self.log_message(final_message)
                 conversation.add_chat_messages([final_message], extend_last=True)
-            # Route to connected agents (always - they decide what to do with it)
-            await self.connections.route_message(final_message, wait=wait_for_connections)
 
     async def _execute_slash_command_streaming(
         self, command_text: str
@@ -1386,7 +1482,9 @@ class BaseAgent[TDeps = None, TResult = str](MessageNode[TDeps, TResult]):
         )
         return self._cancelled or background_cancelled
 
-    async def interrupt(self, run_ctx: AgentRunContext | None = None, session_id: str | None = None) -> None:
+    async def interrupt(
+        self, run_ctx: AgentRunContext | None = None, session_id: str | None = None
+    ) -> None:
         """Interrupt the currently running stream.
 
         Sets the cancelled flag, calls subclass-specific _interrupt(),
@@ -1502,14 +1600,9 @@ class BaseAgent[TDeps = None, TResult = str](MessageNode[TDeps, TResult]):
             RuntimeError: If no final message received from stream
             UnexpectedModelBehavior: If the model fails or behaves unexpectedly
         """
-        warnings.warn(
-            f"{self.__class__.__name__}.run() is deprecated. "
-            "Use SessionPool.process_prompt() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-
-        # SessionPool delegation (bypass for AG-UI which uses direct path)
+        # When SessionPool is available and the caller is not bypassing it,
+        # delegate to SessionPool for turn management and event routing.
+        # AG-UI bypass is permanent — see docs/audit/agui-bypass-audit.md.
         if (
             not _should_bypass_session_pool()
             and self.agent_pool is not None
@@ -1521,7 +1614,7 @@ class BaseAgent[TDeps = None, TResult = str](MessageNode[TDeps, TResult]):
             session_pool = self.agent_pool.session_pool
 
             # If the session already exists but belongs to a different agent,
-            # fall through to the legacy path so THIS agent runs.
+            # fall through to direct execution so THIS agent runs.
             existing_session = session_pool.sessions.get_session(effective_session_id)
             if existing_session is None or existing_session.agent_name == self.name:
                 # Ensure session exists in SessionPool
@@ -1545,25 +1638,27 @@ class BaseAgent[TDeps = None, TResult = str](MessageNode[TDeps, TResult]):
                     "event_handlers": event_handlers,
                 }
                 process_task = asyncio.create_task(
-                    session_pool.process_prompt(
-                        effective_session_id, *prompts, **process_kwargs
-                    )
+                    session_pool.process_prompt(effective_session_id, *prompts, **process_kwargs)
                 )
                 final_message: ChatMessage[TResult] | None = None
                 try:
                     while not process_task.done():
                         try:
-                            event = await asyncio.wait_for(queue.get(), timeout=1.0)
-                            if isinstance(event.event, StreamCompleteEvent):
-                                final_message = event.event.message
+                            envelope = await asyncio.wait_for(queue.get(), timeout=1.0)
+                            if envelope is not None and isinstance(
+                                envelope.event, StreamCompleteEvent
+                            ):
+                                final_message = envelope.event.message
                         except TimeoutError:
                             continue
 
                     # Drain remaining events
                     while not queue.empty():
-                        event = queue.get_nowait()
-                        if isinstance(event.event, StreamCompleteEvent):
-                            final_message = event.event.message
+                        envelope = queue.get_nowait()
+                        if envelope is not None and isinstance(
+                            envelope.event, StreamCompleteEvent
+                        ):
+                            final_message = envelope.event.message
 
                     if (exc := process_task.exception()) is not None:
                         raise exc
@@ -1577,12 +1672,10 @@ class BaseAgent[TDeps = None, TResult = str](MessageNode[TDeps, TResult]):
                 # Route from the base agent so Talk targets still receive the message.
                 session = session_pool.sessions.get_session(effective_session_id)
                 if session is not None and getattr(session, "is_per_session_agent", False):
-                    await self.connections.route_message(
-                        final_message, wait=wait_for_connections
-                    )
+                    await self.connections.route_message(final_message, wait=wait_for_connections)
                 return final_message
 
-        # Legacy path (standalone mode or AG-UI bypass)
+        # Direct execution path for AG-UI bypass and standalone mode.
         final_message = None
         async for event in self.run_stream(
             *prompts,
@@ -1794,8 +1887,12 @@ class BaseAgent[TDeps = None, TResult = str](MessageNode[TDeps, TResult]):
                             rules_parts.append(f"## Project Rules\n\n{content}")
                             logger.debug("Loaded project rules", path=rules_path)
                             break
-                except (OSError, UnicodeDecodeError):
-                    logger.debug("No project rules found", path=rules_path)
+                except (OSError, UnicodeDecodeError) as exc:
+                    logger.debug("No project rules found", path=rules_path, error=str(exc))
+                    break
+                except Exception as exc:
+                    # Handles MCP/RequestError from remote filesystems (ACP mode)
+                    logger.debug("No project rules found", path=rules_path, error=str(exc))
 
         # Stage combined rules for first prompt
         if rules_parts:

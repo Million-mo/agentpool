@@ -2,7 +2,7 @@
 
 Verifies RFC-0028 Task T9 requirements:
 - Exactly one SpawnSessionStart emitted per delegation from task()
-- SpawnSessionStart is emitted from task(), NOT from _stream_task()
+- SpawnSessionStart is emitted from task(), NOT from TurnRunner stream wrapping
 - ctx.run_ctx.depth is used instead of getattr(ctx, "current_depth", 0)
 - MAX_DELEGATION_DEPTH guard is enforced before child session creation
 - session_id, parent_session_id, and depth are passed into child run_stream()
@@ -14,9 +14,8 @@ Verifies RFC-0028 Task T9 requirements:
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -25,13 +24,13 @@ from agentpool.agents.context import AgentContext, AgentRunContext
 from agentpool.agents.events import (
     RunStartedEvent,
     SpawnSessionStart,
-    StreamCompleteEvent,
     SubAgentEvent,
 )
 from agentpool.agents.exceptions import MAX_DELEGATION_DEPTH, DelegationDepthError
+from agentpool.orchestrator.core import EventEnvelope
 from agentpool.sessions import SessionData
 from agentpool.sessions.store import MemorySessionStore
-from agentpool_toolsets.builtin.subagent_tools import SubagentTools, _stream_task
+from agentpool_toolsets.builtin.subagent_tools import SubagentTools
 
 
 # ---------------------------------------------------------------------------
@@ -40,7 +39,7 @@ from agentpool_toolsets.builtin.subagent_tools import SubagentTools, _stream_tas
 
 
 async def test_single_spawn_session_start_per_delegation() -> None:
-    """task() emits exactly one SpawnSessionStart — not duplicated by _stream_task()."""
+    """task() emits exactly one SpawnSessionStart — not duplicated by stream wrapping."""
     manifest = AgentsManifest.from_yaml("""
 agents:
   worker:
@@ -66,13 +65,14 @@ agents:
     async with AgentPool(manifest) as pool:
         orchestrator = pool.get_agent("orchestrator")
 
-        async for event in orchestrator.run_stream("Delegate", session_id="ses_test"):
+        async for envelope in orchestrator.run_stream("Delegate", session_id="ses_test"):
+            event = envelope.event if isinstance(envelope, EventEnvelope) else envelope
             if isinstance(event, SpawnSessionStart):
                 spawn_count += 1
 
     assert spawn_count == 1, (
         f"Expected exactly 1 SpawnSessionStart, got {spawn_count}. "
-        "The event should be emitted once from task(), not duplicated in _stream_task()."
+        "The event should be emitted once from task(), not duplicated by TurnRunner."
     )
 
 
@@ -108,15 +108,32 @@ agents:
 
     async with AgentPool(manifest) as pool:
         orchestrator = pool.get_agent("orchestrator")
+        assert pool.session_pool is not None
 
-        async for event in orchestrator.run_stream("Delegate", session_id="ses_test"):
+        # Subscribe to parent with descendants scope to catch child events
+        queue = await pool.session_pool.event_bus.subscribe("ses_test", scope="descendants")
+
+        async for envelope in orchestrator.run_stream("Delegate", session_id="ses_test"):
+            event = envelope.event if isinstance(envelope, EventEnvelope) else envelope
             if isinstance(event, SpawnSessionStart):
                 child_session_id_from_spawn = event.child_session_id
+
+        # Drain remaining events from the queue
+        while not queue.empty():
+            envelope = queue.get_nowait()
+            if envelope is None:
+                break
+            # Events are now wrapped in EventEnvelope by the EventBus
+            event = envelope.event if isinstance(envelope, EventEnvelope) else envelope
+            if isinstance(event, RunStartedEvent):
+                child_session_ids_from_run_started.append(event.session_id)
             elif isinstance(event, SubAgentEvent) and isinstance(event.event, RunStartedEvent):
                 child_session_ids_from_run_started.append(event.event.session_id)
 
+        await pool.session_pool.event_bus.unsubscribe("ses_test", queue)
+
     assert child_session_id_from_spawn is not None, "SpawnSessionStart was not emitted"
-    assert child_session_ids_from_run_started, "No RunStartedEvent found in SubAgentEvents"
+    assert child_session_ids_from_run_started, "No RunStartedEvent found in child events"
     assert child_session_id_from_spawn in child_session_ids_from_run_started, (
         f"RunStartedEvent.session_id {child_session_ids_from_run_started} "
         f"should contain SpawnSessionStart.child_session_id {child_session_id_from_spawn}"
@@ -155,29 +172,28 @@ agents:
     async with AgentPool(manifest) as pool:
         # Swap in our observable store
         assert pool.session_pool is not None
-        pool.session_pool.store = store
+        pool.session_pool.sessions.store = store
 
         orch = pool.get_agent("orchestrator")
 
         child_session_id_from_spawn: str | None = None
 
-        async for event in orch.run_stream("Delegate", session_id="ses_test"):
+        async for envelope in orch.run_stream("Delegate", session_id="ses_test"):
+            event = envelope.event if isinstance(envelope, EventEnvelope) else envelope
             if isinstance(event, SpawnSessionStart):
                 child_session_id_from_spawn = event.child_session_id
 
         assert child_session_id_from_spawn is not None, "SpawnSessionStart not emitted"
-        parent_session_id = orch.session_id
-        assert parent_session_id is not None
 
-    # Verify child session was persisted
-    child_data = await store.load(child_session_id_from_spawn)
-    assert child_data is not None, (
-        f"Child session {child_session_id_from_spawn} was not persisted in store"
-    )
-    assert child_data.parent_id == parent_session_id, (
-        f"Child parent_id={child_data.parent_id}, expected={parent_session_id}"
-    )
-    assert child_data.agent_name == "worker"
+        # Verify child session was persisted (must check before pool shutdown)
+        child_data = await store.load(child_session_id_from_spawn)
+        assert child_data is not None, (
+            f"Child session {child_session_id_from_spawn} was not persisted in store"
+        )
+        assert child_data.parent_id == "ses_test", (
+            f"Child parent_id={child_data.parent_id}, expected=ses_test"
+        )
+        assert child_data.agent_name == "worker"
 
 
 # ---------------------------------------------------------------------------
@@ -225,47 +241,6 @@ agents:
             )
 
         assert exc_info.value.current_depth == MAX_DELEGATION_DEPTH + 1
-
-
-# ---------------------------------------------------------------------------
-# _stream_task does NOT emit SpawnSessionStart
-# ---------------------------------------------------------------------------
-
-
-async def test_stream_task_does_not_emit_spawn_session_start() -> None:
-    """_stream_task() does not emit SpawnSessionStart — only wraps events as SubAgentEvent."""
-    mock_ctx = MagicMock(spec=AgentContext)
-    mock_ctx.events = MagicMock()
-    mock_ctx.events.emit_event = AsyncMock()
-
-    final_msg = MagicMock()
-    final_msg.content = "Test result"
-
-    async def fake_stream() -> AsyncIterator[StreamCompleteEvent[Any]]:
-        yield StreamCompleteEvent(message=final_msg)
-
-    result = await _stream_task(
-        mock_ctx,
-        source_name="test_agent",
-        source_type="agent",
-        stream=fake_stream(),
-        child_session_id="child_ses_123",
-        parent_session_id="parent_ses_456",
-    )
-
-    # Verify SpawnSessionStart was NOT emitted by _stream_task
-    for call in mock_ctx.events.emit_event.call_args_list:
-        event = call.args[0]
-        assert not isinstance(event, SpawnSessionStart), (
-            "_stream_task() should not emit SpawnSessionStart — "
-            "it should be emitted only by task()"
-        )
-
-    # Verify result contains the session_id
-    assert result["metadata"]["sessionId"] == "child_ses_123"
-
-    # Verify SubAgentEvent was emitted
-    assert mock_ctx.events.emit_event.call_count >= 1
 
 
 # ---------------------------------------------------------------------------
@@ -352,7 +327,8 @@ agents:
         orch = pool.get_agent("orchestrator")
 
         # With depth=0 (default top-level), child should be depth=1
-        async for event in orch.run_stream("Delegate", session_id="ses_test"):
+        async for envelope in orch.run_stream("Delegate", session_id="ses_test"):
+            event = envelope.event if isinstance(envelope, EventEnvelope) else envelope
             if isinstance(event, SpawnSessionStart):
                 spawn_depth = event.depth
 

@@ -159,12 +159,76 @@ def mock_pool(
     pool.sessions.store.list_sessions = AsyncMock(return_value=[])
     # Mirror the same store on session_pool for the new access path
     pool.session_pool = Mock()
+
+    async def _mock_create_session(
+        session_id: str,
+        agent_name: str | None = None,
+        parent_session_id: str | None = None,
+        **metadata: Any,
+    ) -> Mock:
+        from datetime import datetime
+
+        from agentpool.sessions.models import SessionData
+
+        data = SessionData(
+            session_id=session_id,
+            agent_name=agent_name or "test-agent",
+            parent_id=parent_session_id,
+            created_at=datetime.now(),
+            last_active=datetime.now(),
+            metadata=metadata,
+        )
+        await storage_manager.save_session(data)
+        return Mock()
+
+    async def _mock_close_session(session_id: str) -> None:
+        await storage_manager.delete_session(session_id)
+
+    pool.session_pool.create_session = AsyncMock(side_effect=_mock_create_session)
+    pool.session_pool.close_session = AsyncMock(side_effect=_mock_close_session)
     pool.session_pool.sessions = Mock()
+    pool.session_pool.sessions.cancel_run_for_session = Mock()
+    _mock_session_agent = Mock()
+    _mock_session_agent.name = "test-agent"
+    _mock_session_agent.load_session = AsyncMock(return_value=None)
+    _mock_session_agent.conversation = Mock()
+    _mock_session_agent.conversation.chat_messages = []
+    pool.session_pool.sessions.get_or_create_session_agent = AsyncMock(
+        return_value=_mock_session_agent
+    )
+    pool.session_pool.sessions.get_or_create_session = AsyncMock(
+        return_value=(Mock(), True)
+    )
+    _run_handle = Mock()
+    _run_handle.complete_event = Mock()
+    _run_handle.complete_event.wait = AsyncMock()
+    pool.session_pool.receive_request = AsyncMock(return_value=_run_handle)
+    pool.session_pool.event_bus = Mock()
+    pool.session_pool.event_bus.subscribe = AsyncMock(return_value=asyncio.Queue())
+    pool.session_pool.event_bus.unsubscribe = AsyncMock()
     pool.session_pool.sessions.store = Mock()
     pool.session_pool.sessions.store.save = storage_manager.save_session
     pool.session_pool.sessions.store.delete = storage_manager.delete_session
     pool.session_pool.sessions.store.load = storage_manager.load_session
     pool.session_pool.sessions.store.list_sessions = AsyncMock(return_value=[])
+
+    # Message history API mocks (used by share/revert/fork routes)
+    # Use an in-memory store so get_messages_for_session / append_message_to_session
+    # round-trips work correctly in tests.
+    _mock_chat_store: dict[str, list[Any]] = {}
+
+    async def _mock_get_messages(session_id: str) -> list[Any]:
+        return _mock_chat_store.get(session_id, [])
+
+    async def _mock_append_message(session_id: str, msg: Any) -> str:
+        _mock_chat_store.setdefault(session_id, [])
+        _mock_chat_store[session_id].append(msg)
+        return "msg-id"
+
+    pool.session_pool.get_messages = AsyncMock(side_effect=_mock_get_messages)
+    pool.session_pool.truncate_messages = AsyncMock(return_value=0)
+    pool.session_pool.copy_messages = AsyncMock(return_value=None)
+    pool.session_pool.append_message = AsyncMock(side_effect=_mock_append_message)
     return pool
 
 
@@ -231,7 +295,15 @@ def mock_agent(mock_env: Mock, mock_pool: Mock, storage_manager: StorageManager)
 @pytest.fixture
 def server_state(tmp_project_dir: Path, mock_agent: Mock) -> ServerState:
     """Create a server state for testing."""
-    return ServerState(working_dir=str(tmp_project_dir), agent=mock_agent)
+    state = ServerState(working_dir=str(tmp_project_dir), agent=mock_agent)
+    # Initialize backward-compat dicts removed from ServerState dataclass
+    # so tests and helper fallbacks can access them.
+    state.messages = {}
+    state.session_status = {}
+    state.todos = {}
+    state.input_providers = {}
+    state.pending_questions = {}
+    return state
 
 
 # =============================================================================

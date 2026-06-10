@@ -8,20 +8,19 @@ Consolidated from:
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from collections.abc import AsyncIterator
+import contextlib
 from typing import Any
 from unittest.mock import MagicMock
 
-from pydantic_ai.models.test import TestModel
 import pytest
 
 from acp.schema import TurnCompleteUpdate
-from agentpool import Agent, AgentPool, AgentsManifest, NativeAgentConfig
+from agentpool import AgentPool, AgentsManifest, NativeAgentConfig
 from agentpool.agents.context import AgentRunContext
 from agentpool.agents.events import RunStartedEvent, StreamCompleteEvent
 from agentpool.messaging import ChatMessage
-from agentpool.orchestrator.core import EventBus, SessionController, SessionPool, TurnRunner
+from agentpool.orchestrator.core import EventBus, EventEnvelope, SessionController, SessionPool, TurnRunner
 from agentpool_server.acp_server.event_converter import ACPEventConverter
 
 
@@ -37,7 +36,7 @@ async def _setup_session(
     mock_pool: Any,
 ) -> Any:
     """Create a session and attach the agent."""
-    state = await controller.get_or_create_session(session_id)
+    state, _ = await controller.get_or_create_session(session_id)
     state.agent = agent
     controller._session_agents[session_id] = agent
     mock_pool.get_agent.return_value = agent
@@ -207,14 +206,20 @@ async def test_real_agentpool_sessionpool_inject_prompt_auto_resume() -> None:
 
         # Check that auto-resume was triggered: we should see events from
         # the initial turn AND from the auto-resume turn.
-        run_started_events = [e for e in events if isinstance(e, RunStartedEvent)]
+        run_started_events = [
+            e for e in events
+            if isinstance(e.event if isinstance(e, EventEnvelope) else e, RunStartedEvent)
+        ]
         assert len(run_started_events) >= 2, (
             f"Expected at least 2 RunStartedEvent (initial + auto-resume), got {len(run_started_events)}. "
             f"Auto-resume did not trigger after inject_prompt. Events: {[type(e).__name__ for e in events]}"
         )
 
         # Verify we got at least 2 StreamCompleteEvent (one per run)
-        stream_complete_events = [e for e in events if isinstance(e, StreamCompleteEvent)]
+        stream_complete_events = [
+            e for e in events
+            if isinstance(e.event if isinstance(e, EventEnvelope) else e, StreamCompleteEvent)
+        ]
         assert len(stream_complete_events) >= 2, (
             f"Expected at least 2 StreamCompleteEvent, got {len(stream_complete_events)}"
         )
@@ -297,10 +302,11 @@ async def test_turn_complete_update_after_auto_resume() -> None:
             await consumer_task
 
         # Convert events to ACP updates using the same converter as the handler
-        converter = ACPEventConverter()
+        converter = ACPEventConverter(client_supports_turn_complete=True)
         acp_updates: list[Any] = []
         for event in events:
-            async for update in converter.convert(event):
+            raw_event = event.event if isinstance(event, EventEnvelope) else event
+            async for update in converter.convert(raw_event):
                 acp_updates.append(update)
 
         # Check that TurnCompleteUpdate is emitted for BOTH turns
@@ -368,7 +374,9 @@ class TestEventBusSessionTree:
             "when EventBus is wired to SessionController"
         )
         received = await parent_queue.get()
-        assert received == event
+        assert isinstance(received, EventEnvelope)
+        assert received.event == event
+        assert received.source_session_id == "child-sid"
 
     async def test_publish_delivers_to_exact_session(self) -> None:
         """Green: exact session scope works (baseline)."""
@@ -380,7 +388,9 @@ class TestEventBusSessionTree:
 
         assert not queue.empty(), "Exact session scope should work"
         received = await queue.get()
-        assert received == event
+        assert isinstance(received, EventEnvelope)
+        assert received.event == event
+        assert received.source_session_id == "same-sid"
 
 
 class TestSessionControllerChildrenVsEventBus:
@@ -395,11 +405,11 @@ class TestSessionControllerChildrenVsEventBus:
         controller = SessionController(mock_pool)
 
         # Create parent session
-        parent = await controller.get_or_create_session("parent-sid")
+        parent, _ = await controller.get_or_create_session("parent-sid")
         assert parent.session_id == "parent-sid"
 
         # Create child session
-        child = await controller.get_or_create_session(
+        child, _ = await controller.get_or_create_session(
             "child-sid", parent_session_id="parent-sid"
         )
         assert child.parent_session_id == "parent-sid"
@@ -514,6 +524,41 @@ class TestSessionControllerChildrenVsEventBus:
             f"Child events were not delivered to parent subscriber."
         )
 
+    async def test_acp_handler_child_events_have_session_id(self) -> None:
+        """Child session events are wrapped in EventEnvelope with source_session_id."""
+        from agentpool.agents.events import StreamCompleteEvent
+        from agentpool.messaging import ChatMessage
+        from agentpool.orchestrator.core import TurnRunner
+
+        mock_pool = MagicMock()
+        mock_pool.main_agent.name = "test-agent"
+        mock_pool.manifest.agents = {}
+        controller = SessionController(mock_pool)
+        await controller.get_or_create_session("parent-sid")
+        await controller.get_or_create_session("child-sid", parent_session_id="parent-sid")
+        bus = EventBus(session_controller=controller)
+        controller.turn_runner = TurnRunner(session_controller=controller, enable_auto_resume=False)
+        controller.turn_runner.event_bus = bus
+
+        # Parent subscribes with descendants scope
+        parent_queue = await bus.subscribe("parent-sid", scope="descendants")
+
+        # Publish child event via TurnRunner._publish_event (the real path)
+        child_event = StreamCompleteEvent(
+            message=ChatMessage(content="hello", role="assistant"),
+        )
+
+        await controller.turn_runner._publish_event("child-sid", child_event)
+
+        # Parent receives the event wrapped in EventEnvelope
+        received = await parent_queue.get()
+        assert isinstance(received, EventEnvelope)
+        assert received.source_session_id == "child-sid", (
+            "Child event should carry source_session_id so ACP handler can route it correctly"
+        )
+        # The actual event payload is accessible via received.event
+        assert isinstance(received.event, StreamCompleteEvent)
+
 
 class TestSessionPoolIntegration:
     """Red flag: SessionPool-level integration tests."""
@@ -562,7 +607,9 @@ class TestSessionPoolIntegration:
 
         assert not parent_queue.empty(), "Manual _session_tree fix should work"
         received = await parent_queue.get()
-        assert received["data"] == "hello"
+        assert isinstance(received, EventEnvelope)
+        assert received.event["data"] == "hello"
+        assert received.source_session_id == "child-sid"
 
 
 class TestInjectPromptWithSessionPool:
@@ -624,3 +671,94 @@ async def test_diagnostic_print_session_tree_state() -> None:
     # This assertion documents the bug:
     assert pool.sessions._children != {}, "SessionController knows about children"
     assert pool.event_bus._session_tree == {}, "BUG: EventBus._session_tree is empty"
+
+
+@pytest.mark.integration
+async def test_shared_agent_inject_prompt_fallback_triggers_auto_resume() -> None:
+    """Shared agent inject_prompt without session_id MUST fallback to SessionPool auto-resume.
+
+    Scenario (real-world from BackgroundTaskProvider):
+      1. A shared agent (no fixed session_id) runs a turn via SessionPool
+      2. The turn completes, session becomes idle
+      3. A background task completes and calls agent.inject_prompt("notice")
+         WITHOUT passing session_id
+      4. agent.inject_prompt has no active run_ctx and _events.session_id is None
+      5. Fallback: find the most recently active session for this agent in SessionPool
+      6. Trigger auto-resume via session_pool.receive_request
+
+    EXPECTED: Auto-resume triggers and processes the injected message.
+    """
+    agent_config = NativeAgentConfig(
+        name="test_agent",
+        model="test",
+        system_prompt="You are a test agent",
+    )
+    manifest = AgentsManifest(agents={"test_agent": agent_config})
+
+    async with AgentPool(manifest, enable_session_pool=True) as pool:
+        session_pool = pool.session_pool
+        assert session_pool is not None
+
+        session_id = "test-session"
+        await session_pool.create_session(session_id, agent_name="test_agent")
+
+        # Subscribe to EventBus to consume events
+        event_queue = await session_pool.event_bus.subscribe(session_id)
+        events: list[Any] = []
+
+        async def _consume_events() -> None:
+            while True:
+                try:
+                    event = await asyncio.wait_for(event_queue.get(), timeout=1.0)
+                    if event is None:
+                        break
+                    events.append(event)
+                except asyncio.TimeoutError:
+                    break
+
+        consumer_task = asyncio.create_task(_consume_events())
+
+        # 1. Process initial prompt via run_loop
+        await session_pool.process_prompt(session_id, "hello")
+
+        # Wait for consumer to collect initial turn events
+        await asyncio.sleep(0.2)
+
+        # 2. Get the shared agent from pool (simulates ctx.agent in BackgroundTaskProvider)
+        shared_agent = pool.get_agent("test_agent")
+        # Verify shared agent has no fixed session_id
+        assert shared_agent._events.session_id is None, (
+            "Shared agent should not have a fixed session_id for this test"
+        )
+
+        # 3. Call inject_prompt WITHOUT session_id (simulates BackgroundTaskProvider)
+        shared_agent.inject_prompt("bg task completed")
+
+        # 4. Wait for auto-resume to process the injection
+        await asyncio.sleep(0.2)
+
+        # Cancel consumer
+        consumer_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await consumer_task
+
+        # Check that auto-resume was triggered: we should see events from
+        # the initial turn AND from the auto-resume turn.
+        run_started_events = [
+            e for e in events
+            if isinstance(e.event if isinstance(e, EventEnvelope) else e, RunStartedEvent)
+        ]
+        assert len(run_started_events) >= 2, (
+            f"Expected at least 2 RunStartedEvent (initial + auto-resume), got {len(run_started_events)}. "
+            f"Fallback auto-resume did not trigger after inject_prompt. "
+            f"Events: {[type(e).__name__ for e in events]}"
+        )
+
+        # Verify we got at least 2 StreamCompleteEvent (one per run)
+        stream_complete_events = [
+            e for e in events
+            if isinstance(e.event if isinstance(e, EventEnvelope) else e, StreamCompleteEvent)
+        ]
+        assert len(stream_complete_events) >= 2, (
+            f"Expected at least 2 StreamCompleteEvent, got {len(stream_complete_events)}"
+        )

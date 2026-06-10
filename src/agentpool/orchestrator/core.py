@@ -7,6 +7,7 @@ and auto-resume capabilities for agent sessions.
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 import contextlib
 import copy
@@ -19,8 +20,11 @@ import uuid
 
 from agentpool.agents.context import AgentRunContext
 from agentpool.log import get_logger
+from agentpool.messaging import ChatMessage
+from agentpool.models.pending_interaction import PendingPermission, PendingQuestion
 from agentpool.orchestrator.run import RunHandle, RunStatus
 from agentpool.sessions.models import SessionData
+from agentpool_server.opencode_server.models.session_info import SessionInfo
 
 
 if TYPE_CHECKING:
@@ -28,6 +32,35 @@ if TYPE_CHECKING:
     from agentpool.agents.native_agent import Agent
     from agentpool.delegation import AgentPool
     from agentpool.sessions.store import SessionStore
+
+
+@dataclass(frozen=True)
+class EventEnvelope:
+    """Wrapper for events published through EventBus.
+
+    Carries routing metadata (source_session_id) separately from the event
+    payload so consumers can determine the event's origin without mutating
+    the event object.
+
+    Attribute access is transparently forwarded to the wrapped event,
+    so consumers can use ``envelope.delta`` or ``envelope.event_kind``
+    without unwrapping.
+    """
+
+    source_session_id: str
+    """The session that produced this event."""
+    event: Any
+    """The original event payload (unmodified)."""
+
+    def __getattr__(self, name: str) -> Any:
+        """Forward attribute access to the wrapped event."""
+        return getattr(self.event, name)
+
+    def __repr__(self) -> str:
+        return (
+            f"EventEnvelope(source_session_id={self.source_session_id!r}, "
+            f"event={self.event!r})"
+        )
 
 
 logger = get_logger(__name__)
@@ -84,6 +117,8 @@ class SessionState:
     current_run_id: str | None = None
     _request_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     input_provider: Any | None = None
+    pending_questions: dict[str, Any] = field(default_factory=dict)
+    """Pending questions stored on SessionState for per-session isolation."""
 
     @property
     def closing(self) -> bool:
@@ -110,22 +145,35 @@ class EventBus:
     def __init__(
         self,
         max_queue_size: int = DEFAULT_QUEUE_MAXSIZE,
+        replay_buffer_size: int = 100,
         session_controller: SessionController | None = None,
     ) -> None:
         """Initialize the event bus.
 
         Args:
             max_queue_size: Maximum size for subscriber queues.
+            replay_buffer_size: Maximum number of events retained per session for replay.
             session_controller: Optional session controller for hierarchy queries.
         """
-        self._subscribers: dict[str, list[tuple[asyncio.Queue[Any], str]]] = {}
+        self._subscribers: dict[
+            str, list[tuple[asyncio.Queue[EventEnvelope | None], str]]
+        ] = {}
         self._session_tree: dict[str, list[str]] = {}
         self._lock = asyncio.Lock()
         self._max_queue_size = max_queue_size
+        self._replay_buffer_size = replay_buffer_size
         self._session_controller = session_controller
+        self._replay_buffers: dict[str, deque[EventEnvelope]] = {}
 
-    async def subscribe(self, session_id: str, scope: str = "session") -> asyncio.Queue[Any]:
+    async def subscribe(
+        self, session_id: str, scope: str = "session"
+    ) -> asyncio.Queue[EventEnvelope | None]:
         """Subscribe to events for a session.
+
+        New subscribers receive replayed historical events from the replay
+        buffer before live events. Events published during the replay phase
+        are drained and re-inserted after historical events to preserve
+        ordering and avoid loss.
 
         Args:
             session_id: The session to subscribe to.
@@ -135,15 +183,52 @@ class EventBus:
         Returns:
             A queue to consume events from.
         """
-        queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=self._max_queue_size)
+        queue: asyncio.Queue[EventEnvelope | None] = asyncio.Queue(
+            maxsize=self._max_queue_size
+        )
+
+        # 1. Register subscriber and capture replay buffer atomically
+        # (inside the same lock to prevent duplicate delivery)
         async with self._lock:
             self._subscribers.setdefault(session_id, []).append((queue, scope))
+            if scope == "all":
+                # Global subscriptions collect from all session buffers
+                historical_events: list[EventEnvelope] = []
+                for buffer in self._replay_buffers.values():
+                    historical_events.extend(buffer)
+            else:
+                buffer = self._replay_buffers.get(session_id, deque())
+                historical_events = list(buffer)
+
+        # 3. Drain any live events that arrived during replay
+        # (these are already in the queue from publish())
+        live_events_during_replay: list[EventEnvelope | None] = []
+        while not queue.empty():
+            try:
+                live_events_during_replay.append(queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+
+        # 4. Replay historical events first (EventEnvelope is immutable, no copy needed)
+        for envelope in historical_events:
+            try:
+                queue.put_nowait(envelope)
+            except asyncio.QueueFull:
+                break  # Skip remaining if queue full
+
+        # 5. Re-insert live events that arrived during replay
+        for event in live_events_during_replay:
+            try:
+                queue.put_nowait(event)
+            except asyncio.QueueFull:
+                break
+
         return queue
 
     async def unsubscribe(
         self,
         session_id: str,
-        queue: asyncio.Queue[Any],
+        queue: asyncio.Queue[EventEnvelope | None],
     ) -> None:
         """Unsubscribe from events.
 
@@ -202,40 +287,50 @@ class EventBus:
                 or published_sid == self._get_parent(subscriber_sid)
                 or self._are_siblings(published_sid, subscriber_sid)
             )
+        if scope == "all":
+            return True
         return published_sid == subscriber_sid
 
     async def publish(self, session_id: str, event: Any) -> None:
         """Publish an event to all subscribers for a session.
 
+        The event is wrapped in an EventEnvelope with the source_session_id
+        before storage and distribution.
+
         If a subscriber's queue is full, drops the oldest event.
         If put fails, removes the dead subscriber.
 
-        Creates a shallow copy of the event for each subscriber to prevent
-        one consumer's mutation from affecting others.
-
         Args:
-            session_id: The session to publish to.
+            session_id: The session that produced the event.
             event: The event to broadcast.
         """
+        # Wrap event in envelope with routing metadata
+        envelope = EventEnvelope(source_session_id=session_id, event=event)
+
         async with self._lock:
-            queues: list[tuple[asyncio.Queue[Any], str]] = []
+            # Store in replay buffer while holding lock to prevent race
+            # with subscribe() snapshotting the buffer
+            if session_id not in self._replay_buffers:
+                self._replay_buffers[session_id] = deque(maxlen=self._replay_buffer_size)
+            self._replay_buffers[session_id].append(envelope)
+
+            queues: list[tuple[asyncio.Queue[EventEnvelope | None], str]] = []
             for subscriber_sid, subscribers in self._subscribers.items():
                 for queue, scope in subscribers:
                     if self._should_receive(session_id, subscriber_sid, scope):
                         queues.append((queue, scope))
 
-        dead_queues: list[asyncio.Queue[Any]] = []
+        dead_queues: list[asyncio.Queue[EventEnvelope | None]] = []
         for queue, _scope in queues:
-            copied_event = copy.copy(event)
             try:
-                queue.put_nowait(copied_event)
+                queue.put_nowait(envelope)
             except asyncio.QueueFull:
                 try:
                     queue.get_nowait()
-                    queue.put_nowait(copied_event)
+                    queue.put_nowait(envelope)
                 except asyncio.QueueEmpty:
                     try:
-                        queue.put_nowait(copied_event)
+                        queue.put_nowait(envelope)
                     except asyncio.QueueFull:
                         dead_queues.append(queue)
                 except asyncio.QueueFull:
@@ -259,10 +354,14 @@ class EventBus:
         """Close all subscriptions for a session.
 
         Drains queues to make room, then sends sentinel (None) to unblock consumers.
+        Clears the replay buffer for the session.
 
         Args:
             session_id: The session to close subscriptions for.
         """
+        # Clear replay buffer
+        self._replay_buffers.pop(session_id, None)
+
         async with self._lock:
             subscribers = self._subscribers.pop(session_id, [])
             queues = [queue for queue, _scope in subscribers]
@@ -340,7 +439,7 @@ class SessionController:
         parent_session_id: str | None = None,
         lifecycle_policy: str | None = None,
         **metadata: Any,
-    ) -> SessionState:
+    ) -> tuple[SessionState, bool]:
         """Get or create a session.
 
         Uses single global lock for simplicity and safety.
@@ -354,7 +453,8 @@ class SessionController:
             **metadata: Arbitrary metadata to attach to the session.
 
         Returns:
-            The session state.
+            A tuple of (session_state, was_created) where was_created is True
+            if the session was newly created, False if it already existed.
         """
         if not session_id or not session_id.strip():
             raise ValueError("session_id cannot be empty or whitespace")
@@ -392,7 +492,7 @@ class SessionController:
         parent_session_id: str | None = None,
         lifecycle_policy: str | None = None,
         **metadata: Any,
-    ) -> SessionState:
+    ) -> tuple[SessionState, bool]:
         """Get or create a session - caller MUST hold self._lock.
 
         This internal method avoids deadlock when called from
@@ -406,12 +506,13 @@ class SessionController:
             **metadata: Arbitrary metadata to attach to the session.
 
         Returns:
-            The session state.
+            A tuple of (session_state, was_created) where was_created is True
+            if the session was newly created, False if it already existed.
         """
         if session_id in self._sessions:
             state = self._sessions[session_id]
             state.last_active_at = time.monotonic()
-            return state
+            return state, False
 
         effective_policy = lifecycle_policy or (
             self._sessions.get(parent_session_id, SessionState("", "")).lifecycle_policy
@@ -432,7 +533,7 @@ class SessionController:
         if parent_session_id:
             self._children.setdefault(parent_session_id, []).append(session_id)
         logger.info("Created session", session_id=session_id, agent_name=state.agent_name)
-        return state
+        return state, True
 
     async def get_or_create_session_agent(
         self,
@@ -459,7 +560,7 @@ class SessionController:
             if session_id in self._session_agents:
                 return self._session_agents[session_id]
 
-            session = await self._get_or_create_session_locked(session_id, agent_name)
+            session, _was_created = await self._get_or_create_session_locked(session_id, agent_name)
             agent_name = agent_name or session.agent_name
 
             base_agent = self.pool.get_agent(agent_name)
@@ -480,6 +581,7 @@ class SessionController:
                         session.input_provider = input_provider
                     self._session_agents[session_id] = base_agent
                     session.agent = base_agent
+                    session.is_per_session_agent = False
                     return base_agent
 
                 if cfg.name is None:
@@ -497,6 +599,33 @@ class SessionController:
                     agent._model = base_model
                     agent.model_settings = getattr(base_agent, "model_settings", None)
                 await agent.__aenter__()
+                # Add pool-level providers to per-session agent
+                # (same as shared agents get in AgentPool.__aenter__)
+                if self.pool is not None:
+                    agent.tools.add_provider(self.pool.mcp.get_aggregating_provider())
+                    if self.pool.skills_instruction_provider:
+                        agent.tools.add_provider(self.pool.skills_instruction_provider)
+                    agent.tools.add_provider(self.pool.skills_tools_provider)
+                # Inherit parent session's MCP providers for subagent sessions
+                # (only providers with kind="mcp", not lead-agent-specific tools)
+                if session.parent_session_id:
+                    parent_agent = self._session_agents.get(session.parent_session_id)
+                    if parent_agent is not None:
+                        mcp_providers = [
+                            p
+                            for p in parent_agent.tools.external_providers
+                            if getattr(p, "kind", None) == "mcp"
+                        ]
+                        for provider in mcp_providers:
+                            if provider not in agent.tools.external_providers:
+                                agent.tools.add_provider(provider)
+                        if mcp_providers:
+                            logger.info(
+                                "Inherited parent session MCP providers",
+                                session_id=session_id,
+                                parent_session_id=session.parent_session_id,
+                                num_providers=len(mcp_providers),
+                            )
                 self._session_agents[session_id] = agent
                 session.agent = agent
                 session.is_per_session_agent = True
@@ -515,7 +644,52 @@ class SessionController:
                 session.input_provider = input_provider
             self._session_agents[session_id] = base_agent
             session.agent = base_agent
+            session.is_per_session_agent = False
             return base_agent
+
+    def list_sessions(self) -> list[SessionInfo]:
+        """List all active sessions.
+
+        Returns:
+            A list of SessionInfo DTOs for all active sessions.
+        """
+        return [
+            SessionInfo(
+                session_id=s.session_id,
+                agent_name=s.agent_name,
+                created_at=s.created_at,
+                last_active_at=s.last_active_at,
+                is_per_session_agent=s.is_per_session_agent,
+                status="busy" if s.current_run_id is not None else "idle",
+            )
+            for s in self._sessions.values()
+        ]
+
+    def get_session_agent(self, session_id: str) -> BaseAgent[Any, Any] | None:
+        """Get the agent for a session.
+
+        Returns the per-session agent if one exists, otherwise the shared
+        agent that was assigned to the session.  If the session has no
+        agent assigned yet, a warning is logged and None is returned.
+
+        Args:
+            session_id: The session ID to look up.
+
+        Returns:
+            The agent instance, or None if the session is unknown.
+        """
+        session = self._sessions.get(session_id)
+        if session is None:
+            logger.warning("Session not found", session_id=session_id)
+            return None
+        agent = self._session_agents.get(session_id)
+        if agent is None:
+            logger.warning(
+                "No agent assigned for session - falling back to shared agent",
+                session_id=session_id,
+            )
+            return None
+        return agent
 
     async def _close_session_unlocked(self, session_id: str) -> None:
         """Close a session without acquiring the main lock (caller must hold lock)."""
@@ -654,6 +828,19 @@ class SessionController:
         if session is None or session.parent_session_id is None:
             return None
         return self._sessions.get(session.parent_session_id)
+
+    def find_sessions_by_agent_name(self, agent_name: str) -> list[SessionState]:
+        """Find all active sessions associated with a given agent name.
+
+        Args:
+            agent_name: The agent name to search for.
+
+        Returns:
+            List of session states matching the agent name, excluding closing sessions.
+        """
+        return [
+            s for s in self._sessions.values() if s.agent_name == agent_name and not s.is_closing
+        ]
 
     async def receive_request(
         self,
@@ -796,6 +983,65 @@ class SessionController:
         """
         self._mcp_process_count = max(0, self._mcp_process_count - 1)
 
+    def list_pending_questions(self) -> list[Any]:
+        """List all pending questions across sessions.
+
+        Aggregates pending questions from each session's SessionState.
+
+        Returns:
+            A list of pending question objects.
+        """
+        result: list[Any] = []
+        for session in self._sessions.values():
+            result.extend(session.pending_questions.values())
+        return result
+
+    def cancel_all_pending_questions(self) -> list[str]:
+        """Cancel all pending questions across all sessions.
+
+        Iterates over every session, cancels each pending question's future,
+        and returns the IDs of all cancelled questions.
+
+        Returns:
+            List of cancelled question IDs.
+        """
+        cancelled_ids: list[str] = []
+        for session in self._sessions.values():
+            for question_id, pending in list(session.pending_questions.items()):
+                future = getattr(pending, "future", None)
+                if future is not None and not future.done():
+                    future.cancel()
+                    cancelled_ids.append(question_id)
+        return cancelled_ids
+
+    def cancel_session_pending_questions(self, session_id: str) -> list[str]:
+        """Cancel pending questions for a specific session.
+
+        Args:
+            session_id: The session whose pending questions should be cancelled.
+
+        Returns:
+            List of cancelled question IDs.
+        """
+        cancelled_ids: list[str] = []
+        session = self._sessions.get(session_id)
+        if session is None:
+            return cancelled_ids
+        for question_id, pending in list(session.pending_questions.items()):
+            future = getattr(pending, "future", None)
+            if future is not None and not future.done():
+                future.cancel()
+                cancelled_ids.append(question_id)
+        return cancelled_ids
+
+    def list_pending_permissions(self) -> list[PendingPermission]:
+        """List all pending permissions across sessions.
+
+        Returns:
+            A list of pending permissions. Currently returns an empty list.
+        """
+        return []
+
     async def start_cleanup_task(self) -> None:
         """Start background task to periodically clean up expired sessions."""
         if self._cleanup_task is None:
@@ -868,6 +1114,7 @@ class TurnRunner:
         session_controller: SessionController,
         enable_auto_resume: bool = True,
         max_auto_resume: int = DEFAULT_MAX_AUTO_RESUME,
+        replay_buffer_size: int = 100,
     ) -> None:
         """Initialize the turn runner.
 
@@ -875,9 +1122,13 @@ class TurnRunner:
             session_controller: The session controller for agent lifecycle.
             enable_auto_resume: Whether to enable auto-resume loop.
             max_auto_resume: Maximum auto-resume iterations.
+            replay_buffer_size: Maximum number of events retained per session for replay.
         """
         self.sessions = session_controller
-        self.event_bus = EventBus(session_controller=session_controller)
+        self.event_bus = EventBus(
+            session_controller=session_controller,
+            replay_buffer_size=replay_buffer_size,
+        )
         self._post_turn_injections: dict[str, list[str]] = {}
         self._post_turn_prompts: dict[str, list[tuple[Any, ...]]] = {}
         self._injection_locks: dict[str, asyncio.Lock] = {}
@@ -908,6 +1159,14 @@ class TurnRunner:
                 self._injection_locks[session_id] = lock
             return lock
 
+    async def _publish_event(self, session_id: str, event: Any) -> None:
+        """Publish event to EventBus.
+
+        Events are wrapped in EventEnvelope by the EventBus with the
+        source_session_id set to the publishing session.
+        """
+        await self.event_bus.publish(session_id, event)
+
     async def _run_turn_unlocked(
         self,
         session_id: str,
@@ -935,7 +1194,7 @@ class TurnRunner:
         )
         _session = self.sessions.get_session(session_id)
 
-        from agentpool.agents.base_agent import _current_run_ctx_var
+        from agentpool.agents.base_agent import _bypass_session_pool, _current_run_ctx_var
         from agentpool.orchestrator.run import RunHandle, RunStatus
 
         run_id_override = self.sessions._pending_run_ids.pop(session_id, None)
@@ -987,7 +1246,7 @@ class TurnRunner:
                     event = await run_ctx.event_queue.get()
                     if event is None:
                         break
-                    await self.event_bus.publish(session_id, event)
+                    await self._publish_event(session_id, event)
             except asyncio.CancelledError:
                 pass
 
@@ -1009,6 +1268,7 @@ class TurnRunner:
         stream_kwargs = dict(kwargs)
         if input_provider is not None and (has_var_keyword or "input_provider" in stream_params):
             stream_kwargs["input_provider"] = input_provider
+        _bypass_session_pool.set(True)
         try:
             try:
                 # Process prompts and handle injections/queued prompts
@@ -1016,7 +1276,7 @@ class TurnRunner:
                 async for event in agent._run_stream_once(
                     run_ctx, *prompts, session_id=session_id, **stream_kwargs
                 ):
-                    await self.event_bus.publish(session_id, event)
+                    await self._publish_event(session_id, event)
 
                 # After _run_stream_once completes, flush unconsumed injections
                 # to queued prompts and continue processing if any remain.
@@ -1028,9 +1288,9 @@ class TurnRunner:
                     async for event in agent._run_stream_once(
                         run_ctx, *current_prompts, session_id=session_id, **stream_kwargs
                     ):
-                        await self.event_bus.publish(session_id, event)
+                        await self._publish_event(session_id, event)
                     run_ctx.injection_manager.flush_pending_to_queue()
-            except Exception as exc:
+            except (Exception, asyncio.CancelledError) as exc:
                 if run_handle is not None and run_handle.status not in (
                     RunStatus.completed,
                     RunStatus.failed,
@@ -1052,6 +1312,7 @@ class TurnRunner:
 
             self._runs.pop(run_ctx.run_id, None)
             _current_run_ctx_var.set(None)
+            _bypass_session_pool.set(False)
 
             # Cancel the event consumer task
             event_consumer.cancel()
@@ -1067,7 +1328,10 @@ class TurnRunner:
             if created_run_handle and run_handle is not None:
                 if run_handle.status not in (RunStatus.completed, RunStatus.failed):
                     run_handle.complete()
-                run_handle.complete_event.set()
+                # Note: complete_event is NOT set here — it is deferred to
+                # run_loop() so that it covers the full run loop including
+                # auto-resume turns.  Per-request waiters (e.g. sync HTTP
+                # endpoint) should wait for the entire session run cycle.
                 self.sessions._runs.pop(run_id, None)
 
     async def run_turn(
@@ -1086,7 +1350,7 @@ class TurnRunner:
             *prompts: Prompts to pass to the agent.
             **kwargs: Additional arguments passed to the agent.
         """
-        session = await self.sessions.get_or_create_session(session_id)
+        session, _was_created = await self.sessions.get_or_create_session(session_id)
 
         async with session.turn_lock:
             if session.is_closing:
@@ -1110,7 +1374,7 @@ class TurnRunner:
             *initial_prompts: Initial prompts to start the loop.
             **kwargs: Additional arguments passed to the agent.
         """
-        session = await self.sessions.get_or_create_session(session_id)
+        session, _was_created = await self.sessions.get_or_create_session(session_id)
 
         async with session.turn_lock:
             if session.is_closing:
@@ -1126,6 +1390,14 @@ class TurnRunner:
                 logger.exception("Turn loop failed", session_id=session_id)
                 await self._drain_post_turn_injections(session_id)
                 await self._drain_post_turn_prompts(session_id)
+            finally:
+                # Signal completion after the full run loop (including auto-resume)
+                # so that per-request waiters observe the full session run cycle.
+                run_id = session.current_run_id
+                if run_id is not None:
+                    run_handle = self.sessions._runs.get(run_id)
+                    if run_handle is not None:
+                        run_handle.complete_event.set()
 
     async def inject_prompt(self, session_id: str, message: str, **kwargs: Any) -> bool:
         """Inject a message into a session.
@@ -1383,6 +1655,7 @@ class SessionPool:
         enable_event_bus: bool = True,
         max_auto_resume: int = DEFAULT_MAX_AUTO_RESUME,
         max_concurrent_runs: int | None = None,
+        replay_buffer_size: int = 100,
     ) -> None:
         """Initialize the session pool.
 
@@ -1393,6 +1666,7 @@ class SessionPool:
             enable_event_bus: Whether to enable cross-turn event routing.
             max_auto_resume: Maximum auto-resume iterations.
             max_concurrent_runs: Maximum number of concurrent runs across all sessions.
+            replay_buffer_size: Maximum number of events retained per session for replay.
         """
         self.pool = pool
         self.sessions = SessionController(
@@ -1405,11 +1679,13 @@ class SessionPool:
             self.sessions,
             enable_auto_resume=enable_auto_resume,
             max_auto_resume=max_auto_resume,
+            replay_buffer_size=replay_buffer_size,
         )
         self.sessions._turn_runner = self.turns
         self._enable_auto_resume = enable_auto_resume
         self._enable_event_bus = enable_event_bus
         self._runs_lock: asyncio.Lock = asyncio.Lock()
+        self._message_cache: dict[str, list[ChatMessage[Any]]] = {}
 
     async def start(self) -> None:
         """Start the session pool and background tasks."""
@@ -1460,7 +1736,7 @@ class SessionPool:
             if parent_data is not None:
                 metadata.setdefault("project_id", parent_data.project_id)
                 metadata.setdefault("cwd", parent_data.cwd)
-        state = await self.sessions.get_or_create_session(
+        state, _was_created = await self.sessions.get_or_create_session(
             session_id, agent_name, parent_session_id, lifecycle_policy, **metadata
         )
         return state
@@ -1503,6 +1779,8 @@ class SessionPool:
                 self.turns._post_turn_injections.pop(session_id, None)
                 self.turns._post_turn_prompts.pop(session_id, None)
                 self.turns._injection_locks.pop(session_id, None)
+
+        self._message_cache.pop(session_id, None)
 
     async def process_prompt(
         self,
@@ -1581,7 +1859,13 @@ class SessionPool:
             raise ValueError("No active run found with ID: " + run_id)
         run_handle.cancel()
 
-    async def run_stream(self, session_id: str, *prompts: str, **kwargs: Any) -> AsyncIterator[Any]:
+    async def run_stream(
+        self,
+        session_id: str,
+        *prompts: str,
+        scope: str = "session",
+        **kwargs: Any,
+    ) -> AsyncIterator[Any]:
         """Process prompts and yield events from the EventBus.
 
         Convenience method for tests and standalone clients that want
@@ -1590,13 +1874,15 @@ class SessionPool:
         Args:
             session_id: The session to process the prompt for.
             *prompts: Prompts to process.
+            scope: Subscription scope - "session" (exact match),
+                "descendants" (self + children), or "subtree" (self + parent + siblings).
             **kwargs: Additional arguments passed to the turn runner
                 (e.g. ``input_provider``).
 
         Yields:
             Events published to the EventBus for this session.
         """
-        queue = await self.event_bus.subscribe(session_id)
+        queue = await self.event_bus.subscribe(session_id, scope=scope)
         process_task = asyncio.create_task(self.process_prompt(session_id, *prompts, **kwargs))
         get_task: asyncio.Task[Any] | None = None
         try:
@@ -1611,7 +1897,7 @@ class SessionPool:
                     event = get_task.result()
                     get_task = None
                     if event is not None:
-                        yield event
+                        yield event.event
             if get_task is not None and not get_task.done():
                 get_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -1620,7 +1906,7 @@ class SessionPool:
             while not queue.empty():
                 event = queue.get_nowait()
                 if event is not None:
-                    yield event
+                    yield event.event
             if (exc := process_task.exception()) is not None:
                 raise exc
         finally:
@@ -1667,3 +1953,139 @@ class SessionPool:
             True if queued into active turn, False if stored for later.
         """
         return await self.turns.queue_prompt(session_id, *prompts, **kwargs)
+
+    async def get_messages(
+        self,
+        session_id: str,
+    ) -> list[ChatMessage[Any]]:
+        """Get message history for a session.
+
+        Results are cached per session_id (full message list) to avoid
+        repeated storage queries. Cache is invalidated by append_message,
+        truncate_messages, and copy_messages.
+
+        Args:
+            session_id: The session to retrieve messages for.
+
+        Returns:
+            List of messages ordered by timestamp (oldest first).
+
+        Raises:
+            KeyError: If the session does not exist.
+        """
+        session = self.sessions.get_session(session_id)
+        if session is None:
+            raise KeyError(session_id)
+
+        if session_id in self._message_cache:
+            return list(self._message_cache[session_id])
+
+        storage = self.pool.storage
+        if storage is not None:
+            messages = await storage.get_session_messages(session_id)
+            self._message_cache[session_id] = list(messages)
+            return messages
+
+        return []
+
+    async def append_message(
+        self,
+        session_id: str,
+        message: ChatMessage[Any],
+    ) -> str:
+        """Append a message to a session's history.
+
+        Args:
+            session_id: The session to append to.
+            message: The message to append.
+
+        Returns:
+            The ID of the appended message.
+
+        Raises:
+            KeyError: If the session does not exist.
+        """
+        session = self.sessions.get_session(session_id)
+        if session is None:
+            raise KeyError(session_id)
+
+        storage = self.pool.storage
+        if storage is not None:
+            await storage.log_message(message=message)
+
+        self._message_cache.pop(session_id, None)
+        return message.message_id
+
+    async def copy_messages(
+        self,
+        source_session_id: str,
+        target_session_id: str,
+        *,
+        up_to_message_id: str | None = None,
+    ) -> str | None:
+        """Copy messages from one session to another.
+
+        Used by share_session (copy all) and revert_session (copy up to
+        a specific message).
+
+        Args:
+            source_session_id: Session to copy from.
+            target_session_id: Session to copy to.
+            up_to_message_id: If set, only copy messages up to and
+                including this message ID. If None, copy all messages.
+
+        Returns:
+            The ID of the fork point message (last copied message),
+            or None if no messages were copied.
+
+        Raises:
+            KeyError: If either session does not exist.
+        """
+        if self.sessions.get_session(source_session_id) is None:
+            raise KeyError(source_session_id)
+        if self.sessions.get_session(target_session_id) is None:
+            raise KeyError(target_session_id)
+
+        storage = self.pool.storage
+        if storage is not None:
+            result = await storage.fork_conversation(
+                source_session_id=source_session_id,
+                new_session_id=target_session_id,
+                fork_from_message_id=up_to_message_id,
+            )
+            self._message_cache.pop(target_session_id, None)
+            return result
+
+        return None
+
+    async def truncate_messages(
+        self,
+        session_id: str,
+        up_to_message_id: str,
+    ) -> int:
+        """Truncate messages after a specific message ID.
+
+        Used by revert_session to remove messages after the revert point.
+
+        Args:
+            session_id: The session to truncate.
+            up_to_message_id: Keep messages up to and including this ID,
+                remove everything after.
+
+        Returns:
+            Number of messages removed.
+
+        Raises:
+            KeyError: If the session does not exist.
+        """
+        session = self.sessions.get_session(session_id)
+        if session is None:
+            raise KeyError(session_id)
+
+        storage = self.pool.storage
+        if storage is not None:
+            removed = await storage.truncate_messages(session_id, up_to_message_id)
+            self._message_cache.pop(session_id, None)
+            return removed
+
+        return 0
