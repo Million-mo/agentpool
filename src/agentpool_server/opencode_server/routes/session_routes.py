@@ -291,7 +291,7 @@ async def _execute_slashed_command(
                     iterator = session_pool.run_stream(
                         session_id,
                         agent_prompt,
-                        scope="descendants",
+                        scope="session",
                         input_provider=input_provider,
                     )
                 else:
@@ -481,7 +481,7 @@ async def _execute_skill_command(
                 session_pool = state.pool.session_pool
                 if session_pool is not None:
                     iterator = session_pool.run_stream(
-                        session_id, user_prompt, scope="descendants"
+                        session_id, user_prompt, scope="session"
                     )
                 else:
                     # Fallback to direct agent if session_pool is not available
@@ -1524,7 +1524,7 @@ async def summarize_session(  # noqa: PLR0915
                         msg = "SessionPool is not available"
                         raise RuntimeError(msg)
                     stream = session_pool.run_stream(
-                        session_id, SUMMARIZE_PROMPT, scope="descendants"
+                        session_id, SUMMARIZE_PROMPT, scope="session"
                     )
                 else:
                     agent = state.agent
