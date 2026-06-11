@@ -821,9 +821,9 @@ class AgentPoolACPAgent(ACPAgent):
                     # Client-initiated REQUEST: correlate and await response
                     future = await conn.register_pending_request(message["id"])
                     try:
-                        with anyio.fail_after(30):
+                        with anyio.fail_after(300):
                             await conn.handle_client_message(message)
-                        response = await asyncio.wait_for(future, timeout=30)
+                        response = await asyncio.wait_for(future, timeout=300)
                         if "error" in response:
                             error = response["error"]
                             from agentpool_server.acp_server.acp_mcp_manager import (
@@ -887,7 +887,7 @@ class AgentPoolACPAgent(ACPAgent):
             if conn is not None:
                 await conn.handle_client_message(response)
             return None  # Tell send_to_client not to forward to _to_session_send
-        with anyio.fail_after(30):
+        with anyio.fail_after(300):
             return await self.client.send_request("mcp/message", message)
 
     async def connect_acp_mcp_server(self, server: AcpMcpServer) -> str:
