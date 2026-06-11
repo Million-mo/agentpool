@@ -414,7 +414,7 @@ class ACPSession:
 
         async def _init_server(server: Any) -> None:
             try:
-                with anyio.fail_after(5):
+                with anyio.fail_after(30):
                     # ACP-transport MCP servers are connected by the agent initiating
                     # mcp/connect to the client (Agent -> Client per ACP spec)
                     if isinstance(server, AcpMcpServer):
@@ -431,7 +431,7 @@ class ACPSession:
                         )
 
                         transport = AcpMcpTransport(
-                            conn, timeout=getattr(server, "timeout", None) or 10.0
+                            conn, timeout=getattr(server, "timeout", None) or 300.0
                         )
                         cfg = convert_acp_mcp_server_to_config(server)
                         provider = MCPResourceProvider(
