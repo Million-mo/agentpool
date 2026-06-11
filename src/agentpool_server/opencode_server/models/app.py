@@ -147,3 +147,29 @@ class ProjectUpdateRequest(OpenCodeBaseModel):
 
     settings: dict[str, Any] | None = None
     """Optional project-specific settings to update."""
+
+
+class ProjectDirectory(OpenCodeBaseModel):
+    """A single directory entry for a project.
+
+    Used by the OpenCode TUI to determine the main working directory
+    for file operations and event routing.
+    """
+
+    directory: str
+    """Absolute path to the directory."""
+
+    type: str
+    """Directory type: 'main', 'root', or 'git_worktree'."""
+
+
+class ProjectDirectoriesResponse(OpenCodeBaseModel):
+    """Response for /project/:projectID/directories endpoint.
+
+    Returns the list of known directories for a project.
+    For AgentPool (single-directory mode), this always returns
+    a single 'main' directory pointing to the working directory.
+    """
+
+    data: list[ProjectDirectory]
+    """List of project directories."""

@@ -16,6 +16,7 @@ from agentpool_server.opencode_server.models import (
     AppTimeInfo,
     PathInfo,
     Project,
+    ProjectDirectory,
     ProjectTime,
     ProjectUpdatedEvent,
     ProjectUpdateRequest,
@@ -143,6 +144,35 @@ async def update_project(project_id: str, update: ProjectUpdateRequest, state: S
     # Broadcast event
     await state.broadcast_event(ProjectUpdatedEvent.create(project))
     return project
+
+
+@router.get("/project/{project_id}/directories")
+async def list_project_directories(project_id: str, state: StateDep) -> list[ProjectDirectory]:
+    """List directories for a project.
+
+    Returns the known directories for the project.  For AgentPool
+    (single-directory mode) this always returns a single 'main'
+    directory pointing to the server's working directory.
+
+    This endpoint is required by the OpenCode TUI for event routing
+    and file operation baselines.
+
+    Per the OpenCode API contract, this returns a plain array (not
+    wrapped in a ``data`` object).  The SDK layers add the wrapper.
+
+    Args:
+        project_id: Project identifier (ignored; AgentPool is single-project).
+        state: Server state (injected dependency).
+
+    Returns:
+        List of directory entries.
+    """
+    return [
+        ProjectDirectory(
+            directory=state.working_dir,
+            type="main",
+        ),
+    ]
 
 
 @router.get("/path")
