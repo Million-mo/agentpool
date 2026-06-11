@@ -290,6 +290,57 @@ class ACPProtocolHandler(ProtocolEventConsumerMixin):
         # Convert ACP content blocks to agent prompts
         contents = [from_acp_content(block, fs=None) for block in prompt]
 
+        # Split slash commands from content and execute local commands.
+        # Commands inject expanded prompts into the SessionPool per-session
+        # agent's staged_content, which the agent run loop consumes automatically.
+        if acp_session is not None:
+            from agentpool_server.acp_server.session import SLASH_PATTERN, split_commands
+
+            commands, non_command_content = split_commands(contents, acp_session.command_store)
+            if commands:
+                session_agent = await session_pool.sessions.get_or_create_session_agent(
+                    session_id
+                )
+                for command_text in commands:
+                    if match := SLASH_PATTERN.match(command_text.strip()):
+                        command_name = match.group(1)
+                        args = match.group(2) or ""
+                    else:
+                        continue
+                    # Check NodeCommand support via duck-typing to avoid import
+                    cmd = acp_session.command_store.get_command(command_name)
+                    if cmd is not None and callable(
+                        supports_node := getattr(cmd, "supports_node", None)
+                    ) and not supports_node(session_agent):
+                        logger.debug(
+                            "Command not available for this node type",
+                            command=command_name,
+                        )
+                        continue
+                    # Use per-session agent context so expanded prompts land
+                    # in the correct staged_content for the SessionPool turn.
+                    agent_context = session_agent.get_context(data=acp_session)
+                    cmd_ctx = acp_session.command_store.create_context(
+                        data=agent_context,
+                        output_writer=lambda msg: logger.debug(
+                            "Command output", msg=msg
+                        ),
+                    )
+                    command_str = f"{command_name} {args}".strip()
+                    try:
+                        await acp_session.command_store.execute_command(
+                            command_str, cmd_ctx
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Command execution failed",
+                            session_id=session_id,
+                            command=command_text,
+                        )
+                if not non_command_content and len(session_agent.staged_content) == 0:
+                    return self._prompt_response("end_turn")
+                contents = non_command_content
+
         # Create ACP input provider for elicitation and tool confirmations
         # through the ACP protocol (not falling back to StdlibInputProvider)
         acp_requests = ACPRequests(client=self.client, session_id=session_id)
