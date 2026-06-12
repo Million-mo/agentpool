@@ -25,7 +25,7 @@ from agentpool.log import get_logger
 from agentpool.messaging import ChatMessage
 from agentpool.models.pending_interaction import PendingPermission, PendingQuestion
 from agentpool.orchestrator.run import RunHandle, RunStatus
-from agentpool.sessions.models import SessionData
+from agentpool.sessions.models import PendingDeferredCall, SessionData
 from agentpool_server.opencode_server.models.session_info import SessionInfo
 
 
@@ -791,6 +791,24 @@ class SessionController:
         """
         return data is not None and bool(data.pending_deferred_calls)
 
+    @staticmethod
+    def _check_expired_calls(session_data: SessionData) -> list[PendingDeferredCall]:
+        """Return pending calls whose timeout has elapsed.
+
+        Args:
+            session_data: The session data to check for expired calls.
+
+        Returns:
+            A list of ``PendingDeferredCall`` entries whose timeout has
+            elapsed. Returns an empty list if none have expired.
+        """
+        now = datetime.now()
+        expired: list[PendingDeferredCall] = []
+        for call in session_data.pending_deferred_calls:
+            if call.timeout is not None and (now - call.created_at) > call.timeout:
+                expired.append(call)
+        return expired
+
     async def _save_close_checkpoint(
         self, session_id: str, data: SessionData
     ) -> bool:
@@ -1224,6 +1242,43 @@ class SessionController:
                     "Failed to close expired session during cleanup",
                     session_id=session_id,
                 )
+
+    async def _start_cleanup_loop(self) -> None:
+        """Periodically scan and expire deferred calls whose timeout has elapsed.
+
+        Runs indefinitely in a background task. Checks every 60 seconds
+        for pending deferred calls whose timeout has elapsed and removes
+        them from the session data.
+        """
+        while True:
+            try:
+                await asyncio.sleep(60)
+                if self.store is None:
+                    continue
+                async with self._lock:
+                    for session_id in list(self._sessions.keys()):
+                        data = await self.store.load(session_id)
+                        if data is None:
+                            continue
+                        expired = self._check_expired_calls(data)
+                        if expired:
+                            remaining = [
+                                c for c in data.pending_deferred_calls
+                                if c.tool_call_id not in {e.tool_call_id for e in expired}
+                            ]
+                            updated = data.model_copy(
+                                update={"pending_deferred_calls": remaining}
+                            )
+                            await self.store.save(updated)
+                            logger.info(
+                                "Removed expired deferred calls",
+                                session_id=session_id,
+                                count=len(expired),
+                            )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Deferred call cleanup loop failed")
 
 
 class TurnRunner:

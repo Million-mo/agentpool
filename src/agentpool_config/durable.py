@@ -391,6 +391,12 @@ class CheckpointConfig(Schema):
     )
     """Whether agent checkpointing is enabled."""
 
+    cleanup_interval: timedelta = Field(
+        default=timedelta(minutes=1),
+        title="Cleanup interval",
+    )
+    """How often to check for expired deferred calls."""
+
 
 DurableExecutionConfig = Annotated[
     TemporalDurableConfig | PrefectDurableConfig | DBOSDurableConfig,
