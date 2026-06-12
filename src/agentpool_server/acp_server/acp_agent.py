@@ -288,6 +288,7 @@ class AgentPoolACPAgent(ACPAgent):
                 ),
                 client=self.client,
                 client_capabilities=self.client_capabilities,
+                acp_agent=self,
             )
             logger.info("ACPProtocolHandler initialized for SessionPool mode")
 
@@ -483,6 +484,11 @@ class AgentPoolACPAgent(ACPAgent):
 
         Delegates to the agent's load_session method, which populates agent.conversation.
         Then replays the conversation to the client via ACP notifications.
+
+        For checkpointed sessions (with pending_deferred_calls), the message_history
+        from the checkpoint is used for replay, ensuring that pending ToolCallPart
+        entries without matching ToolReturnPart are correctly replayed so the
+        client can re-render elicitation UI for the user to respond.
         """
         from agentpool.agents.acp_agent import ACPAgent as ACPAgentClient
 
@@ -515,18 +521,54 @@ class AgentPoolACPAgent(ACPAgent):
                 logger.warning("Agent failed to load session", session_id=params.session_id)
                 return LoadSessionResponse()
 
+            # Check if this is a checkpointed session by inspecting session data
+            is_checkpointed = False
+            pool = getattr(session.agent, "agent_pool", None)
+            if pool is not None:
+                try:
+                    session_data = await pool.storage.load_session(params.session_id)
+                    if session_data and session_data.pending_deferred_calls:
+                        is_checkpointed = True
+                        logger.info(
+                            "Session is checkpointed, loading message_history from checkpoint",
+                            session_id=params.session_id,
+                            pending_call_count=len(session_data.pending_deferred_calls),
+                        )
+                        # For checkpointed sessions, also load checkpoint data
+                        # to get the precise message_history at checkpoint time
+                        checkpoint = await pool.storage.load_checkpoint(params.session_id)
+                        if checkpoint is not None:
+                            checkpoint_msgs, _ = checkpoint
+                            if checkpoint_msgs:
+                                # Use checkpoint's message_history as the authoritative source
+                                await session.notifications.replay(checkpoint_msgs)
+                                logger.info(
+                                    "Checkpointed conversation replayed",
+                                    session_id=params.session_id,
+                                    message_count=len(checkpoint_msgs),
+                                )
+                                # Skip the regular replay below since we already replayed
+                                is_checkpointed = False  # Prevent duplicate replay
+                except Exception:
+                    logger.debug(
+                        "Could not load checkpoint data (will use regular messages)",
+                        session_id=params.session_id,
+                    )
+
             # Replay loaded conversation to client via ACP notifications
-            if msgs := session.agent.conversation.chat_messages:
-                model_messages: list[ModelMessage] = []
-                for chat_msg in msgs:
-                    if chat_msg.messages:
-                        model_messages.extend(chat_msg.messages)
-                await session.notifications.replay(model_messages)
-                logger.info(
-                    "Conversation replayed",
-                    session_id=params.session_id,
-                    message_count=len(model_messages),
-                )
+            # (only if not already replayed from checkpoint)
+            if not is_checkpointed:
+                if msgs := session.agent.conversation.chat_messages:
+                    model_messages: list[ModelMessage] = []
+                    for chat_msg in msgs:
+                        if chat_msg.messages:
+                            model_messages.extend(chat_msg.messages)
+                    await session.notifications.replay(model_messages)
+                    logger.info(
+                        "Conversation replayed",
+                        session_id=params.session_id,
+                        message_count=len(model_messages),
+                    )
             mode_state: SessionModeState | None = None
             models: SessionModelState | None = None
             if isinstance(session.agent, ACPAgentClient) and session.agent._state:
@@ -608,50 +650,93 @@ class AgentPoolACPAgent(ACPAgent):
     async def resume_session(self, params: ResumeSessionRequest) -> ResumeSessionResponse:
         """Resume an existing session without replaying history.
 
-        Like load_session but doesn't send session/update notifications with
-        previous messages. The agent restores its internal state so the
-        conversation can continue.
+        Loads session context from ``SessionDataStore``, restores the session
+        wrapper, and re-subscribes to the EventBus. Does NOT replay message
+        history to the client (the client already has the messages).
 
         UNSTABLE: This feature is not part of the spec yet.
         """
         if not self._initialized:
             raise RuntimeError("Agent not initialized")
 
-        try:
-            # Get or create session wrapper
-            session = self.session_manager.get_session(params.session_id)
-            if not session:
-                session_id = await self.session_manager.create_session(
-                    agent=self.default_agent,
-                    cwd=params.cwd or "",
-                    client=self.client,
-                    acp_agent=self,
-                    mcp_servers=params.mcp_servers,
-                    client_capabilities=self.client_capabilities,
-                    client_info=self.client_info,
-                    session_id=params.session_id,
-                    subagent_display_mode=self.subagent_display_mode,
-                )
-                session = self.session_manager.get_session(session_id)
+        session_id = params.session_id
 
-            if not session:
-                logger.error("Failed to create session for resume")
+        try:
+            # Check if session is already active
+            session = self.session_manager.get_session(session_id)
+            if session is not None:
+                # Session already active — reuse it, but ensure EventBus consumer.
+                # Gracefully handle environments without SessionPool.
+                if self._protocol_handler is not None:
+                    try:
+                        await self._protocol_handler.start_event_consumer(session_id)
+                    except RuntimeError:
+                        logger.debug(
+                            "EventBus consumer not started — SessionPool unavailable",
+                            session_id=session_id,
+                        )
+                # Load session state if not already loaded
+                if not await session.agent.load_session(session_id):
+                    logger.warning(
+                        "Agent failed to load session state",
+                        session_id=session_id,
+                    )
+                # Schedule post-resume tasks
+                self.tasks.create_task(session.send_available_commands_update())
+                self.tasks.create_task(session.agent.load_rules(session.cwd))
+                logger.info("Session already active, reused", session_id=session_id)
                 return ResumeSessionResponse()
+
+            # Check if session exists in persistent store
+            store = self.session_manager.session_store
+            if store is not None:
+                data = await store.load(session_id)
+                if data is None:
+                    logger.warning(
+                        "Cannot resume non-existent session",
+                        session_id=session_id,
+                    )
+                    return ResumeSessionResponse()
+
+            # Resume from store (loads SessionData, creates ACPSession)
+            session = await self.session_manager.resume_session(
+                session_id=session_id,
+                client=self.client,
+                acp_agent=self,
+                client_capabilities=self.client_capabilities,
+                client_info=self.client_info,
+                subagent_display_mode=self.subagent_display_mode,
+            )
+
+            if session is None:
+                logger.error("Failed to resume session from store", session_id=session_id)
+                return ResumeSessionResponse()
+
+            # Re-subscribe to EventBus for this session.
+            # Gracefully handle environments without SessionPool (e.g. test fixtures).
+            if self._protocol_handler is not None:
+                try:
+                    await self._protocol_handler.start_event_consumer(session_id)
+                except RuntimeError:
+                    logger.debug(
+                        "EventBus consumer not started — SessionPool unavailable",
+                        session_id=session_id,
+                    )
 
             # Load session state in the agent (populates conversation) but don't replay to client
             # This restores the agent's internal state so it can continue the conversation
-            if not await session.agent.load_session(params.session_id):
-                logger.warning("Agent failed to load session state", session_id=params.session_id)
-                # Continue anyway - session wrapper is created, agent may still work
+            if not await session.agent.load_session(session_id):
+                logger.warning("Agent failed to load session state", session_id=session_id)
+                # Continue anyway — session wrapper is created, agent may still work
 
             # Schedule post-resume tasks
             self.tasks.create_task(session.send_available_commands_update())
             self.tasks.create_task(session.agent.load_rules(session.cwd))
-            logger.info("Session resumed", session_id=params.session_id)
+            logger.info("Session resumed", session_id=session_id)
             return ResumeSessionResponse()
 
         except Exception:
-            logger.exception("Failed to resume session", session_id=params.session_id)
+            logger.exception("Failed to resume session", session_id=session_id)
             return ResumeSessionResponse()
 
     async def authenticate(self, params: AuthenticateRequest) -> None:
