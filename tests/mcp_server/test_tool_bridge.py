@@ -9,12 +9,13 @@ from clawd_code_sdk import ClaudeAgentOptions, ClaudeSDKClient, tool
 from clawd_code_sdk.models import ResultMessage
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
+from pydantic_ai import ToolReturn
 import pytest
 
 from agentpool import AgentPool
 from agentpool.agents.acp_agent import ACPAgent
 from agentpool.agents.native_agent import Agent
-from agentpool.mcp_server.tool_bridge import ToolManagerBridge
+from agentpool.mcp_server.tool_bridge import ToolManagerBridge, _convert_to_tool_result
 from agentpool.models.acp_agents.base import ACPAgentConfig
 from agentpool_config.toolsets import SkillsToolsetConfig, SubagentToolsetConfig
 
@@ -196,6 +197,24 @@ async def test_tool_call_with_meta_tool_use_id():
             assert captured_id == expected_id, (
                 f"Expected tool_call_id '{expected_id}', got '{captured_id}'"
             )
+
+
+def test_bridge_preserves_pydantic_tool_return_content():
+    """ToolReturn content must remain visible after the MCP bridge conversion."""
+    converted = _convert_to_tool_result(
+        ToolReturn(
+            return_value="<file>\n00001| graph TD\n00002| A --> B\n</file>",
+            metadata={"file_path": "scratchpad://report.md", "read_lines": 2},
+        )
+    )
+
+    assert converted.content
+    assert converted.content[0].text.startswith("<file>\n00001| graph TD")
+    assert converted.structured_content == {
+        "file_path": "scratchpad://report.md",
+        "read_lines": 2,
+    }
+    assert converted.meta == {"file_path": "scratchpad://report.md", "read_lines": 2}
 
 
 requires_claude_code = pytest.mark.skipif(
