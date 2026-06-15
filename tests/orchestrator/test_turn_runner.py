@@ -925,59 +925,6 @@ async def test_in_turn_context_cleared_after_run_turn(
     )
 
 
-def test_bypass_session_pool_external_call() -> None:
-    """External calls (no ContextVar set, no AG-UI stack) do NOT bypass SessionPool."""
-    from agentpool.agents.base_agent import _should_bypass_session_pool
-
-    result = _should_bypass_session_pool()
-    assert result is False, (
-        "External calls should not bypass SessionPool when ContextVar is unset "
-        "and no AG-UI frames are in the stack"
-    )
-
-
-def test_bypass_session_pool_contextvar_true() -> None:
-    """When _bypass_session_pool ContextVar is True, bypass is active."""
-    from agentpool.agents.base_agent import _bypass_session_pool, _should_bypass_session_pool
-
-    token = _bypass_session_pool.set(True)
-    try:
-        result = _should_bypass_session_pool()
-        assert result is True, (
-            "_should_bypass_session_pool should return True when ContextVar is set"
-        )
-    finally:
-        _bypass_session_pool.reset(token)
-
-
-def test_bypass_session_pool_agui_stack_inspection() -> None:
-    """AG-UI stack inspection was removed in thin-agentpool-core Phase 1 (c28e4f85b).
-
-    AG-UI callers must now set the _bypass_session_pool ContextVar instead of
-    relying on stack inspection. The agui agent type was also removed from
-    AgentTypeLiteral (narrowed to native | acp only).
-    """
-    from agentpool.agents.base_agent import _bypass_session_pool, _should_bypass_session_pool
-
-    # Without ContextVar set, bypass is NOT active — even from AG-UI code.
-    # Stack inspection was intentionally removed.
-    result = _should_bypass_session_pool()
-    assert result is False, (
-        "_should_bypass_session_pool should return False without ContextVar "
-        "(stack inspection was removed in thin-agentpool-core Phase 1)"
-    )
-
-    # With ContextVar set, bypass IS active.
-    token = _bypass_session_pool.set(True)
-    try:
-        result = _should_bypass_session_pool()
-        assert result is True, (
-            "_should_bypass_session_pool should return True when ContextVar is set"
-        )
-    finally:
-        _bypass_session_pool.reset(token)
-
-
 # ---------------------------------------------------------------------------
 # _should_route_via_sessionpool
 # ---------------------------------------------------------------------------
