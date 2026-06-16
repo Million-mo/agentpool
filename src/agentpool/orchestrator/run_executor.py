@@ -109,12 +109,20 @@ class RunExecutor:
         """
         import time
 
+        if self._iteration_task is not None and not self._iteration_task.done():
+            logger.warning(
+                "Concurrent RunExecutor.execute() call detected — "
+                "a previous execution is still in progress"
+            )
+
         run_id = str(uuid4())
         start_time = time.perf_counter()
 
         yield RunStartedEvent(
             run_id=run_id,
             agent_name=self._agent.name,
+            session_id=session_id,
+            parent_session_id=_parent_id,
         )
 
         # Build agentlet from current agent state

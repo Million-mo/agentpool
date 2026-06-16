@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+import contextlib
 from contextlib import asynccontextmanager
 from typing import Any
 from unittest.mock import MagicMock
@@ -235,6 +236,57 @@ async def test_raw_tool_events_still_present(
 
     assert len(raw_calls) >= 1, "Raw FunctionToolCallEvent should still be present"
     assert len(raw_results) >= 1, "Raw FunctionToolResultEvent should still be present"
+
+
+# ---------------------------------------------------------------------------
+# Concurrent run warning
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_concurrent_run_warning(
+    test_agent: Agent[None],
+    message_history: MessageHistory,
+) -> None:
+    """Calling execute() while a previous execution is in progress logs a WARNING."""
+    from unittest.mock import patch
+
+    from agentpool.orchestrator import run_executor as run_executor_module
+
+    executor = RunExecutor(test_agent)
+
+    # Simulate a previous execution still running
+    async def _long_running_task() -> None:
+        await asyncio.sleep(3600)
+
+    dummy_task = asyncio.create_task(_long_running_task())
+    executor._iteration_task = dummy_task
+
+    run_ctx = AgentRunContext()
+    user_msg = ChatMessage.user_prompt("Test concurrent warning")
+
+    with patch.object(run_executor_module, "logger") as mock_logger:
+        events = await _collect_events(
+            executor,
+            prompts=["Test concurrent warning"],
+            run_ctx=run_ctx,
+            user_msg=user_msg,
+            message_history=message_history,
+        )
+
+    # Clean up the dummy task
+    dummy_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await dummy_task
+
+    # Verify warning was logged
+    mock_logger.warning.assert_called_once_with(
+        "Concurrent RunExecutor.execute() call detected — "
+        "a previous execution is still in progress"
+    )
+
+    # Second execution should still complete normally
+    assert isinstance(events[-1], StreamCompleteEvent)
 
 
 # ---------------------------------------------------------------------------
@@ -479,7 +531,7 @@ async def test_run_started_event_always_first(
 
     assert len(events) > 0
     assert isinstance(events[0], RunStartedEvent)
-    assert events[0].session_id == ""
+    assert events[0].session_id == "test-session"
     assert events[0].agent_name == test_agent.name
 
 
@@ -667,4 +719,31 @@ async def test_tool_call_complete_event_lacks_session_id(
         )
 
 
+@pytest.mark.anyio
+async def test_run_started_event_session_fields(
+    test_agent: Agent[None],
+    run_ctx: AgentRunContext,
+    message_history: MessageHistory,
+) -> None:
+    """RunStartedEvent carries session_id and parent_session_id from execute()."""
+    executor = RunExecutor(test_agent)
+    user_msg = ChatMessage.user_prompt("Test session fields")
+
+    events: list[Any] = []
+    async for event in executor.execute(
+        prompts=["Test session fields"],
+        run_ctx=run_ctx,
+        user_msg=user_msg,
+        message_history=message_history,
+        message_id="msg-1",
+        session_id="custom-session-id",
+        _parent_id="custom-parent-id",
+    ):
+        events.append(event)
+
+    assert len(events) > 0
+    assert isinstance(events[0], RunStartedEvent)
+    assert events[0].session_id == "custom-session-id"
+    assert events[0].parent_session_id == "custom-parent-id"
+    assert events[0].agent_name == test_agent.name
 
