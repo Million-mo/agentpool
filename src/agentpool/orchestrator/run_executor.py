@@ -20,7 +20,7 @@ from uuid import uuid4
 
 from pydantic_ai import CallToolsNode, FunctionToolCallEvent, ModelRequestNode
 from pydantic_ai.exceptions import UndrainedPendingMessagesError
-from pydantic_ai.messages import BaseToolCallPart, ToolCallPart
+from pydantic_ai.messages import BaseToolCallPart, PartStartEvent, ToolCallPart
 from pydantic_graph import End
 
 from agentpool.agents.events import (
@@ -158,6 +158,7 @@ class RunExecutor:
             """
             nonlocal iteration_error, response_msg
             pending_tcs: dict[str, BaseToolCallPart] = {}
+            emitted_tool_starts: set[str] = set()
 
             try:
                 async with agentlet.iter(
@@ -188,6 +189,25 @@ class RunExecutor:
                                     if isinstance(event, FunctionToolCallEvent):
                                         tool_part = event.part
                                         if isinstance(tool_part, ToolCallPart):
+                                            if tool_part.tool_call_id not in emitted_tool_starts:
+                                                emitted_tool_starts.add(tool_part.tool_call_id)
+                                                await event_queue.put(
+                                                    ToolCallStartEvent(
+                                                        tool_call_id=tool_part.tool_call_id,
+                                                        tool_name=tool_part.tool_name,
+                                                        title=f"Executing: {tool_part.tool_name}",
+                                                        raw_input=safe_args_as_dict(
+                                                            tool_part,
+                                                            default={},
+                                                        ),
+                                                    )
+                                                )
+                                    elif isinstance(event, PartStartEvent) and isinstance(
+                                        event.part, BaseToolCallPart
+                                    ):
+                                        tool_part = event.part
+                                        if tool_part.tool_call_id not in emitted_tool_starts:
+                                            emitted_tool_starts.add(tool_part.tool_call_id)
                                             await event_queue.put(
                                                 ToolCallStartEvent(
                                                     tool_call_id=tool_part.tool_call_id,
@@ -297,6 +317,19 @@ class RunExecutor:
                         timeout=2.0,
                     )
             self._iteration_task = None
+
+        # Fallback: when cancelled before any response was produced
+        if response_msg is None:
+            response_msg = ChatMessage(
+                content="[Interrupted]",
+                role="assistant",
+                name=self._agent.name,
+                message_id=message_id,
+                session_id=session_id,
+                parent_id=user_msg.message_id,
+                response_time=time.perf_counter() - start_time,
+                finish_reason="stop",
+            )
 
         if iteration_error is not None:
             raise iteration_error
