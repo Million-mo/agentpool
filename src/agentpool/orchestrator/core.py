@@ -1410,8 +1410,8 @@ class TurnRunner:
         # Get or create RunHandle (create if called directly, not via receive_request)
         run_handle = self.sessions._runs.get(run_id)
         created_run_handle = False
+        agent_type = agent.AGENT_TYPE
         if run_handle is None:
-            agent_type = agent.AGENT_TYPE
             run_handle = RunHandle(
                 run_id=run_id,
                 session_id=session_id,
