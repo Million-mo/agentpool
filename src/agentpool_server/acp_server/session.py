@@ -296,7 +296,7 @@ class ACPSession:
 
                 if isinstance(command, SkillCommand):
                     slashed_cmd = create_skill_command(command)
-                    self.command_store.register_command(slashed_cmd)
+                    self.command_store.register_command(slashed_cmd, replace=True)
                     self.log.debug("Registered skill command", skill_name=name)
             except Exception:
                 self.log.exception("Failed to register skill command", skill_name=name)
