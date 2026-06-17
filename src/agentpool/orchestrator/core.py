@@ -1078,9 +1078,9 @@ class SessionController:
         # Session has an active run - delegate after releasing the request lock
         if self._turn_runner is not None:
             if resolved_priority == "asap":
-                await self._turn_runner.inject_prompt(session_id, content, **kwargs)
+                await self._turn_runner.steer(session_id, content, **kwargs)
             else:
-                await self._turn_runner.queue_prompt(session_id, content, **kwargs)
+                await self._turn_runner.followup(session_id, content, **kwargs)
         return None
 
     def cancel_run_for_session(self, session_id: str) -> None:
