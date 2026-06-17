@@ -105,19 +105,27 @@ def _extract_provider(config: AnyModelConfig) -> str:
 def _resolve_variant_identifier(config: AnyModelConfig, variant_name: str) -> str:
     """Resolve a model variant config to its underlying model identifier.
 
-    For StringModelConfig, returns the identifier string directly
-    (e.g., "openai-chat:svc/glm-4.7"). For other config types, falls back
-    to the variant name.
+    Returns the identifier in ``{system}:{model_name}`` format matching
+    ``agent.model_name``, so the current model can be matched against
+    configured variants.
+
+    For StringModelConfig, resolves through ``config.get_model()`` to get
+    the canonical system name (e.g., ``"openai-chat"`` → ``"openai"``).
+    Falls back to the raw identifier if resolution fails.
 
     Args:
         config: Model variant configuration.
         variant_name: The variant name to use as fallback.
 
     Returns:
-        Resolved model identifier string usable by agentpool.
+        Resolved model identifier string matching agent.model_name format.
     """
     if isinstance(config, StringModelConfig):
-        return config.identifier
+        try:
+            model = config.get_model()
+            return f"{model.system}:{model.model_name}"
+        except Exception:
+            return config.identifier
     return variant_name
 
 
