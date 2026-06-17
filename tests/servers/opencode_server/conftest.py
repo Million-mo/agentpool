@@ -41,6 +41,45 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
 
 
+def _make_functional_event_bus() -> Mock:
+    """Create a Mock EventBus that properly routes publish to subscribe queues.
+
+    The real EventBus routes events from publish() to subscribe() queues.
+    A plain Mock would silently absorb publish() calls, causing SSE integration
+    tests to time out waiting for events that never arrive.
+
+    Supports scope="all" subscriptions which receive events from any session_id,
+    matching the real EventBus._should_receive behavior.
+    """
+    bus = Mock()
+    _queues: dict[str, list[tuple[asyncio.Queue[Any], str]]] = {}
+
+    async def _subscribe(session_id: str, scope: str = "session") -> asyncio.Queue[Any]:
+        queue: asyncio.Queue[Any] = asyncio.Queue()
+        _queues.setdefault(session_id, []).append((queue, scope))
+        return queue
+
+    async def _unsubscribe(session_id: str, queue: asyncio.Queue[Any]) -> None:
+        queues = _queues.get(session_id, [])
+        _queues[session_id] = [(q, s) for q, s in queues if q is not queue]
+        if not _queues[session_id]:
+            del _queues[session_id]
+
+    async def _publish(session_id: str, event: Any) -> None:
+        for subscriber_sid, subscribers in _queues.items():
+            for queue, scope in subscribers:
+                if scope == "all" or subscriber_sid == session_id:
+                    try:
+                        queue.put_nowait(event)
+                    except asyncio.QueueFull:
+                        pass
+
+    bus.subscribe = AsyncMock(side_effect=_subscribe)
+    bus.unsubscribe = AsyncMock(side_effect=_unsubscribe)
+    bus.publish = AsyncMock(side_effect=_publish)
+    return bus
+
+
 # =============================================================================
 # Temporary Directory Fixtures (similar to OpenCode's tmpdir)
 # =============================================================================
@@ -203,9 +242,7 @@ def mock_pool(
     _run_handle.complete_event = Mock()
     _run_handle.complete_event.wait = AsyncMock()
     pool.session_pool.receive_request = AsyncMock(return_value=_run_handle)
-    pool.session_pool.event_bus = Mock()
-    pool.session_pool.event_bus.subscribe = AsyncMock(return_value=asyncio.Queue())
-    pool.session_pool.event_bus.unsubscribe = AsyncMock()
+    pool.session_pool.event_bus = _make_functional_event_bus()
     pool.session_pool.sessions.store = Mock()
     pool.session_pool.sessions.store.save = storage_manager.save_session
     pool.session_pool.sessions.store.delete = storage_manager.delete_session
@@ -303,6 +340,15 @@ def server_state(tmp_project_dir: Path, mock_agent: Mock) -> ServerState:
     state.todos = {}
     state.input_providers = {}
     state.pending_questions = {}
+    # Initialize event_bridge if not already set by __post_init__
+    if state.event_bridge is None and state._pool is not None:
+        from agentpool_server.opencode_server.event_bridge import OpenCodeEventBridge
+
+        session_pool = getattr(state._pool, "session_pool", None)
+        if session_pool is not None:
+            event_bus = getattr(session_pool, "event_bus", None)
+            if event_bus is not None:
+                state.event_bridge = OpenCodeEventBridge(state, event_bus)
     return state
 
 

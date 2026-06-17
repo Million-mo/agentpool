@@ -164,6 +164,7 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
         providers: Sequence[ProviderType] | None = None,
         commands: Sequence[BaseCommand] | None = None,
         metadata: dict[str, Any] | None = None,
+        history_processors: Sequence[Callable[..., Any]] | None = None,
     ) -> None:
         """Initialize agent.
 
@@ -301,6 +302,7 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
         )
         self._default_usage_limits = usage_limits
         self._providers = list(providers) if providers else None  # model discovery
+        self._direct_history_processors = list(history_processors) if history_processors else None
         self._resolved_history_processors: list[Callable[..., Any]] | None = None
 
     def _validate_processor_signature(self, processor: Callable[..., Any]) -> None:
@@ -892,7 +894,7 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
             message_history=kw["message_history"],
             message_id=kw.get("message_id") or str(uuid4()),
             session_id=kw["session_id"],
-            _parent_id=kw.get("parent_id"),
+            _parent_id=kw.get("parent_session_id"),
             input_provider=kw.get("input_provider"),
             deps=kw.get("deps"),
         ):

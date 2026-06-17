@@ -798,8 +798,15 @@ class AgentPool[TPoolDeps = None](BaseRegistry[NodeName, MessageNode[Any, Any]])
                 raw_data = yamling.load_yaml_file(path_for_loading, resolve_inherit=True)
             except (OSError, ValueError):
                 return
+            # Extract only the 'graph' section from the YAML, not the entire file.
+            # The top-level YAML may contain 'agents', 'skills', etc. that are
+            # not valid GraphConfig fields.
+            graph_data = raw_data.get("graph") if isinstance(raw_data, dict) else None
+            if graph_data is None:
+                # No graph section in config - that's fine, use defaults
+                return
             try:
-                self._graph_config = GraphConfig.model_validate(raw_data)
+                self._graph_config = GraphConfig.model_validate(graph_data)
             except Exception as exc:
                 config_str = str(path_for_loading)
                 raise ValueError(

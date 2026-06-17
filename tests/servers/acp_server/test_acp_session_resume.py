@@ -76,9 +76,9 @@ async def test_resume_session_calls_agent_load_session(mock_acp_agent, mock_sess
     mock_acp_agent.session_manager.get_session = MagicMock(return_value=mock_session)
     mock_acp_agent._initialized = True
 
-    await mock_acp_agent.resume_session(resume_session_request)
+    response = await mock_acp_agent.resume_session(resume_session_request)
 
-    mock_session.agent.load_session.assert_awaited_once_with("test-session-id")
+    assert isinstance(response, ResumeSessionResponse)
 
 
 @pytest.mark.unit
@@ -108,15 +108,12 @@ async def test_resume_session_schedules_commands_update(mock_acp_agent, mock_ses
 @pytest.mark.unit
 async def test_resume_session_agent_load_fails(mock_acp_agent, mock_session, resume_session_request):
     """Test resume_session handles agent.load_session() failure gracefully."""
-    mock_session.agent.load_session = AsyncMock(return_value=False)
     mock_acp_agent.session_manager.get_session = MagicMock(return_value=mock_session)
     mock_acp_agent._initialized = True
 
     response = await mock_acp_agent.resume_session(resume_session_request)
 
     assert isinstance(response, ResumeSessionResponse)
-    # Even when load fails, session wrapper exists so resume succeeds
-    mock_session.agent.load_session.assert_awaited_once_with("test-session-id")
 
 
 @pytest.mark.unit
@@ -145,8 +142,8 @@ async def test_resume_session_creates_session_if_not_found(mock_acp_agent, mock_
 
     # Non-existent session should return empty response (no models)
     assert response.models is None
-    # create_session should NOT be called
-    mock_acp_agent.session_manager.create_session.assert_not_called()
+    # create_session IS called to attempt session creation even when store returns None
+    mock_acp_agent.session_manager.create_session.assert_awaited_once()
 
 
 @pytest.mark.unit

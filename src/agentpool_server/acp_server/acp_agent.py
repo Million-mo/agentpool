@@ -274,7 +274,7 @@ class AgentPoolACPAgent(ACPAgent):
         # Initialize SessionPool-backed protocol handler if feature flag is enabled
         if (
             self.agent_pool
-            and self.agent_pool.manifest.acp.use_session_pool
+            and (self.agent_pool.manifest.acp and self.agent_pool.manifest.acp.use_session_pool)
         ):
             from agentpool_server.acp_server.event_converter import ACPEventConverter
             from agentpool_server.acp_server.handler import ACPProtocolHandler

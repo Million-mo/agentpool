@@ -901,6 +901,7 @@ class BaseAgent[TDeps = None, TResult = str](MessageNode[TDeps, TResult]):
                     effective_session_id,
                     *prompts,  # type: ignore[arg-type]
                     input_provider=input_provider,
+                    parent_session_id=parent_session_id,
                 ):
                     yield event
 
