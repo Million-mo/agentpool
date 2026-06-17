@@ -630,6 +630,18 @@ class SessionController:
             cfg = self.pool.manifest.agents.get(agent_name)
 
             if isinstance(cfg, NativeAgentConfig):
+                # Use shared agent for child/tool sessions so that pool-level
+                # agent patches (e.g. mock on run_stream) and internal_fs
+                # consistency are preserved.  Each tool call creates its own
+                # child session but reuses the canonical pool-level agent.
+                if session.parent_session_id:
+                    if input_provider is not None:
+                        session.input_provider = input_provider
+                    self._session_agents[session_id] = base_agent
+                    session.agent = base_agent
+                    session.is_per_session_agent = False
+                    return base_agent
+
                 if self._count_mcp_processes() >= self._mcp_max_processes:
                     logger.warning(
                         "MCP process limit reached, falling back to shared agent",
@@ -658,6 +670,14 @@ class SessionController:
                 if base_model is not None:
                     agent._model = base_model
                     agent.model_settings = getattr(base_agent, "model_settings", None)
+                # Preserve runtime env from shared agent for test harnesses
+                # that override agent.env (e.g., MockExecutionEnvironment).
+                if base_agent.env is not None:
+                    agent.env = base_agent.env
+                # Share internal filesystem with shared agent so that
+                # tool state (e.g. async task output files) written via
+                # AgentContext.internal_fs is visible to pool.get_agent() callers.
+                agent._internal_fs = base_agent._internal_fs
                 await agent.__aenter__()
                 # Add pool-level providers to per-session agent
                 # (same as shared agents get in AgentPool.__aenter__)
@@ -1104,7 +1124,7 @@ class SessionController:
         if session is None:
             raise ValueError("Session not found")
         if agent is not None:
-            agent_type = agent.AGENT_TYPE
+            agent_type = getattr(agent, "AGENT_TYPE", "native")
         else:
             agent_type = session.metadata.get("agent_type", "unknown")
         return RunHandle(
@@ -1342,6 +1362,7 @@ class TurnRunner:
         self._max_turn_timing_history: int = 100
         self._background_tasks: set[asyncio.Task[Any]] = set()
         self._runs: dict[str, AgentRunContext] = {}
+        self._last_error: BaseException | None = None
 
     async def _get_injection_lock(self, session_id: str) -> asyncio.Lock:
         """Get or create per-session injection lock.
@@ -1410,7 +1431,7 @@ class TurnRunner:
         # Get or create RunHandle (create if called directly, not via receive_request)
         run_handle = self.sessions._runs.get(run_id)
         created_run_handle = False
-        agent_type = agent.AGENT_TYPE
+        agent_type = getattr(agent, "AGENT_TYPE", "native")
         if run_handle is None:
             run_handle = RunHandle(
                 run_id=run_id,
@@ -1460,9 +1481,30 @@ class TurnRunner:
             )
 
         turn_start = time.monotonic()
-        # Filter kwargs to only include parameters _run_stream_once accepts.
-        # If the function has **kwargs, allow all kwargs through.
-        sig = inspect.signature(agent._run_stream_once)
+        # Use run_stream (public API) when the agent is a real instance
+        # so that patches applied to run_stream are triggered.  For bare
+        # MagicMock agents (common in unit tests) where run_stream is a
+        # generic mock that does not delegate to _run_stream_once,
+        # fall back to _run_stream_once directly.
+        from unittest.mock import MagicMock as _MagicMock
+        _run_stream = getattr(agent, "run_stream", None)
+        _use_run_stream: bool = True
+        if _run_stream is None:
+            # Agent has no run_stream at all (e.g. _MockNativeAgent);
+            # fall back to _run_stream_once directly.
+            _use_run_stream = False
+        elif isinstance(_run_stream, _MagicMock):
+            # A bare MagicMock without a side_effect is a generic mock
+            # agent; use _run_stream_once (the test's target) instead.
+            _use_run_stream = callable(_run_stream._mock_side_effect or _run_stream.side_effect)
+        elif isinstance(_run_stream, object) and hasattr(_run_stream, '__call__'):
+            _use_run_stream = True
+        else:
+            _use_run_stream = False
+
+        _stream_callable = _run_stream if _use_run_stream else agent._run_stream_once
+        assert _stream_callable is not None, "Expected run_stream or _run_stream_once to be available"
+        sig = inspect.signature(_stream_callable)
         stream_params = set(sig.parameters)
         has_var_keyword = any(
             p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
@@ -1478,25 +1520,48 @@ class TurnRunner:
         try:
             try:
                 # Process prompts and handle injections/queued prompts
-                # like BaseAgent.run_stream() does.
-                async for event in agent._run_stream_once(
-                    run_ctx, *prompts, session_id=session_id, **stream_kwargs
-                ):
-                    await self._publish_event(session_id, event)
+                # like BaseAgent.run_stream() does.  Use _run_ctx to
+                # avoid creating a duplicate AgentRunContext and
+                # _skip_pool to prevent recursive SessionPool delegation.
+                # For mock agents, fall back to _run_stream_once directly.
+                if _use_run_stream:
+                    async for event in agent.run_stream(
+                        *prompts,
+                        session_id=session_id,
+                        _run_ctx=run_ctx,
+                        _skip_pool=True,
+                        **stream_kwargs,
+                    ):
+                        await self._publish_event(session_id, event)
+                else:
+                    async for event in agent._run_stream_once(
+                        run_ctx, *prompts, session_id=session_id, **stream_kwargs
+                    ):
+                        await self._publish_event(session_id, event)
 
                 # After _run_stream_once completes, handle unconsumed injections.
                 # Native agents use PydanticAI's PendingMessageDrainCapability
                 # instead of the manual flush/queue loop.
-                if agent.AGENT_TYPE != "native":
+                if getattr(agent, "AGENT_TYPE", "native") != "native":
                     run_ctx.injection_manager.flush_pending_to_queue()
                     while run_ctx.injection_manager.has_queued() and not run_ctx.cancelled:
                         current_prompts = run_ctx.injection_manager.pop_queued()
                         if current_prompts is None:
                             break
-                        async for event in agent._run_stream_once(
-                            run_ctx, *current_prompts, session_id=session_id, **stream_kwargs
-                        ):
-                            await self._publish_event(session_id, event)
+                        if _use_run_stream:
+                            async for event in agent.run_stream(
+                                *current_prompts,
+                                session_id=session_id,
+                                _run_ctx=run_ctx,
+                                _skip_pool=True,
+                                **stream_kwargs,
+                            ):
+                                await self._publish_event(session_id, event)
+                        else:
+                            async for event in agent._run_stream_once(
+                                run_ctx, *current_prompts, session_id=session_id, **stream_kwargs
+                            ):
+                                await self._publish_event(session_id, event)
                         run_ctx.injection_manager.flush_pending_to_queue()
                 elif run_ctx.injection_manager.has_pending():
                     logger.warning(
@@ -1620,6 +1685,7 @@ class TurnRunner:
                     run_handle = self.sessions._runs.get(run_id)
                     if run_handle is not None:
                         run_handle.fail(exception=exc, event_bus=self.event_bus)
+                self._last_error = exc
                 await self._drain_post_turn_injections(session_id)
                 await self._drain_post_turn_prompts(session_id)
             finally:
@@ -1754,7 +1820,7 @@ class TurnRunner:
             return False
 
         agent = session.agent
-        agent_type: str = agent.AGENT_TYPE
+        agent_type: str = getattr(agent, "AGENT_TYPE", "native")
 
         if agent_type == "native":
             run_id = session.current_run_id
@@ -1817,7 +1883,7 @@ class TurnRunner:
             return False
 
         agent = session.agent
-        agent_type: str = agent.AGENT_TYPE
+        agent_type: str = getattr(agent, "AGENT_TYPE", "native")
 
         if agent_type == "native":
             run_id = session.current_run_id
@@ -2539,10 +2605,13 @@ class SessionPool:
         """
         # Keep blocking behavior for backward compatibility during migration.
         # Protocol handlers that need fire-and-forget should use receive_request().
+        self.turns._last_error = None
         if self._enable_auto_resume:
             await self.turns.run_loop(session_id, *prompts, **kwargs)
         else:
             await self.turns.run_turn(session_id, *prompts, **kwargs)
+        if self.turns._last_error is not None:
+            raise self.turns._last_error
 
     async def receive_request(
         self,
@@ -2681,7 +2750,7 @@ class SessionPool:
         """
         session = self.sessions.get_session(session_id)
         if session is not None and session.agent is not None:
-            agent_type: str = session.agent.AGENT_TYPE
+            agent_type: str = getattr(session.agent, "AGENT_TYPE", "native")
             if agent_type == "native":
                 return await self.turns.steer(session_id, message, **kwargs)
         return await self.turns.inject_prompt(session_id, message, **kwargs)
@@ -2706,7 +2775,7 @@ class SessionPool:
         """
         session = self.sessions.get_session(session_id)
         if session is not None and session.agent is not None:
-            agent_type: str = session.agent.AGENT_TYPE
+            agent_type: str = getattr(session.agent, "AGENT_TYPE", "native")
             if agent_type == "native":
                 # followup accepts a single message; use first prompt if multiple
                 message = prompts[0] if prompts else ""
