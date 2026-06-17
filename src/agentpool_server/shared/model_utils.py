@@ -253,7 +253,16 @@ async def build_model_state_for_acp(
     if configured_models:
         current_model = agent.model_name
         all_ids = [m.model_id for m in configured_models]
-        if current_model and current_model not in all_ids:
+
+        # Also resolve configured variants to their underlying model identifiers
+        # to check if current_model matches a variant's resolved identifier.
+        resolved_ids: set[str] = set()
+        if manifest and manifest.model_variants:
+            for _config in manifest.model_variants.values():
+                if isinstance(_config, StringModelConfig):
+                    resolved_ids.add(_config.identifier)
+
+        if current_model and current_model not in all_ids and current_model not in resolved_ids:
             # Ensure current model is visible in IDE even if not in configured variants
             desc = "Currently configured model"
             model_info = ACPModelInfo(
