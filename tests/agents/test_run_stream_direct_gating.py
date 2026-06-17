@@ -1,7 +1,7 @@
-"""Tests for AGENT_TYPE gating in BaseAgent._execute_direct().
+"""Tests for AGENT_TYPE gating in BaseAgent.run_stream().
 
-Verifies that the `if self.AGENT_TYPE == "native"` gating at
-base_agent.py:1051 correctly skips the manual `while has_queued()` loop
+Verifies that the ``if self.AGENT_TYPE == "native"`` gating in
+``run_stream()`` correctly skips the manual ``while has_queued()`` loop
 for native agents and executes it for non-native agents.
 """
 
@@ -28,7 +28,7 @@ class _GatingTestAgent(BaseAgent[None, str]):
     """Test agent that tracks _run_stream_once calls.
 
     Subclasses override AGENT_TYPE to test native vs non-native gating.
-    _run_stream_once records every call and queues an extra prompt on the first
+    ``_run_stream_once`` records every call and queues an extra prompt on the first
     invocation, allowing the test to distinguish single-call (native) from
     multi-call (non-native) behaviour.
     """
@@ -117,17 +117,17 @@ class _NonNativeTestAgent(_GatingTestAgent):
 
 
 async def test_native_agent_skips_manual_loop() -> None:
-    """Native AGENT_TYPE should cause _execute_direct to skip the while loop.
+    """Native AGENT_TYPE should cause run_stream() to skip the while loop.
 
     When AGENT_TYPE == 'native', the extra prompt queued during
-    _run_stream_once must NOT be processed — the method uses a simple
+    _run_stream_once must NOT be processed -- the method uses a simple
     ``async for`` and exits without re-checking the injection queue.
     """
     call_log: list[tuple[Any, ...]] = []
     agent = _NativeTestAgent(call_log)
 
     events: list[object] = []
-    async for event in agent._execute_direct("test prompt"):
+    async for event in agent.run_stream("test prompt"):
         events.append(event)
 
     # Native path: _run_stream_once is called exactly once
@@ -143,7 +143,7 @@ async def test_native_agent_skips_manual_loop() -> None:
 
 
 async def test_non_native_agent_executes_manual_loop() -> None:
-    """Non-native AGENT_TYPE should cause _execute_direct to run the while loop.
+    """Non-native AGENT_TYPE should cause run_stream() to run the while loop.
 
     When AGENT_TYPE == 'acp', the extra prompt queued during
     _run_stream_once MUST be processed because the while loop re-checks
@@ -153,7 +153,7 @@ async def test_non_native_agent_executes_manual_loop() -> None:
     agent = _NonNativeTestAgent(call_log)
 
     events: list[object] = []
-    async for event in agent._execute_direct("test prompt"):
+    async for event in agent.run_stream("test prompt"):
         events.append(event)
 
     # Non-native path: _run_stream_once is called twice
