@@ -150,6 +150,17 @@ class RunExecutor:
         iteration_error: BaseException | None = None
         response_msg: ChatMessage[Any] | None = None
 
+        # Drain any events already pending in run_ctx.event_queue (e.g. from
+        # tool-initialization progress reports that fired before the executor
+        # was started) and forward them to the local event_queue.
+        while not run_ctx.event_queue.empty():
+            try:
+                ctx_event = run_ctx.event_queue.get_nowait()
+                if ctx_event is not None:
+                    await event_queue.put(ctx_event)
+            except asyncio.QueueEmpty:
+                break
+
         async def agent_iteration_task() -> None:
             """Background task that drives ``agentlet.iter()`` with ``next()``.
 
@@ -159,6 +170,16 @@ class RunExecutor:
             nonlocal iteration_error, response_msg
             pending_tcs: dict[str, BaseToolCallPart] = {}
             emitted_tool_starts: set[str] = set()
+
+            # Pre-compute tool kind lookup for ToolCallStartEvent
+            _tool_kind_map: dict[str, str] = {}
+            try:
+                all_agent_tools = await self._agent.tools.get_tools()
+                for t in all_agent_tools:
+                    if t.category:
+                        _tool_kind_map[t.name] = t.category
+            except Exception:
+                logger.debug("Failed to build tool kind map", exc_info=True)
 
             try:
                 async with agentlet.iter(
@@ -191,11 +212,13 @@ class RunExecutor:
                                         if isinstance(tool_part, ToolCallPart):
                                             if tool_part.tool_call_id not in emitted_tool_starts:
                                                 emitted_tool_starts.add(tool_part.tool_call_id)
+                                                tool_kind = _tool_kind_map.get(tool_part.tool_name, "other")
                                                 await event_queue.put(
                                                     ToolCallStartEvent(
                                                         tool_call_id=tool_part.tool_call_id,
                                                         tool_name=tool_part.tool_name,
                                                         title=f"Executing: {tool_part.tool_name}",
+                                                        kind=tool_kind,  # type: ignore[arg-type]
                                                         raw_input=safe_args_as_dict(
                                                             tool_part,
                                                             default={},
@@ -208,11 +231,13 @@ class RunExecutor:
                                         tool_part = event.part
                                         if tool_part.tool_call_id not in emitted_tool_starts:
                                             emitted_tool_starts.add(tool_part.tool_call_id)
+                                            tool_kind = _tool_kind_map.get(tool_part.tool_name, "other")
                                             await event_queue.put(
                                                 ToolCallStartEvent(
                                                     tool_call_id=tool_part.tool_call_id,
                                                     tool_name=tool_part.tool_name,
                                                     title=f"Executing: {tool_part.tool_name}",
+                                                    kind=tool_kind,  # type: ignore[arg-type]
                                                     raw_input=safe_args_as_dict(
                                                         tool_part,
                                                         default={},
@@ -290,7 +315,23 @@ class RunExecutor:
         self._iteration_task = asyncio.create_task(agent_iteration_task())
 
         try:
+            iteration_done = False
             while True:
+                # Drain any pending context events from run_ctx.event_queue
+                # (e.g., ToolCallProgressEvent from report_progress).
+                # These are produced asynchronously by tool execution and
+                # must be yielded to callers so event_handlers see them.
+                try:
+                    while True:
+                        ctx_event = run_ctx.event_queue.get_nowait()
+                        if ctx_event is not None:
+                            yield ctx_event
+                except asyncio.QueueEmpty:
+                    pass
+
+                if iteration_done:
+                    break
+
                 try:
                     event = await asyncio.wait_for(
                         event_queue.get(),
@@ -305,7 +346,10 @@ class RunExecutor:
                     continue
 
                 if event is None:
-                    break
+                    # Main iteration task done; loop once more to drain any
+                    # remaining context events before exiting.
+                    iteration_done = True
+                    continue
                 yield event
 
         finally:
