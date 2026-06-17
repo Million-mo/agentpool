@@ -142,8 +142,8 @@ async def test_resume_starts_event_bus_consumer(mocked_acp_agent):
     request = ResumeSessionRequest(session_id="resume-test-session", cwd="/tmp/resume")
     await mocked_acp_agent.resume_session(request)
 
-    # session_manager.create_session should be called
-    mocked_acp_agent.session_manager.create_session.assert_awaited_once()
+    # resume_session should have been called
+    mocked_acp_agent.session_manager.resume_session.assert_awaited_once()
 
 
 @pytest.mark.unit
@@ -184,8 +184,11 @@ async def test_resume_nonexistent_session_returns_error(mocked_acp_agent):
     request = ResumeSessionRequest(session_id="nonexistent-session", cwd="/tmp")
     response = await mocked_acp_agent.resume_session(request)
 
-    # Session creation is attempted but returns empty response when session not found
-    mocked_acp_agent.session_manager.create_session.assert_awaited_once()
+    # Should NOT try to create a new session for a non-existent session_id
+    mocked_acp_agent.session_manager.create_session.assert_not_awaited()
+    mocked_acp_agent.session_manager.resume_session.assert_awaited_once()
+    # EventBus consumer should NOT be started
+    mocked_acp_agent._protocol_handler.start_event_consumer.assert_not_awaited()
     # Should return empty response (no models)
     assert response.models is None
 
@@ -231,8 +234,8 @@ async def test_resume_loads_agent_state(mocked_acp_agent):
     request = ResumeSessionRequest(session_id="resume-test-session", cwd="/tmp/resume")
     await mocked_acp_agent.resume_session(request)
 
-    # session_manager.create_session should be called
-    mocked_acp_agent.session_manager.create_session.assert_awaited_once()
+    # resume_session should have been called
+    mocked_acp_agent.session_manager.resume_session.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
