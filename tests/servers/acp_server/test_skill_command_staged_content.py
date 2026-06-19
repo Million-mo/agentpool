@@ -6,6 +6,8 @@ staged_content so that the agent runs instead of returning end_turn.
 
 from __future__ import annotations
 
+import types
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
@@ -14,6 +16,7 @@ from pathlib import PurePosixPath
 
 from agentpool import Agent, AgentPool
 from agentpool.agents.context import AgentContext
+from agentpool.orchestrator import SessionPool
 from agentpool.skills.command import SkillCommand
 from agentpool.skills.command_registry import SkillCommandRegistry
 from agentpool.skills.skill import Skill
@@ -52,6 +55,56 @@ def agent_pool_with_skill() -> AgentPool:
     pool._skill_commands = registry  # type: ignore[reportPrivateUsage]
 
     return pool
+
+
+@pytest.fixture
+async def agent_pool_with_session_pool(agent_pool_with_skill: AgentPool):
+    """Create an agent pool with a started SessionPool."""
+    pool = agent_pool_with_skill
+    session_pool = SessionPool(pool=pool, enable_auto_resume=True)
+    await session_pool.start()
+    pool.sessions = session_pool  # type: ignore[deprecated]
+    yield pool
+    await session_pool.shutdown()
+    pool.sessions = None  # type: ignore[deprecated]
+
+
+async def _setup_skill_session_staged(
+    agent_pool: AgentPool,
+    session_pool: SessionPool,
+    session_id: str = "test-session",
+) -> tuple[ACPSession, Any]:
+    """Create an ACPSession and a corresponding SessionPool session.
+
+    Returns the ACPSession and the session agent from SessionPool.
+    """
+    agent = agent_pool.get_agent("test_agent")
+    mock_client = AsyncMock()
+    mock_acp_agent = Mock()
+    mock_acp_agent.tasks = Mock()
+    mock_acp_agent.tasks.create_task = lambda coro: coro
+
+    session = ACPSession(
+        session_id=session_id,
+        agent=agent,
+        cwd="/tmp",
+        client=mock_client,
+        acp_agent=mock_acp_agent,
+    )
+
+    # Register the skill command in the session's command store
+    skill_cmd = agent_pool._skill_commands.get("test-skill")  # type: ignore[reportPrivateUsage]
+    assert skill_cmd is not None
+
+    slashed_cmd = create_skill_command(skill_cmd)
+    session.command_store.register_command(slashed_cmd, replace=True)
+
+    # Create session in SessionPool and get session agent
+    await session_pool.create_session(session_id, cwd="/tmp")
+    session_agent = await session_pool.sessions.get_or_create_session_agent(
+        session_id, input_provider=session.input_provider
+    )
+    return session, session_agent
 
 
 async def test_skill_command_injects_into_staged_content(agent_pool_with_skill: AgentPool):
@@ -94,7 +147,7 @@ async def test_skill_command_injects_into_staged_content(agent_pool_with_skill: 
 
 
 async def test_skill_command_with_staged_content_triggers_agent_run(
-    agent_pool_with_skill: AgentPool,
+    agent_pool_with_session_pool: AgentPool,
 ):
     """Test that process_prompt runs agent when only commands but staged_content exists.
 
@@ -102,52 +155,44 @@ async def test_skill_command_with_staged_content_triggers_agent_run(
     injects content into staged_content, the agent should run rather than
     returning end_turn immediately.
     """
-    agent = agent_pool_with_skill.get_agent("test_agent")
-    mock_client = AsyncMock()
-    mock_acp_agent = Mock()
-    mock_acp_agent.tasks = Mock()
-    mock_acp_agent.tasks.create_task = lambda coro: coro
+    pool = agent_pool_with_session_pool
+    session_pool = pool.session_pool
+    assert session_pool is not None
 
-    session = ACPSession(
-        session_id="test-session",
-        agent=agent,
-        cwd="/tmp",
-        client=mock_client,
-        acp_agent=mock_acp_agent,
-    )
-
-    # Register the skill command in the session's command store
-    skill_cmd = agent_pool_with_skill._skill_commands.get("test-skill")  # type: ignore[reportPrivateUsage]
-    assert skill_cmd is not None
-
-    slashed_cmd = create_skill_command(skill_cmd)
-    session.command_store.register_command(slashed_cmd, replace=True)
+    session, session_agent = await _setup_skill_session_staged(pool, session_pool)
 
     # Create a content block that is just the slash command
     from acp.schema import TextContentBlock
 
     content_block = TextContentBlock(text="/test-skill")
 
-    # Track whether agent.run_stream was called
-    run_stream_called = False
-    original_run_stream = agent.run_stream
+    # Track whether _stream_events was called on the session agent
+    stream_events_called = False
+    original_stream_events = session_agent._stream_events
 
-    async def tracked_run_stream(*args, **kwargs):
-        nonlocal run_stream_called
-        run_stream_called = True
-        # Yield nothing - the test only checks if run_stream was called
+    async def tracked_stream_events(
+        self,
+        run_ctx,
+        prompts,
+        *,
+        user_msg,
+        **kwargs,
+    ):
+        nonlocal stream_events_called
+        stream_events_called = True
+        # Yield nothing - the test only checks if stream was called
         return
-        yield
+        yield  # type: ignore[unreachable]
 
-    agent.run_stream = tracked_run_stream  # type: ignore[method-assign]
+    session_agent._stream_events = types.MethodType(tracked_stream_events, session_agent)
 
     try:
-        result = await session.process_prompt([content_block])
+        await session.process_prompt([content_block])
     finally:
-        agent.run_stream = original_run_stream  # type: ignore[method-assign]
+        session_agent._stream_events = original_stream_events  # type: ignore[method-assign]
 
-    assert run_stream_called, (
-        "agent.run_stream should be called when skill command "
+    assert stream_events_called, (
+        "_stream_events should be called when skill command "
         "injects content into staged_content"
     )
 

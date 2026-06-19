@@ -7,6 +7,7 @@ receives it as part of the prompt - not just that run_stream is called.
 from __future__ import annotations
 
 import types
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
@@ -14,8 +15,10 @@ import pytest
 from pathlib import PurePosixPath
 
 from agentpool import Agent, AgentPool
+from agentpool.agents.base_agent import BaseAgent
 from agentpool.agents.context import AgentContext
 from agentpool.messaging import ChatMessage
+from agentpool.orchestrator import SessionPool
 from agentpool.skills.command import SkillCommand
 from agentpool.skills.command_registry import SkillCommandRegistry
 from agentpool.skills.skill import Skill
@@ -55,21 +58,35 @@ def agent_pool_with_skill() -> AgentPool:
     return pool
 
 
-async def test_skill_content_reaches_model_prompt(agent_pool_with_skill: AgentPool):
-    """RED FLAG TEST: Verify skill instructions actually reach the model prompt.
+@pytest.fixture
+async def agent_pool_with_session_pool(agent_pool_with_skill: AgentPool):
+    """Create an agent pool with a started SessionPool."""
+    pool = agent_pool_with_skill
+    session_pool = SessionPool(pool=pool, enable_auto_resume=True)
+    await session_pool.start()
+    pool.sessions = session_pool  # type: ignore[deprecated]
+    yield pool
+    await session_pool.shutdown()
+    pool.sessions = None  # type: ignore[deprecated]
 
-    This test mocks _stream_events to capture what the agent actually passes
-    to the model. The bug is that staged_content is injected but the model
-    doesn't see it ("The user hasn't asked anything yet").
+
+async def _setup_skill_session(
+    agent_pool: AgentPool,
+    session_pool: SessionPool,
+    session_id: str = "test-session",
+) -> tuple[ACPSession, Any]:
+    """Create an ACPSession and a corresponding SessionPool session.
+
+    Returns the ACPSession and the session agent from SessionPool.
     """
-    agent = agent_pool_with_skill.get_agent("test_agent")
+    agent = agent_pool.get_agent("test_agent")
     mock_client = AsyncMock()
     mock_acp_agent = Mock()
     mock_acp_agent.tasks = Mock()
     mock_acp_agent.tasks.create_task = lambda coro: coro
 
     session = ACPSession(
-        session_id="test-session",
+        session_id=session_id,
         agent=agent,
         cwd="/tmp",
         client=mock_client,
@@ -77,20 +94,39 @@ async def test_skill_content_reaches_model_prompt(agent_pool_with_skill: AgentPo
     )
 
     # Register the skill command
-    skill_cmd = agent_pool_with_skill._skill_commands.get("test-skill")  # type: ignore[reportPrivateUsage]
+    skill_cmd = agent_pool._skill_commands.get("test-skill")  # type: ignore[reportPrivateUsage]
     slashed_cmd = create_skill_command(skill_cmd)
     session.command_store.register_command(slashed_cmd, replace=True)
+
+    # Create session in SessionPool and get session agent
+    await session_pool.create_session(session_id, cwd="/tmp")
+    session_agent = await session_pool.sessions.get_or_create_session_agent(
+        session_id, input_provider=session.input_provider
+    )
+    return session, session_agent
+
+
+async def test_skill_content_reaches_model_prompt(agent_pool_with_session_pool: AgentPool):
+    """RED FLAG TEST: Verify skill instructions actually reach the model prompt.
+
+    This test mocks _stream_events on the SessionPool's session agent to capture
+    what the agent actually passes to the model. The bug is that staged_content
+    is injected but the model doesn't see it.
+    """
+    pool = agent_pool_with_session_pool
+    session_pool = pool.session_pool
+    assert session_pool is not None
+
+    session, session_agent = await _setup_skill_session(pool, session_pool)
 
     from acp.schema import TextContentBlock
 
     content_block = TextContentBlock(text="/test-skill some arguments")
 
-    # Capture what _stream_events receives
+    # Capture what _stream_events receives on the session agent
     captured_prompts = None
     captured_user_msg = None
-    original_stream_events = agent._stream_events
-
-    import types
+    original_stream_events = session_agent._stream_events
 
     async def mock_stream_events(
         self,
@@ -107,12 +143,12 @@ async def test_skill_content_reaches_model_prompt(agent_pool_with_skill: AgentPo
         return
         yield  # type: ignore[unreachable]
 
-    agent._stream_events = types.MethodType(mock_stream_events, agent)
+    session_agent._stream_events = types.MethodType(mock_stream_events, session_agent)
 
     try:
         await session.process_prompt([content_block])
     finally:
-        agent._stream_events = original_stream_events  # type: ignore[method-assign]
+        session_agent._stream_events = original_stream_events  # type: ignore[method-assign]
 
     # ASSERTIONS
     assert captured_user_msg is not None, "_stream_events should have been called"
@@ -136,7 +172,9 @@ async def test_skill_content_reaches_model_prompt(agent_pool_with_skill: AgentPo
     assert len(captured_user_msg.messages) > 0, "ChatMessage should have ModelRequest messages"
 
 
-async def test_skill_content_format_matches_opencode_pattern(agent_pool_with_skill: AgentPool):
+async def test_skill_content_format_matches_opencode_pattern(
+    agent_pool_with_session_pool: AgentPool,
+):
     """Verify skill content format matches what OpenCode does (direct string prompt).
 
     OpenCode builds: <skill-instruction>{instructions}</skill-instruction>\n<user-request>{args}</user-request>
@@ -144,30 +182,18 @@ async def test_skill_content_format_matches_opencode_pattern(agent_pool_with_ski
 
     ACP should produce equivalent prompt content.
     """
-    agent = agent_pool_with_skill.get_agent("test_agent")
-    mock_client = AsyncMock()
-    mock_acp_agent = Mock()
-    mock_acp_agent.tasks = Mock()
-    mock_acp_agent.tasks.create_task = lambda coro: coro
+    pool = agent_pool_with_session_pool
+    session_pool = pool.session_pool
+    assert session_pool is not None
 
-    session = ACPSession(
-        session_id="test-session",
-        agent=agent,
-        cwd="/tmp",
-        client=mock_client,
-        acp_agent=mock_acp_agent,
-    )
-
-    skill_cmd = agent_pool_with_skill._skill_commands.get("test-skill")  # type: ignore[reportPrivateUsage]
-    slashed_cmd = create_skill_command(skill_cmd)
-    session.command_store.register_command(slashed_cmd, replace=True)
+    session, session_agent = await _setup_skill_session(pool, session_pool)
 
     from acp.schema import TextContentBlock
 
     content_block = TextContentBlock(text="/test-skill some arguments")
 
     captured_prompts = None
-    original_stream_events = agent._stream_events
+    original_stream_events = session_agent._stream_events
 
     async def mock_stream_events2(self, run_ctx, prompts, *, user_msg, **kwargs):
         nonlocal captured_prompts
@@ -175,12 +201,12 @@ async def test_skill_content_format_matches_opencode_pattern(agent_pool_with_ski
         return
         yield  # type: ignore[unreachable]
 
-    agent._stream_events = types.MethodType(mock_stream_events2, agent)  # type: ignore[method-assign]
+    session_agent._stream_events = types.MethodType(mock_stream_events2, session_agent)  # type: ignore[method-assign]
 
     try:
         await session.process_prompt([content_block])
     finally:
-        agent._stream_events = original_stream_events  # type: ignore[method-assign]
+        session_agent._stream_events = original_stream_events  # type: ignore[method-assign]
 
     assert captured_prompts is not None
 
