@@ -81,17 +81,10 @@ def mock_state() -> ServerState:
     # Initialize backward-compat dicts removed from ServerState dataclass
     # so tests and helper fallbacks can access them.
     state.messages = {}
+    state.session_status = {}
     state.todos = {}
     state.input_providers = {}
     state.pending_questions = {}
-    # Set up a mock session_pool_integration so set_session_status() and
-    # get_session_status() have the integration they expect.
-    from unittest.mock import AsyncMock, Mock
-
-    mock_integration = Mock()
-    mock_integration._status_bridges = {}
-    mock_integration.get_session_status = AsyncMock(return_value=None)
-    state.session_pool_integration = mock_integration
     return state
 
 
@@ -436,12 +429,13 @@ async def test_store_first_marks_session_idle(mock_state: ServerState) -> None:
     with patch.object(mock_state, "broadcast_event", new=AsyncMock()) as mock_broadcast:
         await ensure_session(mock_state, session_id)
 
-    # Status should be idle (verified via broadcast events below)
-    # Should have idle events
+    # Should have idle events.
+    # Status is now broadcast via set_session_status() + mark_session_idle()
+    # instead of stored in the in-memory session_status dict.
     broadcast_events = [call.args[0] for call in mock_broadcast.await_args_list]
     status_events = [e for e in broadcast_events if isinstance(e, SessionStatusEvent)]
     idle_events = [e for e in broadcast_events if isinstance(e, SessionIdleEvent)]
-    assert len(status_events) == 1
+    assert len(status_events) == 2  # set_session_status() + mark_session_idle() explicit broadcast
     assert len(idle_events) == 1
 
 

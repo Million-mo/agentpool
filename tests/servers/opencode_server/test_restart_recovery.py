@@ -51,8 +51,8 @@ class TestRestartRecovery:
         assert loaded_session.directory == str(tmp_project_dir)
         assert session_id in server_state.sessions
         assert server_state.reverted_messages[session_id] == []
-        # Session status is now managed via session_pool_integration.
-        # Verify idle events are broadcast (checked below).
+        # Session status is now broadcast via set_session_status() instead of
+        # stored in the in-memory session_status dict.
 
         status_events = [
             event

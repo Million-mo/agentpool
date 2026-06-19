@@ -18,6 +18,7 @@ from agentpool.sessions.models import PendingDeferredCall, SessionData
 from agentpool_server.opencode_server.models import (
     MessageWithParts,
     Session,
+    SessionStatusEvent,
     SessionUpdatedEvent,
     TimeCreatedUpdated,
     UserMessage,
@@ -127,18 +128,11 @@ def mock_state() -> ServerState:
     )
     # Initialize backward-compat dicts
     state.messages = {}  # type: ignore[attr-defined]
+    state.session_status = {}  # type: ignore[attr-defined]
     state.todos = {}  # type: ignore[attr-defined]
     state.input_providers = {}  # type: ignore[attr-defined]
     state.pending_questions = {}  # type: ignore[attr-defined]
     state.reverted_messages = {}  # type: ignore[attr-defined]
-    # Set up a mock session_pool_integration so set_session_status() and
-    # get_session_status() have the integration they expect.
-    from unittest.mock import AsyncMock, Mock
-
-    mock_integration = Mock()
-    mock_integration._status_bridges = {}
-    mock_integration.get_session_status = AsyncMock(return_value=None)
-    state.session_pool_integration = mock_integration  # type: ignore[attr-defined]
     return state
 
 
@@ -196,11 +190,8 @@ async def test_ensure_session_checkpointed_marks_idle(mock_state: ServerState) -
     with patch.object(mock_state, "broadcast_event", new=AsyncMock()) as mock_broadcast:
         await ensure_session(mock_state, session_id)
 
-    # Should be idle even though status is checkpointed in storage
-    # Session status is now managed via session_pool_integration /
-    # SessionStatusBridge. Verify via broadcast events.
-    from agentpool_server.opencode_server.models import SessionStatusEvent
-
+    # Should be idle even though status is checkpointed in storage.
+    # Status is broadcast via set_session_status() + mark_session_idle().
     status_events = [
         call.args[0]
         for call in mock_broadcast.await_args_list
@@ -394,7 +385,6 @@ async def test_route_message_replays_deferred_results(mock_state: ServerState) -
 
     # Patch internal methods that spawn background tasks
     with (
-        patch.object(integration, "_start_status_bridge", new=AsyncMock()),
         patch.object(integration, "_start_event_consumer", new=AsyncMock()),
         patch.object(mock_state, "broadcast_event", new=AsyncMock()),
     ):
@@ -428,7 +418,6 @@ async def test_route_message_skips_resume_when_not_checkpointed(
     integration = OpenCodeSessionPoolIntegration(sp, mock_state)
 
     with (
-        patch.object(integration, "_start_status_bridge", new=AsyncMock()),
         patch.object(integration, "_start_event_consumer", new=AsyncMock()),
         patch.object(mock_state, "broadcast_event", new=AsyncMock()),
     ):

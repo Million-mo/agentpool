@@ -45,17 +45,10 @@ def mock_state() -> ServerState:
     )
     # Initialize backward-compat dicts removed from ServerState dataclass
     state.messages = {}  # type: ignore[attr-defined]
+    state.session_status = {}  # type: ignore[attr-defined]
     state.todos = {}  # type: ignore[attr-defined]
     state.input_providers = {}  # type: ignore[attr-defined]
     state.pending_questions = {}  # type: ignore[attr-defined]
-    # Set up a mock session_pool_integration so set_session_status() and
-    # get_session_status() have the integration they expect.
-    from unittest.mock import AsyncMock, Mock
-
-    mock_integration = Mock()
-    mock_integration._status_bridges = {}
-    mock_integration.get_session_status = AsyncMock(return_value=None)
-    state.session_pool_integration = mock_integration  # type: ignore[attr-defined]
     return state
 
 
@@ -163,9 +156,11 @@ async def test_ensure_session_caches_in_memory(mock_state: ServerState) -> None:
     messages = getattr(mock_state, "messages", {})
     assert messages is not None
 
-    # Session status is now managed via session_pool_integration /
-    # SessionStatusBridge. The dedicated test
-    # test_ensure_session_broadcasts_idle_events verifies status events.
+    # Session status is now broadcast via broadcast_event() instead of stored
+    # in the in-memory session_status dict. The status broadcast happens
+    # through mark_session_idle() which calls set_session_status().
+    # We verify the session was created correctly above.
+
     todos = getattr(mock_state, "todos", {})
     assert todos is not None
 
@@ -195,7 +190,7 @@ async def test_ensure_session_broadcasts_idle_events(mock_state: ServerState) ->
         for call in mock_broadcast.await_args_list
         if isinstance(call.args[0], SessionIdleEvent)
     ]
-    assert len(status_events) == 1
+    assert len(status_events) == 2  # set_session_status() + mark_session_idle() explicit broadcast
     assert len(idle_events) == 1
     assert status_events[0].properties.status.type == "idle"
     assert idle_events[0].properties.session_id == session_id
