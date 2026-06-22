@@ -39,6 +39,7 @@ import pytest
 from agentpool.agents.events import (
     PartDeltaEvent,
     PartStartEvent,
+    SpawnSessionStart,
     StreamCompleteEvent,
     SubAgentEvent,
 )
@@ -123,6 +124,7 @@ def get_subagent_event(
     inner_event: Any,
     source_type: str = "agent",
     depth: int = 1,
+    child_session_id: str | None = None,
 ) -> SubAgentEvent:
     """Wrap an event in a SubAgentEvent."""
     return SubAgentEvent(
@@ -130,6 +132,32 @@ def get_subagent_event(
         source_type=source_type,  # type: ignore[arg-type]
         event=inner_event,
         depth=depth,
+        child_session_id=child_session_id,
+    )
+
+
+def get_spawn_session_start_event(
+    child_session_id: str = "sub_001",
+    source_name: str = "researcher",
+    description: str = "Research task",
+    spawn_mechanism: str = "spawn",
+) -> SpawnSessionStart:
+    """Create a minimal SpawnSessionStart for zed-mode testing.
+
+    Args:
+        child_session_id: The child session ID to use.
+        source_name: Name of the agent being spawned.
+        description: Human-readable description.
+        spawn_mechanism: How the subagent was created.
+    """
+    return SpawnSessionStart(
+        child_session_id=child_session_id,
+        parent_session_id="parent_ses_001",
+        source_name=source_name,
+        source_type="agent",
+        description=description,
+        spawn_mechanism=spawn_mechanism,  # type: ignore[arg-type]
+        depth=1,
     )
 
 
@@ -434,6 +462,66 @@ def nested_subagent_events() -> list[SubAgentEvent]:
 
 
 # ============================================================================
+# Zed-Mode Event Sequences
+# ============================================================================
+
+
+def zed_full_lifecycle_events() -> list[object]:
+    """Full zed-mode subagent lifecycle.
+
+    Includes SpawnSessionStart as the first event to seed the converter's
+    tool map, followed by SubAgentEvent text/thinking deltas and a final
+    StreamCompleteEvent.
+
+    Events:
+    1. SpawnSessionStart for "researcher"
+    2. SubAgentEvent(TextPart): "Hello"
+    3. SubAgentEvent(TextPartDelta): " world"
+    4. SubAgentEvent(ThinkingPart): "Analyzing"
+    5. SubAgentEvent(ThinkingPartDelta): " the data"
+    6. SubAgentEvent(StreamCompleteEvent)
+
+    Expected converter output (zed mode):
+    - ToolCallStart(status="pending", title="task", field_meta)
+    - ToolCallProgress(status="pending", content, field_meta) x4
+    - ToolCallProgress(status="completed", field_meta with message_end_index)
+    """
+    child_id = "sub_001"
+    return [
+        get_spawn_session_start_event(
+            child_session_id=child_id,
+            source_name="researcher",
+            description="Research task",
+        ),
+        get_subagent_event(
+            source_name="researcher",
+            inner_event=get_text_start_event("Hello"),
+            child_session_id=child_id,
+        ),
+        get_subagent_event(
+            source_name="researcher",
+            inner_event=get_text_delta_event(" world"),
+            child_session_id=child_id,
+        ),
+        get_subagent_event(
+            source_name="researcher",
+            inner_event=get_thinking_start_event("Analyzing"),
+            child_session_id=child_id,
+        ),
+        get_subagent_event(
+            source_name="researcher",
+            inner_event=get_thinking_delta_event(" the data"),
+            child_session_id=child_id,
+        ),
+        get_subagent_event(
+            source_name="researcher",
+            inner_event=get_stream_complete_event(),
+            child_session_id=child_id,
+        ),
+    ]
+
+
+# ============================================================================
 # Parameterized Test Data
 # ============================================================================
 
@@ -445,6 +533,11 @@ TEST_EVENT_SEQUENCES: dict[str, Callable[..., list[SubAgentEvent]]] = {
     "tool_call_error": tool_call_error_events,
     "long_text": long_text_events,
     "nested_subagents": nested_subagent_events,
+}
+
+# Separate sequences for zed mode (include SpawnSessionStart which is not a SubAgentEvent)
+ZED_EVENT_SEQUENCES: dict[str, Callable[[], list[object]]] = {
+    "full_lifecycle": zed_full_lifecycle_events,
 }
 
 

@@ -152,10 +152,10 @@ def acp_command(  # noqa: PLR0915
         ),
     ] = None,
     subagent_display_mode: Annotated[
-        Literal["inline", "tool_box"] | None,
+        Literal["legacy", "zed"] | None,
         t.Option(
             "--subagent-display-mode",
-            help="Display subagent: 'inline' or 'tool_box'",
+            help="Display subagent: 'legacy' or 'zed'",
         ),
     ] = None,
 ) -> None:

@@ -6,7 +6,10 @@ Covers RunErrorEvent and RunFailedEvent conversion to ACP session updates.
 from __future__ import annotations
 
 import pytest
-from agentpool.agents.events import RunErrorEvent, RunFailedEvent, ToolCallStartEvent
+from pydantic_ai import RequestUsage
+
+from agentpool.agents.events import RunErrorEvent, RunFailedEvent, StreamCompleteEvent, ToolCallStartEvent
+from agentpool.messaging.messages import ChatMessage
 from agentpool_server.acp_server.event_converter import ACPEventConverter
 
 
@@ -132,3 +135,61 @@ async def test_run_failed_event_resets_converter_state(
 
     assert "tc_001" not in converter_with_turn_complete._tool_states
     assert converter_with_turn_complete._current_message_id != "test-msg-id"
+
+
+# ---------------------------------------------------------------------------
+# Reset idempotency
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+async def test_reset_idempotent(converter: ACPEventConverter):
+    """reset() can be called multiple times without error - verifies idempotent behavior."""
+    # First call
+    converter.reset()
+    # Second call should not raise
+    converter.reset()
+    # State should be clean after multiple resets
+    assert converter._tool_states == {}
+    assert converter._current_tool_inputs == {}
+    assert converter._subagent_headers == set()
+    assert converter._subagent_content == {}
+    assert converter._child_sessions == set()
+    assert converter._current_message_id is not None
+    assert converter.last_usage is None
+
+
+@pytest.mark.unit
+async def test_stream_complete_single_reset(converter_with_turn_complete: ACPEventConverter):
+    """StreamCompleteEvent triggers reset exactly once, after emitting all updates."""
+    # Set up tool state to verify cleanup after StreamCompleteEvent
+    tc_event = ToolCallStartEvent(
+        tool_call_id="tc_001",
+        tool_name="bash",
+        title="Running command",
+    )
+    _ = [u async for u in converter_with_turn_complete.convert(tc_event)]
+    assert "tc_001" in converter_with_turn_complete._tool_states
+
+    msg = ChatMessage[str](
+        content="Final response",
+        role="assistant",
+        usage=RequestUsage(input_tokens=40, output_tokens=60, details={}),
+    )
+    event = StreamCompleteEvent(message=msg)
+    updates = [u async for u in converter_with_turn_complete.convert(event)]
+
+    # Should yield UsageUpdate + TurnCompleteUpdate
+    assert len(updates) >= 2
+    d_usage = _dump(updates[0])
+    assert d_usage["session_update"] == "usage_update"
+    d_turn = _dump(updates[1])
+    assert d_turn["session_update"] == "turn_complete"
+
+    # Verify state is reset
+    assert converter_with_turn_complete._tool_states == {}
+    assert converter_with_turn_complete._current_tool_inputs == {}
+    assert converter_with_turn_complete._subagent_headers == set()
+    # _current_message_id should have changed from the fixture's "test-msg-id"
+    assert converter_with_turn_complete._current_message_id != "test-msg-id"
+    assert converter_with_turn_complete.last_usage is None

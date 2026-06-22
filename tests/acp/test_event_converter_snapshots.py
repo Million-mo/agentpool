@@ -31,12 +31,15 @@ if TYPE_CHECKING:
 
     from syrupy import SnapshotAssertion  # type: ignore[attr-defined]
 
-from agentpool_server.acp_server.event_converter import ACPEventConverter
-from tests.fixtures.subagent_events import TEST_EVENT_SEQUENCES
+from pydantic_ai.usage import RequestUsage
 
 from agentpool.agents.events import StreamCompleteEvent
 from agentpool.messaging.messages import ChatMessage
-from pydantic_ai.usage import RequestUsage
+from agentpool_server.acp_server.event_converter import ACPEventConverter
+from tests.fixtures.subagent_events import (
+    TEST_EVENT_SEQUENCES,
+    zed_full_lifecycle_events,
+)
 
 
 async def collect_updates(converter: ACPEventConverter, event) -> list[dict[str, object]]:
@@ -113,6 +116,14 @@ def legacy_converter() -> Generator[ACPEventConverter]:
             os.environ.pop("ACP_SUBAGENT_DISPLAY_MODE", None)
         else:
             os.environ["ACP_SUBAGENT_DISPLAY_MODE"] = original
+
+
+@pytest.fixture
+def zed_converter() -> ACPEventConverter:
+    """Converter configured for zed subagent display mode."""
+    converter = ACPEventConverter(subagent_display_mode="zed")
+    converter._current_message_id = "test-message-id"
+    return converter
 
 
 class TestToolBoxModeSnapshots:
@@ -353,6 +364,45 @@ class TestLegacyModeSnapshots:
             all_updates.extend(await collect_updates(legacy_converter, event))
 
         assert all_updates == snapshot
+
+
+class TestZedModeSnapshots:
+    """Snapshot tests for zed subagent display mode.
+
+    Zed mode converts subagent lifecycle events to ToolCallStart/ToolCallProgress
+    notifications with field_meta containing subagent_session_info.
+    """
+
+    @pytest.mark.anyio
+    @pytest.mark.acp_snapshot
+    async def test_full_lifecycle(
+        self,
+        zed_converter: ACPEventConverter,
+        snapshot: SnapshotAssertion,
+    ):
+        """Zed mode: Full subagent lifecycle (spawn -> text -> thinking -> complete).
+
+        Verifies the complete flow:
+        1. SpawnSessionStart yields ToolCallStart with field_meta
+        2. Text/thinking deltas yield ToolCallProgress with content and field_meta
+        3. StreamCompleteEvent yields ToolCallProgress(status="completed") with
+           message_end_index in field_meta
+        """
+        from unittest.mock import patch
+        from uuid import UUID
+
+        # Patch uuid.uuid4 so the SpawnSessionStart generates a deterministic
+        # tool_call_id for snapshot comparison
+        fixed_uuid = UUID("00000000-0000-0000-0000-000000000001")
+        with patch(
+            "agentpool_server.acp_server.event_converter.uuid.uuid4",
+            return_value=fixed_uuid,
+        ):
+            events = zed_full_lifecycle_events()
+            all_updates: list[dict[str, object]] = []
+            for event in events:
+                all_updates.extend(await collect_updates(zed_converter, event))
+            assert all_updates == snapshot
 
 
 class TestTurnCompleteConditional:

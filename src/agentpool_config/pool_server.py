@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from typing import Annotated, Literal, assert_never
+import warnings
 
-from pydantic import ConfigDict, Field, SecretStr
+from pydantic import ConfigDict, Field, SecretStr, field_validator
 from schemez import Schema
 
 
@@ -171,14 +172,27 @@ class ACPPoolServerConfig(BasePoolServerConfig):
     )
     """Whether to raise exceptions during server start."""
 
-    subagent_display_mode: Literal["inline", "tool_box"] = Field(
-        default="tool_box",
+    subagent_display_mode: Literal["legacy", "zed"] = Field(
+        default="legacy",
         title="Subagent display mode",
     )
     """How to display nested agent output in ACP clients:
-    - "tool_box": Displays subagent output in a tool box (current default)
-    - "inline": Displays subagent output inline with the main agent's text
+    - "legacy": Original display mode (backward compat for "inline"/"tool_box")
+    - "zed": Zed editor optimized display mode
     """
+
+    @field_validator("subagent_display_mode", mode="before")
+    @classmethod
+    def _coerce_legacy_mode(cls, v: str) -> str:
+        """Coerce deprecated values to new values with warning."""
+        if v in ("inline", "tool_box"):
+            warnings.warn(
+                f"subagent_display_mode='{v}' is deprecated, use 'legacy' instead",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            return "legacy"
+        return v
 
     transport: Literal["stdio", "streamable-http"] = Field(
         default="stdio",

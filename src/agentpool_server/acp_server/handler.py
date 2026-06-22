@@ -99,10 +99,14 @@ class ACPProtocolHandler(ProtocolEventConsumerMixin):
     async def _on_spawn_session_start(self, session_id: str, envelope: EventEnvelope) -> None:
         """Start a dedicated consumer for the newly spawned child session.
 
-        Skips background tasks (spawn_mechanism="task") since their events
-        should remain server-side and not be streamed to the ACP client.
-        Only sync subagents get a child consumer so their progress is visible
-        in real-time.
+        Background tasks (spawn_mechanism="task") are skipped since their
+        events should remain server-side and not be streamed to the ACP client.
+        Only sync subagents get a child consumer.
+
+        Each child session gets its own converter via start_event_consumer,
+        which creates a fresh ACPEventConverter in _before_consumer_loop.
+        This replaces the old zed-specific forwarding pattern where child
+        events were routed through the parent's converter.
 
         Args:
             session_id: The session whose consumer received the event.
@@ -110,12 +114,13 @@ class ACPProtocolHandler(ProtocolEventConsumerMixin):
         """
         event = envelope.event
         if isinstance(event, SpawnSessionStart):
-            # Skip background tasks — their events stay server-side
-            if getattr(event, "spawn_mechanism", None) == "task":
-                return
-
             child_sid = event.child_session_id
             if child_sid and child_sid != session_id:
+                if getattr(event, "spawn_mechanism", None) == "task":
+                    # Skip background tasks in non-zed modes only.
+                    # Zed mode needs background task sessions too for card display.
+                    if self._event_converter_template.subagent_display_mode != "zed":
+                        return
                 await self.start_event_consumer(child_sid)
 
     async def _before_consumer_loop(self, session_id: str) -> None:
