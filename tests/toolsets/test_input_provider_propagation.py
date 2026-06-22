@@ -7,11 +7,14 @@ interaction (like confirmations) work correctly in the child agent.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from agentpool import AgentPool, AgentsManifest
-from agentpool.agents.events import StreamCompleteEvent
+from agentpool.agents.events import SpawnSessionStart, StreamCompleteEvent
 from agentpool.messaging.messages import ChatMessage
 from agentpool.ui.base import InputProvider
 
@@ -188,3 +191,107 @@ async def test_input_provider_propagated_to_subagent_async_mode() -> None:
         # For async mode, the task starts in background.
         # We just verify orchestrator completed successfully.
         assert result.content is not None
+
+
+# ——— Unit tests for the guard-condition bug ———
+
+
+class FakeInputProviderSession(InputProvider):
+    """Fake input provider for testing SessionState-bound propagation."""
+
+    def get_tool_confirmation(self, context: Any, tool_description: str = "") -> Any:
+        raise NotImplementedError
+
+    def get_elicitation(self, params: Any) -> Any:
+        raise NotImplementedError
+
+
+@pytest.mark.anyio
+async def test_input_provider_propagated_when_session_bound_only() -> None:
+    """Regression test: input_provider must propagate even when ctx.input_provider is None.
+
+    In ACP/OpenCode mode, the InputProvider is stored on SessionState, NOT on
+    ctx.input_provider directly. The guard ``if ctx.input_provider`` in
+    SubagentTools.task() prevented get_input_provider() from resolving via
+    SessionState, causing the child subagent to have no InputProvider.
+
+    This test verifies that when ctx.input_provider is None but
+    ctx.get_input_provider() would return a provider via SessionState,
+    the provider IS propagated to the child session.
+    """
+    from agentpool.agents.context import AgentContext
+    from agentpool.messaging.messagenode import MessageNode
+    from agentpool.orchestrator.core import SessionPool
+    from agentpool_toolsets.builtin.subagent_tools import SubagentTools
+
+    fake_provider = FakeInputProviderSession()
+
+    # --- Build mock AgentContext ---
+    ctx = MagicMock(spec=AgentContext)
+    # KEY: input_provider is None on the direct field (SessionState-bound)
+    ctx.input_provider = None
+    # get_input_provider() returns the provider via SessionState fallback
+    ctx.get_input_provider.return_value = fake_provider
+
+    # Mock pool with a child agent node
+    child_node = MagicMock(spec=MessageNode)
+    child_node.agent_type = "native"
+    mock_pool = MagicMock()
+    mock_pool.nodes = {"child_agent": child_node}
+    ctx.pool = mock_pool
+
+    # Mock SessionPool
+    session_pool = MagicMock(spec=SessionPool)
+    mock_pool.session_pool = session_pool
+
+    # Mock run_stream to capture input_provider kwarg
+    captured_input_provider: Any = None
+
+    async def _capture_run_stream(
+        session_id: str, prompt: str, **kwargs: Any
+    ) -> AsyncIterator[StreamCompleteEvent]:
+        nonlocal captured_input_provider
+        captured_input_provider = kwargs.get("input_provider")
+        yield StreamCompleteEvent(
+            message=ChatMessage(content="done", role="assistant"),
+        )
+
+    session_pool.run_stream = _capture_run_stream
+
+    # Mock child session creation
+    ctx.create_child_session = AsyncMock(return_value="ses_child_001")
+
+    # Mock event emitter
+    ctx.events = MagicMock()
+    ctx.events.emit_event = AsyncMock()
+
+    # Mock run_ctx for depth
+    ctx.run_ctx = MagicMock()
+    ctx.run_ctx.depth = 0
+    ctx.run_ctx.session_id = "ses_parent_001"
+
+    # Mock tool_call_id
+    ctx.tool_call_id = "call_001"
+
+    # Mock node (parent agent)
+    ctx.node = MagicMock()
+    ctx.node.session_id = "ses_parent_001"
+
+    # --- Execute task ---
+    tools = SubagentTools()
+    result = await tools.task(
+        ctx=ctx,
+        agent_or_team="child_agent",
+        prompt="Do work",
+        description="Test session-bound input provider",
+        async_mode=False,
+    )
+
+    # --- Verify input_provider was propagated ---
+    assert captured_input_provider is fake_provider, (
+        f"input_provider was NOT propagated when ctx.input_provider is None. "
+        f"Expected FakeInputProviderSession, got {captured_input_provider!r}. "
+        f"The guard 'if ctx.input_provider' in SubagentTools.task() prevented "
+        f"get_input_provider() from resolving via SessionState."
+    )
+    assert result["output"] == "done"
