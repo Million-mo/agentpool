@@ -56,6 +56,7 @@ from agentpool.agents.events import (
     LocationContentItem,
     PlanUpdateEvent,
     RunErrorEvent,
+    RunFailedEvent,
     RunStartedEvent,
     SpawnSessionStart,
     StreamCompleteEvent,
@@ -641,6 +642,16 @@ class ACPEventConverter:
                 error_text = f"\n\n❌ **Error**: {agent_prefix}{message}\n\n"
                 yield AgentMessageChunk.text(error_text, message_id=self._current_message_id)
 
+            case RunFailedEvent(run_id=run_id, exception=exc):
+                # Display run failure as agent text and signal turn completion.
+                # Unlike RunErrorEvent (agent-level), RunFailedEvent indicates
+                # the TurnRunner itself crashed — the session cannot continue.
+                error_text = f"\n\n❌ **Run Failed** [{run_id}]: {exc}\n\n"
+                yield AgentMessageChunk.text(error_text, message_id=self._current_message_id)
+                if self.client_supports_turn_complete:
+                    yield TurnCompleteUpdate(stop_reason="end_turn")
+                self.reset()
+
             case ToolCallDeferredEvent(
                 tool_call_id=tc_id,
                 tool_name=tool_name,
@@ -737,6 +748,7 @@ class ACPEventConverter:
                 | PartStartEvent()
                 | PlanUpdateEvent()
                 | RunErrorEvent()
+                | RunFailedEvent()
                 | RunStartedEvent()
                 | SpawnSessionStart()
                 | SubAgentEvent()
