@@ -441,6 +441,9 @@ class ACPSession:
                         )
                         provider = await provider.__aenter__()
                         self.session_mcp_providers.append(provider)
+                        # Register with pool's skill aggregator so MCP-over-ACP skills
+                        # appear in <available-skills> XML and load_skill resolution
+                        self.agent_pool.register_skill_provider(provider)
                         self.log.info(
                             "Added session ACP MCP server",
                             server_name=cfg.name,
@@ -465,6 +468,8 @@ class ACPSession:
                     )
                     provider = await provider.__aenter__()
                     self.session_mcp_providers.append(provider)
+                    # Register with pool's skill aggregator
+                    self.agent_pool.register_skill_provider(provider)
                     self.log.info(
                         "Added session MCP server",
                         server_name=cfg.name,
@@ -735,6 +740,14 @@ class ACPSession:
             # Clean up session-level MCP providers
             for provider in self.session_mcp_providers:
                 try:
+                    # Unregister from pool's skill aggregator before closing
+                    try:
+                        self.agent_pool.unregister_skill_provider(provider)
+                    except Exception:
+                        self.log.exception(
+                            "Error unregistering skill provider",
+                            provider=provider.name,
+                        )
                     # For ACP-transport providers, notify client before closing
                     if provider.transport_type == "acp":
                         try:

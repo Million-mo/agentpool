@@ -92,6 +92,38 @@ class AggregatingResourceProvider(ResourceProvider):
         """Forward skills_changed signal from child provider."""
         await self.skills_changed.emit(event)
 
+    def add_provider(self, provider: ResourceProvider) -> None:
+        """Add a provider to the aggregator dynamically.
+
+        Connects signal forwarding so that changes from the new provider
+        are re-emitted by this aggregator.
+
+        Args:
+            provider: The resource provider to add
+        """
+        self._providers.append(provider)
+        provider.tools_changed.connect(self._forward_tools_changed)
+        provider.prompts_changed.connect(self._forward_prompts_changed)
+        provider.resources_changed.connect(self._forward_resources_changed)
+        provider.skills_changed.connect(self._forward_skills_changed)
+
+    def remove_provider(self, provider: ResourceProvider) -> None:
+        """Remove a provider from the aggregator dynamically.
+
+        Disconnects signal forwarding from the removed provider.
+
+        Args:
+            provider: The resource provider to remove
+        """
+        try:
+            self._providers.remove(provider)
+        except ValueError:
+            return
+        provider.tools_changed.disconnect(self._forward_tools_changed)
+        provider.prompts_changed.disconnect(self._forward_prompts_changed)
+        provider.resources_changed.disconnect(self._forward_resources_changed)
+        provider.skills_changed.disconnect(self._forward_skills_changed)
+
     async def get_tools(self) -> Sequence[Tool]:
         """Get tools from all providers.
 

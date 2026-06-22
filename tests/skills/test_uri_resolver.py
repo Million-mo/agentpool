@@ -547,3 +547,55 @@ async def test_resolver_resolve_first_match_wins() -> None:
 
     # First provider's skill should be returned
     assert result is skill1
+
+
+# =============================================================================
+# SkillURIResolver.unregister_provider() Tests
+# =============================================================================
+
+
+def test_unregister_provider_removes_from_list() -> None:
+    """Test that unregister_provider() removes provider from the registry."""
+    resolver = SkillURIResolver()
+
+    provider = MagicMock(spec=ResourceProvider)
+    resolver.register_provider("test_provider", provider)
+
+    assert "test_provider" in resolver.list_providers()
+
+    resolver.unregister_provider("test_provider")
+
+    assert "test_provider" not in resolver.list_providers()
+
+
+def test_unregister_provider_nonexistent_is_noop() -> None:
+    """Test that unregister_provider() with nonexistent name does not raise."""
+    resolver = SkillURIResolver()
+
+    # Should not raise
+    resolver.unregister_provider("nonexistent")
+
+    assert len(resolver.list_providers()) == 0
+
+
+@pytest.mark.asyncio
+async def test_unregister_provider_prevents_resolution() -> None:
+    """Test that skills from unregistered provider are no longer resolved."""
+    resolver = SkillURIResolver()
+
+    skill = MagicMock(spec="Skill")
+    skill.name = "my-skill"
+    provider = MagicMock(spec=ResourceProvider)
+    provider.get_skills = AsyncMock(return_value=[skill])
+
+    resolver.register_provider("test_provider", provider)
+
+    # Should resolve before unregister
+    result = await resolver.resolve("my-skill")
+    assert result is skill
+
+    resolver.unregister_provider("test_provider")
+
+    # Should fail after unregister
+    with pytest.raises(SkillNotFoundError):
+        await resolver.resolve("my-skill")

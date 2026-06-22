@@ -58,6 +58,7 @@ logger = get_logger(__name__)
 @dataclass
 class _WorkflowGraphState:
     """Shared state for config-based workflow graph execution."""
+
     prompts: tuple[Any, ...] = field(default_factory=tuple)
     kwargs: dict[str, Any] = field(default_factory=dict)
     result: Any = None
@@ -233,8 +234,7 @@ class AgentPool[TPoolDeps = None](BaseRegistry[NodeName, MessageNode[Any, Any]])
                 import warnings
 
                 warnings.warn(
-                    "enable_session_pool is deprecated and ignored. "
-                    "SessionPool is always enabled.",
+                    "enable_session_pool is deprecated and ignored. SessionPool is always enabled.",
                     DeprecationWarning,
                     stacklevel=2,
                 )
@@ -483,6 +483,48 @@ class AgentPool[TPoolDeps = None](BaseRegistry[NodeName, MessageNode[Any, Any]])
         """
         return self._skill_provider
 
+    def register_skill_provider(self, provider: ResourceProvider) -> None:
+        """Register a skill provider dynamically.
+
+        Adds the provider to the aggregator and URI resolver so that its skills
+        become visible to SkillsInstructionProvider and load_skill.
+        If called before _setup_skills_provider(), the provider is buffered
+        and added when the aggregator is created.
+
+        Args:
+            provider: The resource provider to register
+        """
+        if self._skill_provider is not None:
+            self._skill_provider.add_provider(provider)
+        else:
+            # Buffer for later registration when _setup_skills_provider runs
+            if not hasattr(self, "_pending_skill_providers"):
+                self._pending_skill_providers: list[ResourceProvider] = []
+            self._pending_skill_providers.append(provider)
+
+        if self._skill_resolver is not None:
+            self._skill_resolver.register_provider(provider.name, provider)
+
+    def unregister_skill_provider(self, provider: ResourceProvider) -> None:
+        """Unregister a previously registered skill provider.
+
+        Removes the provider from the aggregator and URI resolver.
+
+        Args:
+            provider: The resource provider to unregister
+        """
+        if self._skill_provider is not None:
+            self._skill_provider.remove_provider(provider)
+
+        if self._skill_resolver is not None:
+            self._skill_resolver.unregister_provider(provider.name)
+
+        # Also remove from pending buffer if it was buffered
+        pending: list[ResourceProvider] = getattr(self, "_pending_skill_providers", [])
+        if pending:
+            with suppress(ValueError):
+                pending.remove(provider)
+
     async def _setup_skills_provider(self) -> None:
         """Initialize the skill provider and resolver.
 
@@ -527,6 +569,14 @@ class AgentPool[TPoolDeps = None](BaseRegistry[NodeName, MessageNode[Any, Any]])
 
         # Connect skills_changed signal to callback
         self._skill_provider.skills_changed.connect(self._on_skills_changed)
+
+        # Drain any pending skill providers that were registered before setup
+        pending: list[ResourceProvider] = getattr(self, "_pending_skill_providers", [])
+        if pending:
+            for provider in pending:
+                self._skill_provider.add_provider(provider)
+                self._skill_resolver.register_provider(provider.name, provider)
+            self._pending_skill_providers.clear()
 
     async def _on_skills_changed(self, event: Any) -> None:
         """Handle skills changed events from the skill provider.
@@ -794,6 +844,7 @@ class AgentPool[TPoolDeps = None](BaseRegistry[NodeName, MessageNode[Any, Any]])
 
         if path_for_loading is not None:
             import yamling
+
             try:
                 raw_data = yamling.load_yaml_file(path_for_loading, resolve_inherit=True)
             except (OSError, ValueError):
@@ -809,9 +860,7 @@ class AgentPool[TPoolDeps = None](BaseRegistry[NodeName, MessageNode[Any, Any]])
                 self._graph_config = GraphConfig.model_validate(graph_data)
             except Exception as exc:
                 config_str = str(path_for_loading)
-                raise ValueError(
-                    f"Failed to build graph config from {config_str}: {exc}"
-                ) from exc
+                raise ValueError(f"Failed to build graph config from {config_str}: {exc}") from exc
         else:
             extra = getattr(self.manifest, "model_extra", None) or {}
             if "graph" in extra:
@@ -826,9 +875,7 @@ class AgentPool[TPoolDeps = None](BaseRegistry[NodeName, MessageNode[Any, Any]])
         if self._graph_config is None:
             raise ValueError("No graph config loaded")
         config_path_str = (
-            str(self._config_file_path)
-            if self._config_file_path
-            else "programmatic config"
+            str(self._config_file_path) if self._config_file_path else "programmatic config"
         )
         try:
             from pydantic_graph import GraphBuilder, StepContext
@@ -876,13 +923,9 @@ class AgentPool[TPoolDeps = None](BaseRegistry[NodeName, MessageNode[Any, Any]])
                 from_refs = [from_ref] if isinstance(from_ref, str) else from_ref
                 to_refs = [to_ref] if isinstance(to_ref, str) else to_ref
                 from_steps = [
-                    self._resolve_graph_step_ref(ref, step_map, builder)
-                    for ref in from_refs
+                    self._resolve_graph_step_ref(ref, step_map, builder) for ref in from_refs
                 ]
-                to_steps = [
-                    self._resolve_graph_step_ref(ref, step_map, builder)
-                    for ref in to_refs
-                ]
+                to_steps = [self._resolve_graph_step_ref(ref, step_map, builder) for ref in to_refs]
                 for from_step in from_steps:
                     path = builder.edge_from(from_step)
                     if edge_cfg.label:
@@ -898,11 +941,7 @@ class AgentPool[TPoolDeps = None](BaseRegistry[NodeName, MessageNode[Any, Any]])
             has_outgoing: set[str] = set()
             for edge_cfg in self._graph_config.edges:
                 to_refs = [edge_cfg.to] if isinstance(edge_cfg.to, str) else edge_cfg.to
-                from_refs = (
-                    [edge_cfg.from_]
-                    if isinstance(edge_cfg.from_, str)
-                    else edge_cfg.from_
-                )
+                from_refs = [edge_cfg.from_] if isinstance(edge_cfg.from_, str) else edge_cfg.from_
                 for ref in to_refs:
                     if ref not in ("start", "end"):
                         has_incoming.add(ref)
@@ -922,9 +961,7 @@ class AgentPool[TPoolDeps = None](BaseRegistry[NodeName, MessageNode[Any, Any]])
                 f"Failed to build graph from config at {config_path_str}: {exc}"
             ) from exc
 
-    def _resolve_graph_step_ref(
-        self, ref: str, step_map: dict[str, Any], builder: Any
-    ) -> Any:
+    def _resolve_graph_step_ref(self, ref: str, step_map: dict[str, Any], builder: Any) -> Any:
         """Resolve a step reference string to a pydantic-graph node object."""
         if ref == "start":
             return builder.start_node
@@ -933,8 +970,7 @@ class AgentPool[TPoolDeps = None](BaseRegistry[NodeName, MessageNode[Any, Any]])
         if ref not in step_map:
             available = ["start", "end", *step_map.keys()]
             raise ValueError(
-                f"Graph edge references unknown step '{ref}'. "
-                f"Available steps: {available}"
+                f"Graph edge references unknown step '{ref}'. Available steps: {available}"
             )
         return step_map[ref]
 
@@ -946,6 +982,7 @@ class AgentPool[TPoolDeps = None](BaseRegistry[NodeName, MessageNode[Any, Any]])
         builder = GraphBuilder(state_type=Any, output_type=Any)
         step_map: dict[str, Any] = {}
         for node in self.nodes.values():
+
             async def _step(
                 ctx: StepContext[Any, Any, Any],
                 node: MessageNode[Any, Any] = node,
@@ -995,9 +1032,7 @@ class AgentPool[TPoolDeps = None](BaseRegistry[NodeName, MessageNode[Any, Any]])
                     "Enter the AgentPool async context first."
                 )
             return self._graph
-        has_connections = any(
-            node.connections.get_connections() for node in self.nodes.values()
-        )
+        has_connections = any(node.connections.get_connections() for node in self.nodes.values())
         if not has_connections:
             return None
         if self._graph is None or self._graph_dirty:
