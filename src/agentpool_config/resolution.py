@@ -270,6 +270,11 @@ def _load_package_yaml(ref: str) -> dict[str, Any]:
     return data
 
 
+def _package_scope_from_ref(ref: str) -> str:
+    pkg, _resource = ref.rsplit(":", 1)
+    return pkg.split(".", maxsplit=1)[0]
+
+
 def _pop_nested(data: dict[str, Any], *keys: str) -> Any:
     """Pop a deeply nested key from a dict, returning the removed value."""
     for key in keys[:-1]:
@@ -335,6 +340,8 @@ def resolve_config(  # noqa: PLR0915
     layers: list[ConfigLayer] = []
     merged_data: dict[str, Any] = {}
     primary_path: str | None = None
+    skill_scope_paths: list[dict[str, str]] = []
+    node_skill_scopes: dict[str, str] = {}
 
     # Check environment variable overrides for include flags
     if os.environ.get(ENV_DISABLE_GLOBAL):
@@ -407,11 +414,19 @@ def resolve_config(  # noqa: PLR0915
     #    skills.paths from packages are APPENDED (not replaced) so both host and
     #    package skills are discoverable.
     package_refs: list[str] = merged_data.pop("include_packages", None) or []
+    host_skill_paths = merged_data.get("skills", {}).get("paths", [])
+    if isinstance(host_skill_paths, list):
+        skill_scope_paths.extend({"scope": "host", "path": str(path)} for path in host_skill_paths)
     if package_refs:
         logger.debug("include_packages: processing %d refs: %s", len(package_refs), package_refs)
     for ref in package_refs:
         try:
             data = _load_package_yaml(ref)
+            package_scope = _package_scope_from_ref(ref)
+            for section in ("agents", "file_agents", "teams"):
+                items = data.get(section)
+                if isinstance(items, dict):
+                    node_skill_scopes.update({str(name): package_scope for name in items})
             # Extract package skill paths before deep merge (which would drop them)
             pkg_skill_paths = _pop_nested(data, "skills", "paths") or []
             layer = ConfigLayer("builtin", f"package://{ref}", data)
@@ -419,12 +434,20 @@ def resolve_config(  # noqa: PLR0915
             merged_data = _deep_merge(data, merged_data)
             # Append package skill paths so they coexist with host paths
             if pkg_skill_paths:
-                merged_data.setdefault("skills", {}).setdefault("paths", []).extend(
-                    pkg_skill_paths
+                skill_scope_paths.extend(
+                    {"scope": package_scope, "path": str(path)} for path in pkg_skill_paths
                 )
+                merged_data.setdefault("skills", {}).setdefault("paths", []).extend(pkg_skill_paths)
             logger.debug("include_packages: merged %s successfully", ref)
         except Exception:  # noqa: BLE001
             logger.warning("Failed to load package config: %s", ref, exc_info=True)
+
+    if skill_scope_paths or node_skill_scopes:
+        merged_data["_skill_scopes"] = {
+            "paths": skill_scope_paths,
+            "nodes": node_skill_scopes,
+            "default_scope": "host",
+        }
 
     # 6. Fallback config - ONLY if no agents defined in any layer
     # This ensures built-in defaults don't pollute user configurations

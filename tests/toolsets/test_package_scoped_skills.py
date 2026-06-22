@@ -1,0 +1,118 @@
+from __future__ import annotations
+
+from pathlib import PurePosixPath
+from types import SimpleNamespace
+
+import pytest
+from upathtools import UPath
+
+from agentpool.skills.skill import Skill
+from agentpool_toolsets.builtin.skills import list_skills, load_skill, load_skill_for_node
+
+
+def _write_skill(root, name: str, description: str) -> Skill:
+    skill_dir = root / name
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: {description}\n---\n\n{name} instructions\n",
+        encoding="utf-8",
+    )
+    return Skill.from_skill_dir(UPath(skill_dir))
+
+
+class _FakeSkills:
+    def __init__(self, skills: list[Skill]) -> None:
+        self._skills = skills
+
+    def list_skills(self) -> list[Skill]:
+        return self._skills
+
+    def get_skill_instructions(self, skill_name: str) -> str:
+        return next(skill for skill in self._skills if skill.name == skill_name).load_instructions()
+
+
+class _FakeSkillProvider:
+    def __init__(self, skills: list[Skill]) -> None:
+        self._skills = skills
+
+    async def get_skills(self) -> list[Skill]:
+        return self._skills
+
+    async def get_skill_instructions(self, skill_name: str) -> str:
+        return f"{skill_name} provider instructions"
+
+
+class _FakePool:
+    skill_resolver = None
+
+    def __init__(self, skills: list[Skill], provider_skills: list[Skill] | None = None) -> None:
+        self.skills = _FakeSkills(skills)
+        self.skill_provider = _FakeSkillProvider(provider_skills) if provider_skills else None
+
+    @staticmethod
+    def is_skill_visible_to_node(skill: Skill, node_name: str | None) -> bool:
+        if node_name == "rebuttal_agent":
+            return True
+        return skill.metadata.get("scope") != "rebuttal_agent"
+
+
+def _ctx(pool: _FakePool, node_name: str):
+    return SimpleNamespace(pool=pool, node=SimpleNamespace(name=node_name))
+
+
+@pytest.mark.unit
+async def test_load_skill_filters_by_current_node_package_scope(tmp_path):
+    host_skill = _write_skill(tmp_path, "diagnosis-planning", "Diagnosis planning")
+    package_skill = _write_skill(tmp_path, "fta-review", "FTA review")
+    package_skill.metadata["scope"] = "rebuttal_agent"
+    pool = _FakePool([host_skill, package_skill])
+
+    result = await load_skill(_ctx(pool, "librarian"), "fta-review")
+
+    assert "Skill 'fta-review' not found" in result
+    assert "diagnosis-planning" in result
+    assert "fta-review instructions" not in result
+
+
+@pytest.mark.unit
+async def test_load_skill_for_node_uses_target_node_package_scope(tmp_path):
+    host_skill = _write_skill(tmp_path, "diagnosis-planning", "Diagnosis planning")
+    package_skill = _write_skill(tmp_path, "fta-review", "FTA review")
+    package_skill.metadata["scope"] = "rebuttal_agent"
+    pool = _FakePool([host_skill, package_skill])
+
+    result = await load_skill_for_node(_ctx(pool, "engineer"), "fta-review", "rebuttal_agent")
+
+    assert "# fta-review" in result
+    assert "fta-review instructions" in result
+
+
+@pytest.mark.unit
+async def test_list_skills_filters_by_current_node_package_scope(tmp_path):
+    host_skill = _write_skill(tmp_path, "diagnosis-planning", "Diagnosis planning")
+    package_skill = _write_skill(tmp_path, "fta-review", "FTA review")
+    package_skill.metadata["scope"] = "rebuttal_agent"
+    pool = _FakePool([host_skill, package_skill])
+
+    result = await list_skills(_ctx(pool, "librarian"))
+
+    assert "diagnosis-planning" in result
+    assert "fta-review" not in result
+
+
+@pytest.mark.unit
+async def test_hidden_package_skill_does_not_shadow_visible_provider_skill(tmp_path):
+    package_skill = _write_skill(tmp_path, "fta-review", "FTA review")
+    package_skill.metadata["scope"] = "rebuttal_agent"
+    provider_skill = Skill(
+        name="fta-review",
+        description="Host provider skill",
+        skill_path=PurePosixPath("skill://scratchpad/fta-review"),
+        metadata={"scope": "host"},
+    )
+    pool = _FakePool([package_skill], [provider_skill])
+
+    result = await load_skill(_ctx(pool, "librarian"), "fta-review")
+
+    assert "fta-review provider instructions" in result
+    assert "fta-review instructions" not in result

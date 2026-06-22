@@ -275,32 +275,24 @@ class Team[TDeps = None](BaseTeam[TDeps, Any]):
         if not member_skills or self.agent_pool is None:
             return {}
 
-        unique_skill_names = list(dict.fromkeys(
-            skill_name
-            for names in member_skills.values()
-            for skill_name in names
-        ))
-        loaded: dict[str, str] = {}
-        for skill_name in unique_skill_names:
-            instructions = await self._load_skill_instructions(skill_name)
-            if instructions:
-                loaded[skill_name] = instructions
-        return {
-            member_name: "\n\n".join(
-                self._format_skill_instruction(skill_name, loaded[skill_name])
-                for skill_name in skill_names
-                if skill_name in loaded
-            )
-            for member_name, skill_names in member_skills.items()
-        }
+        result: dict[str, str] = {}
+        for member_name, skill_names in member_skills.items():
+            loaded_sections: list[str] = []
+            for skill_name in skill_names:
+                instructions = await self._load_skill_instructions(skill_name, member_name)
+                if instructions:
+                    loaded_sections.append(self._format_skill_instruction(skill_name, instructions))
+            if loaded_sections:
+                result[member_name] = "\n\n".join(loaded_sections)
+        return result
 
-    async def _load_skill_instructions(self, skill_name: str) -> str:
+    async def _load_skill_instructions(self, skill_name: str, member_name: str) -> str:
         if self.agent_pool is None or self.agent_pool.skill_provider is None:
             from agentpool.skills.exceptions import SkillNotFoundError
 
             raise SkillNotFoundError(skill_name)
 
-        return await self.agent_pool.skill_provider.get_skill_instructions(skill_name)
+        return await self.agent_pool.get_skill_instructions_for_node(skill_name, member_name)
 
     @staticmethod
     def _format_skill_instruction(skill_name: str, instructions: str) -> str:

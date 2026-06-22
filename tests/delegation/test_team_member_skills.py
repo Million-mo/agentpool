@@ -8,25 +8,25 @@ from agentpool import Team
 from agentpool.skills.exceptions import SkillNotFoundError
 
 
-class _SkillProvider:
-    async def get_skill_instructions(self, skill_name: str) -> str:
-        return f"# {skill_name}\nUse this skill."
-
-
 class _Pool:
-    skill_provider = _SkillProvider()
+    skill_provider = object()
+
+    async def get_skill_instructions_for_node(self, skill_name: str, node_name: str) -> str:
+        return f"# {skill_name}\nUse this skill for {node_name}."
 
 
 def test_team_loads_member_skills_from_pool_provider() -> None:
     team = Team([], name="review_team")
     team.agent_pool = _Pool()
 
-    result = asyncio.run(team._load_member_skill_instructions({
-        "root_cause_reviewer": ["fta-causal-path-review"],
-    }))
+    result = asyncio.run(
+        team._load_member_skill_instructions({
+            "root_cause_reviewer": ["fta-causal-path-review"],
+        })
+    )
 
-    assert "<skill-instruction name=\"fta-causal-path-review\">" in result["root_cause_reviewer"]
-    assert "Use this skill." in result["root_cause_reviewer"]
+    assert '<skill-instruction name="fta-causal-path-review">' in result["root_cause_reviewer"]
+    assert "Use this skill for root_cause_reviewer." in result["root_cause_reviewer"]
 
 
 def test_team_requires_pool_skill_provider_for_member_skills() -> None:
@@ -34,7 +34,7 @@ def test_team_requires_pool_skill_provider_for_member_skills() -> None:
     team.agent_pool = None
 
     with pytest.raises(SkillNotFoundError):
-        asyncio.run(team._load_skill_instructions("fta-causal-path-review"))
+        asyncio.run(team._load_skill_instructions("fta-causal-path-review", "root_cause_reviewer"))
 
 
 def test_team_injects_member_skills_into_member_prompt() -> None:
