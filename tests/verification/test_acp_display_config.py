@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import warnings
 
 
 def print_section(title: str) -> None:
@@ -40,22 +41,40 @@ def test_config_model() -> bool:
     try:
         from agentpool_config.pool_server import ACPPoolServerConfig
 
-        # Test 1.1: Field accepts "inline"
-        config_inline = ACPPoolServerConfig(subagent_display_mode="inline")
-        assert config_inline.subagent_display_mode == "inline"
-        print_success('ACPPoolServerConfig(subagent_display_mode="inline") works')
+        # Test 1.1: Field accepts "zed" (new mode)
+        config_zed = ACPPoolServerConfig(subagent_display_mode="zed")
+        assert config_zed.subagent_display_mode == "zed"
+        print_success('ACPPoolServerConfig(subagent_display_mode="zed") works')
 
-        # Test 1.2: Field accepts "tool_box"
-        config_tool_box = ACPPoolServerConfig(subagent_display_mode="tool_box")
-        assert config_tool_box.subagent_display_mode == "tool_box"
-        print_success('ACPPoolServerConfig(subagent_display_mode="tool_box") works')
+        # Test 1.2: Field accepts "legacy" (current default)
+        config_legacy = ACPPoolServerConfig(subagent_display_mode="legacy")
+        assert config_legacy.subagent_display_mode == "legacy"
+        print_success('ACPPoolServerConfig(subagent_display_mode="legacy") works')
 
-        # Test 1.3: Type validation - invalid value should fail
+        # Test 1.3: Old values "inline" / "tool_box" coerce with DeprecationWarning
+        for old_val in ("inline", "tool_box"):
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                config_old = ACPPoolServerConfig(subagent_display_mode=old_val)  # type: ignore[arg-type]
+                assert config_old.subagent_display_mode == "legacy"
+                # Verify a DeprecationWarning was emitted
+                deprecation_warnings = [
+                    x for x in w if issubclass(x.category, DeprecationWarning)
+                    and "subagent_display_mode" in str(x.message)
+                ]
+                assert len(deprecation_warnings) >= 1, (
+                    f"No DeprecationWarning for subagent_display_mode='{old_val}'"
+                )
+            print_success(
+                f'ACPPoolServerConfig(subagent_display_mode="{old_val}") '
+                f'coerces to "legacy" with DeprecationWarning'
+            )
+
+        # Test 1.4: Type validation - invalid value should fail
         try:
             ACPPoolServerConfig(subagent_display_mode="invalid")  # type: ignore[arg-type]
         except (ValueError, TypeError):
             print_success("Config model correctly rejects invalid values")
-            return True
         else:
             print_error("Config model should reject invalid values")
             return False
@@ -63,6 +82,8 @@ def test_config_model() -> bool:
     except (ValueError, TypeError, ImportError) as e:
         print_error(f"Config model test failed: {e}")
         return False
+    else:
+        return True
 
 
 def test_default_value() -> bool:
@@ -74,8 +95,8 @@ def test_default_value() -> bool:
 
         # Test default value
         config_default = ACPPoolServerConfig()
-        assert config_default.subagent_display_mode == "tool_box"
-        print_success('ACPPoolServerConfig() defaults to "tool_box"')
+        assert config_default.subagent_display_mode == "legacy"
+        print_success('ACPPoolServerConfig() defaults to "legacy"')
 
     except (ValueError, TypeError, ImportError) as e:
         print_error(f"Default value test failed: {e}")
@@ -135,12 +156,12 @@ def test_server_initialization() -> bool:
             }
         }
 
-        # Test 4.1: Manifest with inline mode in pool_server config
+        # Test 4.1: Manifest with zed mode in pool_server config
         manifest_dict_with_config = {
             **manifest_dict,
             "pool_server": {
                 "type": "acp",
-                "subagent_display_mode": "inline",
+                "subagent_display_mode": "zed",
             },
         }
         manifest = AgentsManifest.model_validate(manifest_dict_with_config)
@@ -148,30 +169,30 @@ def test_server_initialization() -> bool:
         # pool_server is a union type - check if it's ACPPoolServerConfig
 
         assert isinstance(manifest.pool_server, ACPPoolServerConfig)
-        assert manifest.pool_server.subagent_display_mode == "inline"
-        print_success('Manifest accepts subagent_display_mode="inline" in pool_server')
+        assert manifest.pool_server.subagent_display_mode == "zed"
+        print_success('Manifest accepts subagent_display_mode="zed" in pool_server')
 
-        # Test 4.2: Server from_config with inline mode via argument
-        server_inline = ACPServer.from_config(
+        # Test 4.2: Server from_config with zed mode via argument
+        server_zed = ACPServer.from_config(
             manifest,
-            subagent_display_mode="inline",
+            subagent_display_mode="zed",
         )
-        assert server_inline.subagent_display_mode == "inline"
+        assert server_zed.subagent_display_mode == "zed"
         print_success("ACPServer.from_config() accepts subagent_display_mode argument")
 
         # Test 4.3: Server from_config defaults to config value when arg not provided
         server_from_config = ACPServer.from_config(
-            manifest,  # manifest has inline mode in pool_server
+            manifest,  # manifest has zed mode in pool_server
         )
-        assert server_from_config.subagent_display_mode == "inline"
+        assert server_from_config.subagent_display_mode == "zed"
         print_success("ACPServer.from_config() uses config value when arg not provided")
 
         # Test 4.4: Server __init__ accepts mode directly
         # Need to use manifest object, not dict
         manifest_for_pool = AgentsManifest.model_validate(manifest_dict)
         pool = AgentPool(manifest=manifest_for_pool)
-        server_direct = ACPServer(pool, subagent_display_mode="inline")
-        assert server_direct.subagent_display_mode == "inline"
+        server_direct = ACPServer(pool, subagent_display_mode="zed")
+        assert server_direct.subagent_display_mode == "zed"
         print_success("ACPServer.__init__() accepts subagent_display_mode argument")
 
     except (ValueError, TypeError, ImportError, AttributeError) as e:
@@ -199,7 +220,7 @@ def test_agent_display_mode() -> bool:
         assert "subagent_display_mode" in field_names
         print_success("AgentPoolACPAgent has subagent_display_mode field")
 
-        # Test 5.2: AgentPoolACPAgent default value is "tool_box"
+        # Test 5.2: AgentPoolACPAgent default value is "legacy"
         # We can't fully instantiate AgentPoolACPAgent without a real client,
         # but we can verify that type annotation exists
         sig = inspect.signature(AgentPoolACPAgent.__init__)
@@ -208,10 +229,10 @@ def test_agent_display_mode() -> bool:
         if "subagent_display_mode" in params:
             param = params["subagent_display_mode"]
             default = param.default
-            if default == "tool_box":
-                print_success('AgentPoolACPAgent subagent_display_mode defaults to "tool_box"')
+            if default == "legacy":
+                print_success('AgentPoolACPAgent subagent_display_mode defaults to "legacy"')
             else:
-                print_error(f'Expected default "tool_box", got {default}')
+                print_error(f'Expected default "legacy", got {default}')
                 return False
         else:
             print_error("AgentPoolACPAgent.__init__ missing subagent_display_mode parameter")
@@ -241,14 +262,14 @@ def test_session_display_mode() -> bool:
         assert "subagent_display_mode" in field_names
         print_success("ACPSession has subagent_display_mode field")
 
-        # Test 6.2: ACPSession default value is "tool_box"
+        # Test 6.2: ACPSession default value is "legacy"
         sig_fields = {f.name: f for f in fields(ACPSession)}
         subagent_field = sig_fields["subagent_display_mode"]
         default = subagent_field.default
-        if default == "tool_box":
-            print_success('ACPSession subagent_display_mode defaults to "tool_box"')
+        if default == "legacy":
+            print_success('ACPSession subagent_display_mode defaults to "legacy"')
         else:
-            print_error(f'Expected default "tool_box", got {default}')
+            print_error(f'Expected default "legacy", got {default}')
             return False
     except (ValueError, TypeError, ImportError, AttributeError) as e:
         print_error(f"Session display mode test failed: {e}")
@@ -282,10 +303,10 @@ def test_end_to_end_flow() -> bool:
         }
         manifest = AgentsManifest.model_validate(manifest_dict)
 
-        # Test 7.1: Create server with inline mode
-        server = ACPServer.from_config(manifest, subagent_display_mode="inline")
-        assert server.subagent_display_mode == "inline"
-        print_success("Server initialized with inline mode")
+        # Test 7.1: Create server with zed mode
+        server = ACPServer.from_config(manifest, subagent_display_mode="zed")
+        assert server.subagent_display_mode == "zed"
+        print_success("Server initialized with zed mode")
 
         # Test 7.2: Verify agent has access to mode via server reference
         # (AgentPoolACPAgent gets subagent_display_mode from server at instantiation)
@@ -308,13 +329,13 @@ def test_end_to_end_flow() -> bool:
         if "subagent_display_mode" in params:
             param = params["subagent_display_mode"]
             default = param.default
-            if default == "tool_box":
+            if default == "legacy":
                 print_success(
                     "SessionManager.create_session() accepts "
-                    'subagent_display_mode with default "tool_box"'
+                    'subagent_display_mode with default "legacy"'
                 )
             else:
-                print_error(f'Expected default "tool_box", got {default}')
+                print_error(f'Expected default "legacy", got {default}')
                 return False
         else:
             print_error("SessionManager.create_session() missing subagent_display_mode parameter")

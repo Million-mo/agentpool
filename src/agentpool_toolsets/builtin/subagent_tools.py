@@ -246,7 +246,10 @@ class SubagentTools(StaticResourceProvider):
         )
         await ctx.events.emit_event(spawn_event)
 
-        input_provider = ctx.get_input_provider() if ctx.input_provider else None
+        try:
+            input_provider = ctx.get_input_provider()
+        except RuntimeError:
+            input_provider = None
 
         if async_mode:
             # Generate task ID and start background task

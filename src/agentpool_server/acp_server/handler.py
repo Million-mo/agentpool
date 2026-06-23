@@ -99,10 +99,14 @@ class ACPProtocolHandler(ProtocolEventConsumerMixin):
     async def _on_spawn_session_start(self, session_id: str, envelope: EventEnvelope) -> None:
         """Start a dedicated consumer for the newly spawned child session.
 
-        Skips background tasks (spawn_mechanism="task") since their events
-        should remain server-side and not be streamed to the ACP client.
-        Only sync subagents get a child consumer so their progress is visible
-        in real-time.
+        Background tasks (spawn_mechanism="task") are skipped since their
+        events should remain server-side and not be streamed to the ACP client.
+        Only sync subagents get a child consumer.
+
+        Each child session gets its own converter via start_event_consumer,
+        which creates a fresh ACPEventConverter in _before_consumer_loop.
+        This replaces the old zed-specific forwarding pattern where child
+        events were routed through the parent's converter.
 
         Args:
             session_id: The session whose consumer received the event.
@@ -110,12 +114,13 @@ class ACPProtocolHandler(ProtocolEventConsumerMixin):
         """
         event = envelope.event
         if isinstance(event, SpawnSessionStart):
-            # Skip background tasks — their events stay server-side
-            if getattr(event, "spawn_mechanism", None) == "task":
-                return
-
             child_sid = event.child_session_id
             if child_sid and child_sid != session_id:
+                if getattr(event, "spawn_mechanism", None) == "task":
+                    # Skip background tasks in non-zed modes only.
+                    # Zed mode needs background task sessions too for card display.
+                    if self._event_converter_template.subagent_display_mode != "zed":
+                        return
                 await self.start_event_consumer(child_sid)
 
     async def _before_consumer_loop(self, session_id: str) -> None:
@@ -303,13 +308,10 @@ class ACPProtocolHandler(ProtocolEventConsumerMixin):
                 for provider in acp_session.session_mcp_providers:
                     if provider not in session_agent.tools.external_providers:
                         session_agent.tools.add_provider(provider)
-                # Also sync to SessionState so child sessions (subagents) inherit
-                # these providers via SessionController's parent-child copy.
-                session_state = session_pool.sessions._sessions.get(session_id)
-                if session_state is not None:
-                    session_state.resource_providers = list(
-                        acp_session.session_mcp_providers
-                    )
+                # Child sessions inherit parent's session-level MCP providers
+                # via agent sharing in get_or_create_session_agent() — the
+                # child reuses the parent's per-session agent which already
+                # has these providers registered.
                 logger.info(
                     "Added session MCP providers to SessionPool agent",
                     session_id=session_id,

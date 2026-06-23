@@ -948,3 +948,112 @@
     }),
   ])
 # ---
+# name: TestZedModeSnapshots.test_full_lifecycle[asyncio]
+  list([
+    dict({
+      'field_meta': dict({
+        'subagent_session_info': dict({
+          'message_start_index': 0,
+          'session_id': 'sub_001',
+        }),
+        'tool_name': 'task',
+      }),
+      'session_update': 'tool_call',
+      'status': 'pending',
+      'title': 'task',
+      'tool_call_id': '00000000-0000-0000-0000-000000000001',
+    }),
+    dict({
+      'content': list([
+        dict({
+          'content': dict({
+            'text': 'Hello',
+            'type': 'text',
+          }),
+          'type': 'content',
+        }),
+      ]),
+      'field_meta': dict({
+        'subagent_session_info': dict({
+          'session_id': 'sub_001',
+        }),
+        'tool_name': 'task',
+      }),
+      'session_update': 'tool_call_update',
+      'status': 'pending',
+      'tool_call_id': '00000000-0000-0000-0000-000000000001',
+    }),
+    dict({
+      'content': list([
+        dict({
+          'content': dict({
+            'text': ' world',
+            'type': 'text',
+          }),
+          'type': 'content',
+        }),
+      ]),
+      'field_meta': dict({
+        'subagent_session_info': dict({
+          'session_id': 'sub_001',
+        }),
+        'tool_name': 'task',
+      }),
+      'session_update': 'tool_call_update',
+      'status': 'pending',
+      'tool_call_id': '00000000-0000-0000-0000-000000000001',
+    }),
+    dict({
+      'content': list([
+        dict({
+          'content': dict({
+            'text': 'Analyzing',
+            'type': 'text',
+          }),
+          'type': 'content',
+        }),
+      ]),
+      'field_meta': dict({
+        'subagent_session_info': dict({
+          'session_id': 'sub_001',
+        }),
+        'tool_name': 'task',
+      }),
+      'session_update': 'tool_call_update',
+      'status': 'pending',
+      'tool_call_id': '00000000-0000-0000-0000-000000000001',
+    }),
+    dict({
+      'content': list([
+        dict({
+          'content': dict({
+            'text': ' the data',
+            'type': 'text',
+          }),
+          'type': 'content',
+        }),
+      ]),
+      'field_meta': dict({
+        'subagent_session_info': dict({
+          'session_id': 'sub_001',
+        }),
+        'tool_name': 'task',
+      }),
+      'session_update': 'tool_call_update',
+      'status': 'pending',
+      'tool_call_id': '00000000-0000-0000-0000-000000000001',
+    }),
+    dict({
+      'field_meta': dict({
+        'subagent_session_info': dict({
+          'message_end_index': 3,
+          'session_id': 'sub_001',
+        }),
+        'tool_name': 'task',
+      }),
+      'session_update': 'tool_call_update',
+      'status': 'completed',
+      'tool_call_id': '00000000-0000-0000-0000-000000000001',
+    }),
+  ])
+# ---

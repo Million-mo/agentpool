@@ -30,14 +30,24 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-SubagentDisplayMode = Literal["inline", "tool_box"]
+SubagentDisplayMode = Literal["legacy", "zed"]
 
 
 def _coerce_subagent_display_mode(value: str) -> SubagentDisplayMode:
     """Normalize config strings to the ACP literal union."""
-    if value == "inline":
-        return "inline"
-    return "tool_box"
+    if value == "legacy":
+        return "legacy"
+    if value in ("inline", "tool_box"):
+        logger.warning(
+            "Subagent display mode '%s' is deprecated, use 'legacy' instead",
+            value,
+        )
+        return "legacy"
+    if value == "zed":
+        logger.info("Subagent display mode set to 'zed'")
+        return "zed"
+    logger.warning("Unknown subagent display mode '%s', falling back to 'legacy'", value)
+    return "legacy"
 
 
 def _acp_event_observer(show_detailed: bool = False):
@@ -86,7 +96,7 @@ class ACPServer(BaseServer):
         load_skills: bool | None = None,
         config_path: str | None = None,
         transport: Transport = "stdio",
-        subagent_display_mode: SubagentDisplayMode = "tool_box",
+        subagent_display_mode: SubagentDisplayMode = "legacy",
         show_events: bool = False,
         show_events_detailed: bool = False,
     ) -> None:
@@ -165,10 +175,10 @@ class ACPServer(BaseServer):
             resolved_display_mode = subagent_display_mode
         # Fall back to config value
         elif isinstance(config, AgentsManifest):
-            config_mode: str = getattr(config.pool_server, "subagent_display_mode", "tool_box")
+            config_mode: str = getattr(config.pool_server, "subagent_display_mode", "legacy")
             resolved_display_mode = _coerce_subagent_display_mode(config_mode)
         else:
-            resolved_display_mode = "tool_box"
+            resolved_display_mode = "legacy"
 
         # Resolve transport with priority: argument > config > default
         resolved_transport: Transport

@@ -636,33 +636,64 @@ class SessionController:
                 # consistency are preserved.  Each tool call creates its own
                 # child session but reuses the canonical pool-level agent.
                 if session.parent_session_id:
-                    # Inherit parent session's MCP providers onto the shared
-                    # agent before returning it.  Without this, subagents
-                    # cannot access MCP tools added dynamically to the parent
-                    # session (e.g., via ACP session_mcp_providers).
-                    parent_agent = self._session_agents.get(session.parent_session_id)
-                    if parent_agent is not None:
-                        mcp_providers = [
-                            p
-                            for p in parent_agent.tools.external_providers
-                            if getattr(p, "kind", None) == "mcp"
-                        ]
-                        for provider in mcp_providers:
-                            if provider not in base_agent.tools.external_providers:
-                                base_agent.tools.add_provider(provider)
-                        if mcp_providers:
-                            logger.info(
-                                "Inherited parent session MCP providers to shared agent",
-                                session_id=session_id,
-                                parent_session_id=session.parent_session_id,
-                                num_providers=len(mcp_providers),
-                            )
+                    # Create a lightweight per-session agent for child
+                    # sessions that inherits the parent's session-level MCP
+                    # providers without sharing chat history or agent state.
+                    #
+                    # Pool-level MCP providers (from YAML mcp_servers) are
+                    # added below.  Session-level MCP providers (from ACP
+                    # mcp-over-acp) are inherited from the parent.
+                    #
+                    # To avoid spawning duplicate MCP subprocesses, the
+                    # child agent shares base_agent.mcp.  is_per_session_agent
+                    # is set to False so close_session() skips __aexit__.
+                    if cfg.name is None:
+                        cfg = cfg.model_copy(update={"name": agent_name})
+                    from agentpool_config.context import ConfigContextManager
+
+                    with ConfigContextManager(self.pool._config_file_path):
+                        agent: Agent[Any, Any] = cfg.get_agent(
+                            input_provider=input_provider,
+                            pool=self.pool,
+                        )
+                    # Preserve runtime model configuration from shared agent
+                    base_model = getattr(base_agent, "_model", None)
+                    if base_model is not None:
+                        agent._model = base_model
+                        agent.model_settings = getattr(base_agent, "model_settings", None)
+                    if base_agent.env is not None:
+                        agent.env = base_agent.env
+                    agent._internal_fs = base_agent._internal_fs
+                    # Share MCP manager to avoid duplicate subprocess spawning
+                    agent.mcp = base_agent.mcp
+                    await agent.__aenter__()
+                    # Add pool-level providers
+                    if self.pool is not None:
+                        agent.tools.add_provider(self.pool.mcp.get_aggregating_provider())
+                        if self.pool.skills_instruction_provider:
+                            agent.tools.add_provider(self.pool.skills_instruction_provider)
+                        agent.tools.add_provider(self.pool.skills_tools_provider)
+                    # Inherit parent's session-level MCP providers
+                    parent_state = self._sessions.get(session.parent_session_id)
+                    if parent_state is not None and parent_state.agent is not None:
+                        for provider in parent_state.agent.tools.external_providers:
+                            if getattr(provider, "kind", None) == "mcp":
+                                if provider not in agent.tools.external_providers:
+                                    agent.tools.add_provider(provider)
                     if input_provider is not None:
                         session.input_provider = input_provider
-                    self._session_agents[session_id] = base_agent
-                    session.agent = base_agent
+                    self._session_agents[session_id] = agent
+                    session.agent = agent
+                    # is_per_session_agent=False: close_session() skips
+                    # agent.__aexit__() since MCP manager is shared
                     session.is_per_session_agent = False
-                    return base_agent
+                    logger.info(
+                        "Created child session agent",
+                        session_id=session_id,
+                        agent_name=agent_name,
+                        parent_session_id=session.parent_session_id,
+                    )
+                    return agent
 
                 if self._count_mcp_processes() >= self._mcp_max_processes:
                     logger.warning(

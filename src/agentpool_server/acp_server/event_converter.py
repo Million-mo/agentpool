@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 import uuid
 
+from pydantic import BaseModel
 from pydantic_ai import (
     FinalResultEvent,
     FunctionToolCallEvent,
@@ -21,7 +22,6 @@ from pydantic_ai import (
     NativeToolCallPart,
     NativeToolReturnPart,
     PartDeltaEvent,
-    PartEndEvent,
     PartStartEvent,
     RetryPromptPart,
     TextPart,
@@ -32,7 +32,6 @@ from pydantic_ai import (
     ToolCallPartDelta,
     ToolReturnPart,
 )
-from pydantic_ai.messages import BuiltinToolCallEvent, BuiltinToolResultEvent
 
 from acp.schema import (
     AgentMessageChunk,
@@ -50,23 +49,19 @@ from acp.schema import (
 from acp.utils import generate_tool_title, infer_tool_kind, to_acp_content_blocks
 from agentpool.agents.events import (
     CompactionEvent,
-    CustomEvent,
     DiffContentItem,
     FileContentItem,
     LocationContentItem,
     PlanUpdateEvent,
     RunErrorEvent,
-    RunStartedEvent,
+    RunFailedEvent,
     SpawnSessionStart,
     StreamCompleteEvent,
-    SubAgentEvent,
     TerminalContentItem,
     TextContentItem,
-    ToolCallCompleteEvent,
     ToolCallDeferredEvent,
     ToolCallProgressEvent,
     ToolCallStartEvent,
-    ToolResultMetadataEvent,
 )
 from agentpool.log import get_logger
 from agentpool.utils.pydantic_ai_helpers import safe_args_as_dict
@@ -96,22 +91,6 @@ ACPSessionUpdate = (
 )
 
 
-# ============================================================================
-# Helper functions
-# ============================================================================
-
-
-def _get_display_mode() -> Literal["legacy"]:
-    """Get the subagent display mode.
-
-    Only "legacy" mode is supported. inline and tool_box modes were removed.
-
-    Returns:
-        "legacy"
-    """
-    return "legacy"
-
-
 def get_compaction_text(trigger: str) -> str:
     if trigger == "auto":
         return "\n\n---\n\n📦 **Context compaction** triggered. Summarizing...\n\n---\n\n"
@@ -129,6 +108,23 @@ class _ToolState:
     raw_input: dict[str, Any]
     started: bool = False
     has_content: bool = False
+
+
+class SubagentSessionInfo(BaseModel):
+    """Information about a subagent session for contextual display.
+
+    Used by protocols that need to correlate subagent output with the
+    parent session's message stream (e.g., Zed subagent display mode).
+    """
+
+    session_id: str
+    """The child session ID spawned for subagent work."""
+
+    message_start_index: int | None = None
+    """Index of the message where subagent output begins (for ordering)."""
+
+    message_end_index: int | None = None
+    """Index of the message where subagent output ends (for ordering)."""
 
 
 # ============================================================================
@@ -152,14 +148,9 @@ class ACPEventConverter:
         ```
     """
 
-    # Subagent display mode (legacy only — inline and tool_box removed)
-    _display_mode: Literal["legacy"] = field(
-        default_factory=_get_display_mode,
-    )
-
     # Deprecated: kept for backward compatibility of constructor calls
-    subagent_display_mode: Literal["legacy"] = "legacy"
-    """How to display subagent output. Only "legacy" is supported."""
+    subagent_display_mode: Literal["legacy", "zed"] = "legacy"
+    """How to display subagent output. "legacy" (default) or "zed"."""
 
     # Feature flag for TurnCompleteUpdate emission
     client_supports_turn_complete: bool = False
@@ -192,6 +183,34 @@ class ACPEventConverter:
     last_usage: Usage | None = field(default=None, init=False)
     """Usage from the last completed stream, if available."""
 
+    def _build_subagent_field_meta(
+        self,
+        child_session_id: str,
+        message_start_index: int | None = None,
+        message_end_index: int | None = None,
+    ) -> dict[str, Any] | None:
+        """Build subagent field metadata for ACP session updates.
+
+        Returns ``None`` when *child_session_id* is empty so that callers
+        can skip emitting subagent-related fields without additional
+        branching.
+
+        Args:
+            child_session_id: The spawned child session ID.
+            message_start_index: Optional start index for message range.
+            message_end_index: Optional end index for message range.
+        """
+        if not child_session_id:
+            return None
+        return {
+            "subagent_session_info": SubagentSessionInfo(
+                session_id=child_session_id,
+                message_start_index=message_start_index,
+                message_end_index=message_end_index,
+            ).model_dump(exclude_none=True),
+            "tool_name": "task",
+        }
+
     def reset(self) -> None:
         """Reset converter state for a new run."""
         self._tool_states.clear()
@@ -201,8 +220,13 @@ class ACPEventConverter:
         self.last_usage = None
         self._subagent_content.clear()
         self._child_sessions.clear()
-        self._current_message_id = str(uuid.uuid4())
-        self.last_usage = None
+        self.cleanup()
+
+    def cleanup(self) -> None:
+        """Clean up converter state.
+
+        Idempotent — safe to call multiple times.
+        """
 
     # =========================================================================
     # V2_EXTENSION: ACP V2 protocol hooks (no-op on V1)
@@ -598,9 +622,6 @@ class ACPEventConverter:
                 if self.client_supports_turn_complete:
                     yield TurnCompleteUpdate(stop_reason="end_turn")
                 self.reset()
-                # Clean up all subagent states when stream completes
-                # Prevents memory leaks by removing accumulated state
-                self.reset()
 
             case PlanUpdateEvent(entries=entries):
                 acp_entries = [
@@ -619,27 +640,40 @@ class ACPEventConverter:
                 description=description,
                 spawn_mechanism=spawn_mechanism,
             ):
-                icon = "⚡" if spawn_mechanism == "spawn" else "🚀"
-                text = f"\n{icon} **`{source_name}`**: {description}\n"
-                yield AgentMessageChunk.text(text, message_id=self._current_message_id)
-                self._child_sessions.add(child_session_id)
+                if self.subagent_display_mode == "legacy":
+                    icon = "⚡" if spawn_mechanism == "spawn" else "🚀"
+                    text = f"\n{icon} **`{source_name}`**: {description}\n"
+                    yield AgentMessageChunk.text(text, message_id=self._current_message_id)
+                    self._child_sessions.add(child_session_id)
+                elif self.subagent_display_mode == "zed":
+                    tool_call_id = str(uuid.uuid4())
+                    _meta = self._build_subagent_field_meta(
+                        child_session_id=child_session_id, message_start_index=0
+                    )
+                    yield ToolCallStart(
+                        tool_call_id=tool_call_id,
+                        title=f"{source_name}: {description}" if description else source_name,
+                        kind="other",
+                        status="pending",
+                        field_meta=_meta,
+                    )
 
-            case SubAgentEvent(
-                source_name=source_name,
-                source_type=source_type,
-                event=inner_event,
-                depth=depth,
-            ):
-                async for update in self._convert_subagent_legacy(
-                    source_name, source_type, inner_event, depth
-                ):
-                    yield update
 
             case RunErrorEvent(message=message, agent_name=agent_name):
                 # Display error as agent text with formatting
                 agent_prefix = f"[{agent_name}] " if agent_name else ""
                 error_text = f"\n\n❌ **Error**: {agent_prefix}{message}\n\n"
                 yield AgentMessageChunk.text(error_text, message_id=self._current_message_id)
+
+            case RunFailedEvent(run_id=run_id, exception=exc):
+                # Display run failure as agent text and signal turn completion.
+                # Unlike RunErrorEvent (agent-level), RunFailedEvent indicates
+                # the TurnRunner itself crashed — the session cannot continue.
+                error_text = f"\n\n❌ **Run Failed** [{run_id}]: {exc}\n\n"
+                yield AgentMessageChunk.text(error_text, message_id=self._current_message_id)
+                if self.client_supports_turn_complete:
+                    yield TurnCompleteUpdate(stop_reason="end_turn")
+                self.reset()
 
             case ToolCallDeferredEvent(
                 tool_call_id=tc_id,
@@ -671,85 +705,4 @@ class ACPEventConverter:
                 # Handles future events like ToolRequiresAuthEvent without crashing
                 logger.debug("Unhandled event", event_type=type(event).__name__)
 
-    async def _convert_subagent_legacy(
-        self,
-        source_name: str,
-        source_type: Literal["agent", "team_parallel", "team_sequential"],
-        inner_event: RichAgentStreamEvent[Any],
-        depth: int,
-    ) -> AsyncIterator[ACPSessionUpdate]:
-        """Convert subagent event to legacy inline text notifications."""
-        indent = "  " * depth
-        icon = "🤖" if source_type == "agent" else "👥"
 
-        match inner_event:
-            case (
-                PartStartEvent(part=TextPart(content=delta))
-                | PartDeltaEvent(delta=TextPartDelta(content_delta=delta))
-            ):
-                header_key = f"`{source_name}`:{depth}"
-                if header_key not in self._subagent_headers:
-                    self._subagent_headers.add(header_key)
-                    yield AgentMessageChunk.text(
-                        f"\n{indent}{icon} **{source_name}**: ", message_id=self._current_message_id
-                    )
-                yield AgentMessageChunk.text(delta, message_id=self._current_message_id)
-
-            case (
-                PartStartEvent(part=ThinkingPart(content=delta))
-                | PartDeltaEvent(delta=ThinkingPartDelta(content_delta=delta))
-            ):
-                yield AgentThoughtChunk.text(delta or "", message_id=self._current_message_id)
-
-            case FunctionToolCallEvent(part=part):
-                text = f"\n{indent}- 🔧 [`{source_name}`] Using tool: ``{part.tool_name}``\n"
-                yield AgentMessageChunk.text(text=text, message_id=self._current_message_id)
-
-            case FunctionToolResultEvent(
-                result=ToolReturnPart(content=content, tool_name=tool_name),
-            ):
-                result_str = str(content)
-                if len(result_str) > 200:  # noqa: PLR2004
-                    result_str = result_str[:200] + "..."
-                text = f"{indent}- ✅ [`{source_name}`] `{tool_name}`\n"
-                yield AgentMessageChunk.text(text=text, message_id=self._current_message_id)
-
-            case FunctionToolResultEvent(result=RetryPromptPart(tool_name=tool_name) as result):
-                error_msg = result.model_response()
-                text = f"{indent}- ❌ [`{source_name}`] `{tool_name}`: `{error_msg}`\n"
-                yield AgentMessageChunk.text(text=text, message_id=self._current_message_id)
-
-            case StreamCompleteEvent():
-                header_key = f"`{source_name}`:{depth}"
-                self._subagent_headers.discard(header_key)
-                yield AgentMessageChunk.text(
-                    f"\n{indent}---\n", message_id=self._current_message_id
-                )
-
-            case (
-                BuiltinToolCallEvent()  # depracated
-                | BuiltinToolResultEvent()  # depracated
-                | CompactionEvent()
-                | FinalResultEvent()
-                | FunctionToolResultEvent()
-                | PartDeltaEvent()
-                | PartEndEvent()
-                | PartStartEvent()
-                | PlanUpdateEvent()
-                | RunErrorEvent()
-                | RunStartedEvent()
-                | SpawnSessionStart()
-                | SubAgentEvent()
-                | ToolCallCompleteEvent()
-                | ToolCallDeferredEvent()
-                | ToolCallProgressEvent()
-                | ToolCallStartEvent()
-                | ToolResultMetadataEvent()
-                | CustomEvent()
-            ):
-                pass  # TODO
-
-            case _:
-                # Graceful fallback for unknown event types
-                # Handles future events like ToolRequiresAuthEvent without crashing
-                logger.debug("Unhandled event", event_type=type(inner_event).__name__)

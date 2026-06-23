@@ -544,3 +544,142 @@ async def test_get_skill_instructions_continues_after_skill_not_found() -> None:
     aggregating = AggregatingResourceProvider([provider1, provider2])
 
     assert await aggregating.get_skill_instructions("fta-causal-path-review") == "instructions"
+
+
+# =============================================================================
+# add_provider() / remove_provider() - Dynamic Provider Tests
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_add_provider_appends_and_connects_signals() -> None:
+    """Test that add_provider() appends provider and connects signal forwarding."""
+    provider1 = MagicMock(spec=ResourceProvider)
+    provider1.get_skills = AsyncMock(return_value=[])
+    provider1.skills_changed = MagicMock()
+    provider1.skills_changed.connect = MagicMock()
+    provider1.skills_changed.disconnect = MagicMock()
+
+    aggregating = AggregatingResourceProvider([provider1])
+    assert len(aggregating.providers) == 1
+
+    provider2 = MagicMock(spec=ResourceProvider)
+    provider2.get_skills = AsyncMock(return_value=[])
+    provider2.skills_changed = MagicMock()
+    provider2.skills_changed.connect = MagicMock()
+    provider2.skills_changed.disconnect = MagicMock()
+
+    aggregating.add_provider(provider2)
+
+    assert len(aggregating.providers) == 2
+    assert provider2 in aggregating.providers
+    # Should connect to skills_changed for the new provider
+    assert provider2.skills_changed.connect.call_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_add_provider_skills_visible_in_get_skills() -> None:
+    """Test that skills from dynamically added provider appear in get_skills()."""
+    skill1 = MagicMock(spec="Skill")
+    skill1.name = "existing-skill"
+
+    provider1 = MagicMock(spec=ResourceProvider)
+    provider1.get_skills = AsyncMock(return_value=[skill1])
+    provider1.skills_changed = MagicMock()
+    provider1.skills_changed.connect = MagicMock()
+    provider1.skills_changed.disconnect = MagicMock()
+
+    aggregating = AggregatingResourceProvider([provider1])
+
+    # Before adding, only skill1
+    result = await aggregating.get_skills()
+    assert len(result) == 1
+
+    # Add a new provider with a new skill
+    skill2 = MagicMock(spec="Skill")
+    skill2.name = "new-skill"
+
+    provider2 = MagicMock(spec=ResourceProvider)
+    provider2.get_skills = AsyncMock(return_value=[skill2])
+    provider2.skills_changed = MagicMock()
+    provider2.skills_changed.connect = MagicMock()
+    provider2.skills_changed.disconnect = MagicMock()
+
+    aggregating.add_provider(provider2)
+
+    result = await aggregating.get_skills()
+    assert len(result) == 2
+    assert skill1 in result
+    assert skill2 in result
+
+
+def test_remove_provider_removes_and_disconnects_signals() -> None:
+    """Test that remove_provider() removes provider and disconnects signals."""
+    provider1 = MagicMock(spec=ResourceProvider)
+    provider1.skills_changed = MagicMock()
+    provider1.skills_changed.connect = MagicMock()
+    provider1.skills_changed.disconnect = MagicMock()
+
+    provider2 = MagicMock(spec=ResourceProvider)
+    provider2.skills_changed = MagicMock()
+    provider2.skills_changed.connect = MagicMock()
+    provider2.skills_changed.disconnect = MagicMock()
+
+    aggregating = AggregatingResourceProvider([provider1, provider2])
+    assert len(aggregating.providers) == 2
+
+    aggregating.remove_provider(provider2)
+
+    assert len(aggregating.providers) == 1
+    assert provider2 not in aggregating.providers
+    # Should disconnect signals from removed provider
+    assert provider2.skills_changed.disconnect.call_count >= 1
+
+
+@pytest.mark.asyncio
+async def test_remove_provider_skills_no_longer_visible() -> None:
+    """Test that skills from removed provider no longer appear in get_skills()."""
+    skill1 = MagicMock(spec="Skill")
+    skill1.name = "keep-skill"
+    skill2 = MagicMock(spec="Skill")
+    skill2.name = "remove-skill"
+
+    provider1 = MagicMock(spec=ResourceProvider)
+    provider1.get_skills = AsyncMock(return_value=[skill1])
+    provider1.skills_changed = MagicMock()
+    provider1.skills_changed.connect = MagicMock()
+    provider1.skills_changed.disconnect = MagicMock()
+
+    provider2 = MagicMock(spec=ResourceProvider)
+    provider2.get_skills = AsyncMock(return_value=[skill2])
+    provider2.skills_changed = MagicMock()
+    provider2.skills_changed.connect = MagicMock()
+    provider2.skills_changed.disconnect = MagicMock()
+
+    aggregating = AggregatingResourceProvider([provider1, provider2])
+
+    result = await aggregating.get_skills()
+    assert len(result) == 2
+
+    aggregating.remove_provider(provider2)
+
+    result = await aggregating.get_skills()
+    assert len(result) == 1
+    assert result[0] is skill1
+
+
+def test_remove_provider_not_in_list_is_noop() -> None:
+    """Test that remove_provider() with unknown provider does not raise."""
+    provider1 = MagicMock(spec=ResourceProvider)
+    provider1.skills_changed = MagicMock()
+    provider1.skills_changed.connect = MagicMock()
+    provider1.skills_changed.disconnect = MagicMock()
+
+    unknown = MagicMock(spec=ResourceProvider)
+
+    aggregating = AggregatingResourceProvider([provider1])
+
+    # Should not raise
+    aggregating.remove_provider(unknown)
+
+    assert len(aggregating.providers) == 1

@@ -482,3 +482,130 @@ class TestSkillsChangedIntegration:
 
                 # Should propagate to aggregate
                 assert len(events) == 1
+
+
+# =============================================================================
+# register_skill_provider() / unregister_skill_provider() Tests
+# =============================================================================
+
+
+@pytest.mark.integration
+class TestRegisterUnregisterSkillProvider:
+    """Test AgentPool.register_skill_provider() and unregister_skill_provider()."""
+
+    async def test_register_skill_provider_adds_to_aggregator(
+        self,
+        manifest_with_skills: AgentsManifest,
+    ) -> None:
+        """Test that register_skill_provider() makes skills visible in aggregator."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from agentpool.resource_providers.base import ResourceProvider
+
+        async with AgentPool(manifest_with_skills) as pool:
+            skill = MagicMock(spec="Skill")
+            skill.name = "dynamic-skill"
+
+            mock_provider = MagicMock(spec=ResourceProvider)
+            mock_provider.name = "dynamic_provider"
+            mock_provider.get_skills = AsyncMock(return_value=[skill])
+            mock_provider.skills_changed = MagicMock()
+            mock_provider.skills_changed.connect = MagicMock()
+            mock_provider.skills_changed.disconnect = MagicMock()
+
+            pool.register_skill_provider(mock_provider)
+
+            # Skills should now include the dynamic provider's skill
+            assert pool._skill_provider is not None
+            skills = await pool._skill_provider.get_skills()
+            assert skill in skills
+
+    async def test_unregister_skill_provider_removes_from_aggregator(
+        self,
+        manifest_with_skills: AgentsManifest,
+    ) -> None:
+        """Test that unregister_skill_provider() removes skills from aggregator."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from agentpool.resource_providers.base import ResourceProvider
+
+        async with AgentPool(manifest_with_skills) as pool:
+            skill = MagicMock(spec="Skill")
+            skill.name = "temporary-skill"
+
+            mock_provider = MagicMock(spec=ResourceProvider)
+            mock_provider.name = "temp_provider"
+            mock_provider.get_skills = AsyncMock(return_value=[skill])
+            mock_provider.skills_changed = MagicMock()
+            mock_provider.skills_changed.connect = MagicMock()
+            mock_provider.skills_changed.disconnect = MagicMock()
+
+            pool.register_skill_provider(mock_provider)
+            assert pool._skill_provider is not None
+            skills = await pool._skill_provider.get_skills()
+            assert skill in skills
+
+            pool.unregister_skill_provider(mock_provider)
+            skills = await pool._skill_provider.get_skills()
+            assert skill not in skills
+
+    async def test_register_skill_provider_adds_to_resolver(
+        self,
+        manifest_with_skills: AgentsManifest,
+    ) -> None:
+        """Test that register_skill_provider() adds provider to URI resolver."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from agentpool.resource_providers.base import ResourceProvider
+
+        async with AgentPool(manifest_with_skills) as pool:
+            mock_provider = MagicMock(spec=ResourceProvider)
+            mock_provider.name = "resolver_provider"
+            mock_provider.get_skills = AsyncMock(return_value=[])
+            mock_provider.skills_changed = MagicMock()
+            mock_provider.skills_changed.connect = MagicMock()
+            mock_provider.skills_changed.disconnect = MagicMock()
+
+            pool.register_skill_provider(mock_provider)
+
+            assert pool._skill_resolver is not None
+            assert "resolver_provider" in pool._skill_resolver.list_providers()
+
+    async def test_unregister_skill_provider_removes_from_resolver(
+        self,
+        manifest_with_skills: AgentsManifest,
+    ) -> None:
+        """Test that unregister_skill_provider() removes from URI resolver."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from agentpool.resource_providers.base import ResourceProvider
+
+        async with AgentPool(manifest_with_skills) as pool:
+            mock_provider = MagicMock(spec=ResourceProvider)
+            mock_provider.name = "rm_provider"
+            mock_provider.get_skills = AsyncMock(return_value=[])
+            mock_provider.skills_changed = MagicMock()
+            mock_provider.skills_changed.connect = MagicMock()
+            mock_provider.skills_changed.disconnect = MagicMock()
+
+            pool.register_skill_provider(mock_provider)
+            assert pool._skill_resolver is not None
+            assert "rm_provider" in pool._skill_resolver.list_providers()
+
+            pool.unregister_skill_provider(mock_provider)
+            assert "rm_provider" not in pool._skill_resolver.list_providers()
+
+    async def test_register_before_setup_buffers_and_drains(
+        self,
+        manifest_with_skills: AgentsManifest,
+    ) -> None:
+        """Test that register_skill_provider() buffers when called before setup."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        from agentpool.resource_providers.base import ResourceProvider
+
+        async with AgentPool(manifest_with_skills) as pool:
+            # _pending_skill_providers should be empty after __aenter__
+            # since _setup_skills_provider() drains the buffer
+            pending = getattr(pool, "_pending_skill_providers", [])
+            assert len(pending) == 0
