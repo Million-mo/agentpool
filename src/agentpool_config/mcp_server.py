@@ -70,12 +70,13 @@ class BaseMCPServerConfig(Schema):
     """Environment variables to pass to the server process."""
 
     timeout: float = Field(
-        default=60.0,
+        default=300.0,
         gt=0,
-        examples=[30.0, 60.0, 120.0],
+        examples=[30.0, 60.0, 300.0, 3600.0],
         title="Server timeout",
     )
-    """Timeout for the server process in seconds."""
+    """Timeout in seconds for both the MCP initialization handshake and per-request
+    read timeout (tool calls, elicitation, etc.)."""
 
     enabled_tools: list[str] | None = Field(
         default=None,
@@ -252,14 +253,17 @@ class StdioMCPServerConfig(BaseMCPServerConfig):
         """Convert to pydantic-ai MCPServerStdio instance."""
         from pydantic_ai.mcp import MCPServerStdio
 
-        return MCPServerStdio(
-            command=self.command,
-            args=self.args,
-            env=self.get_env_vars() if self.env else None,
-            id=self.name,
-            timeout=self.timeout,
-            elicitation_callback=elicitation_callback,
-        )
+        kwargs: dict[str, Any] = {
+            "command": self.command,
+            "args": self.args,
+            "id": self.name,
+            "timeout": self.timeout,
+            "read_timeout": self.timeout,
+            "elicitation_callback": elicitation_callback,
+        }
+        if self.env:
+            kwargs["env"] = self.get_env_vars()
+        return MCPServerStdio(**kwargs)
 
 
 class SSEMCPServerConfig(BaseMCPServerConfig):
@@ -322,11 +326,15 @@ class SSEMCPServerConfig(BaseMCPServerConfig):
         """Convert to pydantic-ai MCPServerSSE instance."""
         from pydantic_ai.mcp import MCPServerSSE
 
-        url = str(self.url)
-        return MCPServerSSE(
-            url=url, headers=self.headers, id=self.name, timeout=self.timeout,
-            elicitation_callback=elicitation_callback,
-        )
+        kwargs: dict[str, Any] = {
+            "url": str(self.url),
+            "headers": self.headers,
+            "id": self.name,
+            "timeout": self.timeout,
+            "read_timeout": self.timeout,
+            "elicitation_callback": elicitation_callback,
+        }
+        return MCPServerSSE(**kwargs)
 
 
 class StreamableHTTPMCPServerConfig(BaseMCPServerConfig):
@@ -394,6 +402,7 @@ class StreamableHTTPMCPServerConfig(BaseMCPServerConfig):
             headers=self.headers,
             id=self.name,
             timeout=self.timeout,
+            read_timeout=self.timeout,
             elicitation_callback=elicitation_callback,
         )
 
