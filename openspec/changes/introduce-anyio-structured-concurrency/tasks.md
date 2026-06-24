@@ -34,18 +34,18 @@
 
 ## 4. Phase 4: EventBus Memory Streams
 
-- [ ] 4.1 Refactor `EventBus.__init__()` in `src/agentpool/orchestrator/core.py`: replace `_subscribers: dict[str, list[tuple[asyncio.Queue, str]]]` with `_subscribers: dict[str, list[tuple[MemoryObjectSendStream, str]]]`
-- [ ] 4.2 Refactor `EventBus.subscribe()`: create `anyio.create_memory_object_stream(max_buffer_size=1000)`, replay historical events via `send.send_nowait()`, return `MemoryObjectReceiveStream` instead of `asyncio.Queue`
-- [ ] 4.3 Refactor `EventBus.unsubscribe()`: find and close the corresponding send stream via `aclose()` (consumer gets `EndOfStream`); remove sentinel `None` pattern
-- [ ] 4.4 Implement hybrid backpressure in `publish()`: wrap `send.send()` in `anyio.fail_after(0.1)`; on first 2 timeouts, drop oldest buffered event via `send_nowait(get_nowait)`; on 3rd consecutive timeout, close and drop subscriber
-- [ ] 4.5 Add parallel publishing: fan out to subscribers concurrently using `anyio.create_task_group()` instead of sequential iteration under lock
-- [ ] 4.6 Add `anyio.Lock` to `EventBus` for thread safety (replaces `asyncio.Lock`)
-- [ ] 4.7 Update `ProtocolEventConsumerMixin._event_consumer_loop()` in `src/agentpool_server/mixins.py`: use `async for envelope in receive_stream:` instead of `while True: envelope = await queue.get()`; exit on `EndOfStream` instead of `None` sentinel
-- [ ] 4.7a Update `ACPProtocolHandler._event_consumer_loop()` override (handler.py line 206): adapt lazy subscribe fallback to work with `MemoryObjectReceiveStream` instead of `asyncio.Queue` (deferred from Phase 2 task 2.6; now that memory streams exist)
-- [ ] 4.8 Update `ACPAgent._run_stream_once()` in `src/agentpool/agents/acp_agent/acp_agent.py`: work with `MemoryObjectReceiveStream` from `event_bus.subscribe()` instead of `asyncio.Queue`
-- [ ] 4.9 Update OpenCode `global_routes.py` SSE subscription: adapt to new `subscribe()` return type
-- [ ] 4.10 Write test: subscribe to EventBus, delay consumption, publish 50 events, verify backpressure doesn't deadlock and event-drop + subscriber-drop thresholds work correctly
-- [ ] 4.11 Run `uv run pytest tests/ -k "event_bus" -x` to verify EventBus changes
+- [x] 4.1 Refactor `EventBus.__init__()` in `src/agentpool/orchestrator/core.py`: replace `_subscribers: dict[str, list[tuple[asyncio.Queue, str]]]` with `_subscribers: dict[str, list[tuple[MemoryObjectSendStream, str]]]`
+- [x] 4.2 Refactor `EventBus.subscribe()`: create `anyio.create_memory_object_stream(max_buffer_size=1000)`, replay historical events via `send.send_nowait()`, return `MemoryObjectReceiveStream` instead of `asyncio.Queue`
+- [x] 4.3 Refactor `EventBus.unsubscribe()`: find and close the corresponding send stream via `aclose()` (consumer gets `EndOfStream`); remove sentinel `None` pattern
+- [x] 4.4 Implement hybrid backpressure in `publish()`: wrap `send.send()` in `anyio.fail_after(0.1)`; on first 2 timeouts, drop oldest buffered event via `send_nowait(get_nowait)`; on 3rd consecutive timeout, close and drop subscriber
+- [x] 4.5 Add parallel publishing: fan out to subscribers concurrently using `anyio.create_task_group()` instead of sequential iteration under lock
+- [x] 4.6 Add `anyio.Lock` to `EventBus` for thread safety (replaces `asyncio.Lock`)
+- [x] 4.7 Update `ProtocolEventConsumerMixin._event_consumer_loop()` in `src/agentpool_server/mixins.py`: use `async for envelope in receive_stream:` instead of `while True: envelope = await queue.get()`; exit on `EndOfStream` instead of `None` sentinel
+- [x] 4.7a Update `ACPProtocolHandler._event_consumer_loop()` override (handler.py line 206): adapt lazy subscribe fallback to work with `MemoryObjectReceiveStream` instead of `asyncio.Queue` (deferred from Phase 2 task 2.6; now that memory streams exist)
+- [x] 4.8 Update `ACPAgent._run_stream_once()` in `src/agentpool/agents/acp_agent/acp_agent.py`: work with `MemoryObjectReceiveStream` from `event_bus.subscribe()` instead of `asyncio.Queue`
+- [x] 4.9 Update OpenCode `global_routes.py` SSE subscription: adapt to new `subscribe()` return type
+- [x] 4.10 Write test: subscribe to EventBus, delay consumption, publish 50 events, verify backpressure doesn't deadlock and event-drop + subscriber-drop thresholds work correctly
+- [x] 4.11 Run `uv run pytest tests/ -k "event_bus" -x` to verify EventBus changes
 
 ## 5. Phase 5: merge_queue_into_iterator Removal
 
