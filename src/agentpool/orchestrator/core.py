@@ -17,6 +17,8 @@ import time
 from typing import TYPE_CHECKING, Any, ClassVar, Final
 import uuid
 
+import anyio
+
 from agentpool.agents.context import AgentRunContext
 from agentpool.agents.events import SessionResumeEvent, StreamCompleteEvent
 from agentpool.agents.native_agent.checkpoint import CheckpointData
@@ -59,10 +61,7 @@ class EventEnvelope:
         return getattr(self.event, name)
 
     def __repr__(self) -> str:
-        return (
-            f"EventEnvelope(source_session_id={self.source_session_id!r}, "
-            f"event={self.event!r})"
-        )
+        return f"EventEnvelope(source_session_id={self.source_session_id!r}, event={self.event!r})"
 
 
 logger = get_logger(__name__)
@@ -165,6 +164,7 @@ class SessionState:
     turn_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     is_closing: bool = False
     parent_session_id: str | None = None
+    cancel_scope: anyio.CancelScope = field(default_factory=anyio.CancelScope)
     lifecycle_policy: str = field(default_factory=SessionLifecyclePolicy.default)
     current_run_id: str | None = None
     _request_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -208,9 +208,7 @@ class EventBus:
             replay_buffer_size: Maximum number of events retained per session for replay.
             session_controller: Optional session controller for hierarchy queries.
         """
-        self._subscribers: dict[
-            str, list[tuple[asyncio.Queue[EventEnvelope | None], str]]
-        ] = {}
+        self._subscribers: dict[str, list[tuple[asyncio.Queue[EventEnvelope | None], str]]] = {}
         self._session_tree: dict[str, list[str]] = {}
         self._lock = asyncio.Lock()
         self._max_queue_size = max_queue_size
@@ -244,9 +242,7 @@ class EventBus:
         Returns:
             A queue to consume events from.
         """
-        queue: asyncio.Queue[EventEnvelope | None] = asyncio.Queue(
-            maxsize=self._max_queue_size
-        )
+        queue: asyncio.Queue[EventEnvelope | None] = asyncio.Queue(maxsize=self._max_queue_size)
 
         # 1. Register subscriber and capture replay buffer atomically
         # (inside the same lock to prevent duplicate delivery)
@@ -482,6 +478,7 @@ class SessionController:
         self._sessions: dict[str, SessionState] = {}
         self._session_agents: dict[str, BaseAgent[Any, Any]] = {}
         self._children: dict[str, list[str]] = {}
+        self._session_scopes: dict[str, anyio.CancelScope] = {}
         self._lock = asyncio.Lock()
         self._session_ttl_seconds: float = DEFAULT_SESSION_TTL_SECONDS
         self._cleanup_task: asyncio.Task[Any] | None = None
@@ -589,6 +586,16 @@ class SessionController:
             metadata=metadata,
         )
         self._sessions[session_id] = state
+        if parent_session_id and effective_policy in ("cascade", "bound"):
+            parent_scope = self._session_scopes.get(parent_session_id)
+            if parent_scope is not None:
+                child_scope = anyio.CancelScope()
+                parent_scope.add_cancel_callback(child_scope)
+                self._session_scopes[session_id] = child_scope
+            else:
+                self._session_scopes[session_id] = anyio.CancelScope()
+        else:
+            self._session_scopes[session_id] = anyio.CancelScope()
         if self.store is not None:
             await self.store.save(self._state_to_data(state))
         if parent_session_id:
@@ -741,7 +748,7 @@ class SessionController:
                         "Failed to load session for per-session agent",
                         session_id=session_id,
                     )
-                   # Add pool-level providers to per-session agent
+                # Add pool-level providers to per-session agent
                 # (same as shared agents get in AgentPool.__aenter__)
                 if self.pool is not None:
                     agent.tools.add_provider(self.pool.mcp.get_aggregating_provider())
@@ -871,9 +878,7 @@ class SessionController:
                 expired.append(call)
         return expired
 
-    async def _save_close_checkpoint(
-        self, session_id: str, data: SessionData
-    ) -> bool:
+    async def _save_close_checkpoint(self, session_id: str, data: SessionData) -> bool:
         """Save session data with checkpointed status before close.
 
         Marks the session as ``"checkpointed"`` so it can be located by
@@ -948,6 +953,12 @@ class SessionController:
 
             session.is_closing = True
             session.closed_at = time.monotonic()
+
+            # Cancel the session's CancelScope to cascade cancellation
+            # to child sessions and stop any pending operations
+            scope = self._session_scopes.pop(session_id, None)
+            if scope is not None:
+                scope.cancel()
 
             # Checkpoint-before-close: if pending deferred calls exist, save
             # checkpoint state before releasing resources so the session can
@@ -1363,12 +1374,11 @@ class SessionController:
                         expired = self._check_expired_calls(data)
                         if expired:
                             remaining = [
-                                c for c in data.pending_deferred_calls
+                                c
+                                for c in data.pending_deferred_calls
                                 if c.tool_call_id not in {e.tool_call_id for e in expired}
                             ]
-                            updated = data.model_copy(
-                                update={"pending_deferred_calls": remaining}
-                            )
+                            updated = data.model_copy(update={"pending_deferred_calls": remaining})
                             await self.store.save(updated)
                             logger.info(
                                 "Removed expired deferred calls",
@@ -1422,7 +1432,7 @@ class TurnRunner:
         self._max_auto_resume = max_auto_resume
         self._turn_timings: list[tuple[float, float]] = []
         self._max_turn_timing_history: int = 100
-        self._background_tasks: set[asyncio.Task[Any]] = set()
+        self._session_task_groups: dict[str, anyio.TaskGroup] = {}
         self._cancel_tasks: set[asyncio.Task[Any]] = set()
         self._runs: dict[str, AgentRunContext] = {}
         self._last_error: BaseException | None = None
@@ -1445,6 +1455,42 @@ class TurnRunner:
                 lock = asyncio.Lock()
                 self._injection_locks[session_id] = lock
             return lock
+
+    async def _get_session_task_group(self, session_id: str) -> anyio.TaskGroup:
+        """Get or create per-session anyio TaskGroup for auto-resume tasks.
+
+        Creates a new TaskGroup if one doesn't exist for the session.
+        This group manages auto-resume task lifecycle.
+
+        Args:
+            session_id: The session to get/create TaskGroup for.
+
+        Returns:
+            The session's anyio TaskGroup.
+        """
+        if session_id not in self._session_task_groups:
+            self._session_task_groups[session_id] = anyio.create_task_group()
+        return self._session_task_groups[session_id]
+
+    async def _safe_auto_resume(self, session_id: str, **kwargs: Any) -> None:
+        """Exception-catching wrapper for auto-resume tasks.
+
+        One auto-resume failure MUST NOT cancel sibling auto-resume tasks
+        in the same session TaskGroup.
+
+        Args:
+            session_id: The session to trigger auto-resume for.
+            **kwargs: Additional arguments passed to _trigger_auto_resume.
+        """
+        try:
+            await self._trigger_auto_resume(session_id, **kwargs)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "Auto-resume task failed",
+                session_id=session_id,
+            )
 
     async def _publish_event(self, session_id: str, event: Any) -> None:
         """Publish event to EventBus.
@@ -1567,6 +1613,7 @@ class TurnRunner:
         # generic mock that does not delegate to _run_stream_once,
         # fall back to _run_stream_once directly.
         from unittest.mock import MagicMock as _MagicMock
+
         _run_stream = getattr(agent, "run_stream", None)
         _use_run_stream: bool = True
         if _run_stream is None:
@@ -1577,13 +1624,15 @@ class TurnRunner:
             # A bare MagicMock without a side_effect is a generic mock
             # agent; use _run_stream_once (the test's target) instead.
             _use_run_stream = callable(_run_stream._mock_side_effect or _run_stream.side_effect)
-        elif isinstance(_run_stream, object) and hasattr(_run_stream, '__call__'):
+        elif isinstance(_run_stream, object) and hasattr(_run_stream, "__call__"):
             _use_run_stream = True
         else:
             _use_run_stream = False
 
         _stream_callable = _run_stream if _use_run_stream else agent._run_stream_once
-        assert _stream_callable is not None, "Expected run_stream or _run_stream_once to be available"
+        assert _stream_callable is not None, (
+            "Expected run_stream or _run_stream_once to be available"
+        )
         sig = inspect.signature(_stream_callable)
         stream_params = set(sig.parameters)
         has_var_keyword = any(
@@ -1864,9 +1913,11 @@ class TurnRunner:
             self._post_turn_injections.setdefault(session_id, []).append(message)
 
         logger.debug("Queued injection for next turn, triggering auto-resume")
-        task = asyncio.create_task(self._trigger_auto_resume(session_id, **kwargs))
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
+
+        # Spawn auto-resume task in session's TaskGroup
+        async with await self._get_session_task_group(session_id) as tg:
+            tg.start_soon(self._safe_auto_resume, session_id, **kwargs)
+
         return False
 
     async def queue_prompt(self, session_id: str, *prompts: Any, **kwargs: Any) -> bool:
@@ -1905,9 +1956,11 @@ class TurnRunner:
             self._post_turn_prompts.setdefault(session_id, []).append(prompts)
 
         logger.debug("Queued prompt for next turn, triggering auto-resume")
-        task = asyncio.create_task(self._trigger_auto_resume(session_id, **kwargs))
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
+
+        # Spawn auto-resume task in session's TaskGroup
+        async with await self._get_session_task_group(session_id) as tg:
+            tg.start_soon(self._safe_auto_resume, session_id, **kwargs)
+
         return False
 
     async def steer(self, session_id: str, message: str, **kwargs: Any) -> bool:
@@ -1968,9 +2021,9 @@ class TurnRunner:
 
         # Non-native idle: store for next turn
         self._post_turn_injections.setdefault(session_id, []).append(message)
-        task = asyncio.create_task(self._trigger_auto_resume(session_id, **kwargs))
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
+        logger.debug("Queued injection for next turn, triggering auto-resume")
+        async with await self._get_session_task_group(session_id) as tg:
+            tg.start_soon(self._safe_auto_resume, session_id, **kwargs)
         return False
 
     async def followup(self, session_id: str, message: str, **kwargs: Any) -> bool:
@@ -2026,14 +2079,18 @@ class TurnRunner:
             run_handle = self.sessions._runs.get(run_id)
             if run_handle is not None and run_handle.status == RunStatus.running:
                 run_ctx = run_handle.run_ctx
-                run_ctx.injection_manager.queue(message)
+                run_ctx.injection_manager.inject(message)
                 return True
 
         # Non-native idle: store for next turn
         self._post_turn_prompts.setdefault(session_id, []).append((message,))
-        task = asyncio.create_task(self._trigger_auto_resume(session_id, **kwargs))
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
+
+        logger.debug("Queued followup for next turn, triggering auto-resume")
+
+        # Spawn auto-resume task in session's TaskGroup
+        async with await self._get_session_task_group(session_id) as tg:
+            tg.start_soon(self._safe_auto_resume, session_id, **kwargs)
+
         return False
 
     async def _drain_post_turn_injections(self, session_id: str) -> list[str]:
@@ -2306,9 +2363,7 @@ class SessionPool:
             return lock
 
     @contextlib.asynccontextmanager
-    async def _with_resume_lock(
-        self, session_id: str
-    ) -> AsyncIterator[SessionState | None]:
+    async def _with_resume_lock(self, session_id: str) -> AsyncIterator[SessionState | None]:
         """Acquire per-session resume lock with state validation.
 
         Ensures only one resume runs per session at a time and that
@@ -2338,9 +2393,7 @@ class SessionPool:
 
             yield session
 
-    async def _load_checkpoint_data(
-        self, session_id: str
-    ) -> CheckpointData:
+    async def _load_checkpoint_data(self, session_id: str) -> CheckpointData:
         """Load checkpoint data for a session.
 
         Args:
@@ -2515,9 +2568,7 @@ class SessionPool:
                 manage their own message history).
             results: DeferredToolResults for resolving pending deferred calls.
         """
-        agent = await self._reconstruct_acp_agent(
-            session_data.session_id, session_data.agent_name
-        )
+        agent = await self._reconstruct_acp_agent(session_data.session_id, session_data.agent_name)
         try:
             # ACP agents receive the resumed session context through run()
             run_fn: Any = agent.run
@@ -2577,12 +2628,8 @@ class SessionPool:
             raise SessionBusyError(session_id, session.current_run_id)
 
         # Validate deferred_tool_results cover all pending_deferred_calls
-        pending_call_ids: set[str] = {
-            call.tool_call_id for call in data.pending_deferred_calls
-        }
-        provided_call_ids: set[str] = set(
-            getattr(deferred_tool_results, "calls", {}).keys()
-        )
+        pending_call_ids: set[str] = {call.tool_call_id for call in data.pending_deferred_calls}
+        provided_call_ids: set[str] = set(getattr(deferred_tool_results, "calls", {}).keys())
 
         missing = pending_call_ids - provided_call_ids
         extra = provided_call_ids - pending_call_ids

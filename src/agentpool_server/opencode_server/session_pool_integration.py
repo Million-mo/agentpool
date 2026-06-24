@@ -865,7 +865,7 @@ class OpenCodeSessionPoolIntegration(ProtocolEventConsumerMixin):
 
     async def shutdown(self) -> None:
         """Shutdown the integration and stop all consumers and bridges."""
-        for session_id in list(self._consumer_tasks.keys()):
+        for session_id in list(self._session_groups.keys()):
             try:
                 await self.stop_event_consumer(session_id)
             except Exception:

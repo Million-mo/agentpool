@@ -7,8 +7,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 import asyncio
-import contextlib
 from typing import TYPE_CHECKING
+
+import anyio
 
 from agentpool.agents.events.events import SpawnSessionStart
 
@@ -46,11 +47,11 @@ class ProtocolEventConsumerMixin(ABC):
     def __init__(self) -> None:
         """Initialize mixin state.
 
-        Sets up internal tracking for consumer tasks, queues, and locks.
+        Sets up internal tracking for CancelScopes and TaskGroups.
         """
         super().__init__()
-        self._consumer_tasks: dict[str, asyncio.Task[None]] = {}
-        self._consumer_queues: dict[str, asyncio.Queue[EventEnvelope | None]] = {}
+        self._session_scopes: dict[str, anyio.CancelScope] = {}
+        self._session_groups: dict[str, anyio.TaskGroup] = {}
         self._consumer_locks: dict[str, asyncio.Lock] = {}
         self._consumer_lock_creation_lock: asyncio.Lock = asyncio.Lock()
 
@@ -113,9 +114,7 @@ class ProtocolEventConsumerMixin(ABC):
         """
 
     @abstractmethod
-    async def _handle_event(
-        self, session_id: str, envelope: EventEnvelope
-    ) -> None:
+    async def _handle_event(self, session_id: str, envelope: EventEnvelope) -> None:
         """Handle a single event from the EventBus.
 
         Subclasses MUST implement this method with protocol-specific
@@ -130,10 +129,10 @@ class ProtocolEventConsumerMixin(ABC):
         """
 
     async def start_event_consumer(self, session_id: str) -> None:
-        """Start an event consumer for the given session.
+        """Start an event consumer for a given session.
 
         This method is idempotent: if a consumer is already running for
-        the session, it returns immediately. Concurrent calls for the
+        session, it returns immediately. Concurrent calls for the
         same session are serialized by a per-session lock.
 
         Args:
@@ -144,37 +143,43 @@ class ProtocolEventConsumerMixin(ABC):
                 self._consumer_locks[session_id] = asyncio.Lock()
 
         async with self._consumer_locks[session_id]:
-            task = self._consumer_tasks.get(session_id)
-            if task is not None and not task.done():
+            # Check if already running
+            if session_id in self._session_groups:
                 return
 
-            queue = await self.event_bus.subscribe(
-                session_id, scope=self._get_subscription_scope()
-            )
+            # Create CancelScope and TaskGroup for this session's consumer
+            cancel_scope = anyio.CancelScope()
+            task_group = anyio.create_task_group()
+
+            # Store for cleanup
+            self._session_scopes[session_id] = cancel_scope
+            self._session_groups[session_id] = task_group
+
+            # Subscribe to get queue (still returns asyncio.Queue in this phase)
+            queue = await self.event_bus.subscribe(session_id, scope=self._get_subscription_scope())
             self._consumer_queues[session_id] = queue
 
-            task = asyncio.create_task(
-                self._event_consumer_loop(session_id),
-                name=f"event_consumer_{session_id}",
-            )
-            self._consumer_tasks[session_id] = task
+            # Spawn consumer loop in TaskGroup
+            async with task_group as tg:
+                tg.start_soon(self._event_consumer_loop(session_id))
 
     async def stop_event_consumer(self, session_id: str) -> None:
-        """Stop the event consumer for the given session.
+        """Stop an event consumer for a given session.
 
-        Cancels the consumer task, unsubscribes from the EventBus,
-        and cleans up internal state. Safe to call even if no consumer
-        is running for the session.
+        Cancels the session's CancelScope, exits the TaskGroup,
+        unsubscribes from the EventBus, and cleans up internal state.
+        Safe to call even if no consumer is running for the session.
 
         Args:
             session_id: The session to stop consuming events for.
         """
-        task = self._consumer_tasks.get(session_id)
-        if task is not None and not task.done():
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+        cancel_scope = self._session_scopes.get(session_id)
+        if cancel_scope is not None:
+            cancel_scope.cancel()
 
+        # Cleanup after CancelScope ensures proper termination
+        self._session_scopes.pop(session_id, None)
+        self._session_groups.pop(session_id, None)
         self._consumer_tasks.pop(session_id, None)
         queue = self._consumer_queues.pop(session_id, None)
         if queue is not None:
@@ -218,9 +223,7 @@ class ProtocolEventConsumerMixin(ABC):
                 if not hasattr(envelope, "event"):
                     from agentpool.orchestrator.core import EventEnvelope
 
-                    envelope = EventEnvelope(
-                        source_session_id=session_id, event=envelope
-                    )
+                    envelope = EventEnvelope(source_session_id=session_id, event=envelope)
 
                 if isinstance(envelope.event, SpawnSessionStart):
                     await self._on_spawn_session_start(session_id, envelope)
@@ -231,8 +234,7 @@ class ProtocolEventConsumerMixin(ABC):
                     except ConsumerShutdown:
                         break
         finally:
-            await self.event_bus.unsubscribe(session_id, queue)
-            self._consumer_queues.pop(session_id, None)
-            self._consumer_tasks.pop(session_id, None)
+            # Unsubscribe handled by stop_event_consumer() after TaskGroup exits
+            # Cleanup per-session state
             if started:
                 await self._after_consumer_loop(session_id)

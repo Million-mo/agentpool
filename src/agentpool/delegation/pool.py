@@ -235,7 +235,11 @@ class AgentPool[TPoolDeps = None](BaseRegistry[NodeName, MessageNode[Any, Any]])
                 )
                 self.register(name, agent)
 
-            logger.debug("AgentPool: registered %d agents: %s", len(self.all_agents), list(self.all_agents.keys()))
+            logger.debug(
+                "AgentPool: registered %d agents: %s",
+                len(self.all_agents),
+                list(self.all_agents.keys()),
+            )
             self._create_teams()
             if connect_nodes:
                 self._connect_nodes()
@@ -253,6 +257,7 @@ class AgentPool[TPoolDeps = None](BaseRegistry[NodeName, MessageNode[Any, Any]])
                 kwargs.pop("enable_session_pool")
             self._session_pool_config = session_pool_config or self.manifest.session_pool
             self._session_pool: SessionPool | None = None
+            self._protocol_servers: list[Any] = []
             # Graph topology: lazily-built pydantic-graph from registered nodes
             self._graph: Any | None = None
             self._graph_dirty = True
@@ -359,6 +364,8 @@ class AgentPool[TPoolDeps = None](BaseRegistry[NodeName, MessageNode[Any, Any]])
         async with self._enter_lock:
             self._running_count -= 1
             if self._running_count == 0:
+                # Stop all protocol server event consumers first
+                await self._stop_all_consumers()
                 # Shutdown SessionPool
                 assert self._session_pool is not None
                 await self._session_pool.shutdown()
@@ -378,6 +385,26 @@ class AgentPool[TPoolDeps = None](BaseRegistry[NodeName, MessageNode[Any, Any]])
                     self._skill_provider = None
                 self._skill_resolver = None
                 await self.cleanup()
+
+    def add_server(self, server: Any) -> None:
+        """Register a protocol server for consumer lifecycle management.
+
+        Args:
+            server: A protocol server instance (e.g. ACPServer, OpenCodeServer).
+        """
+        self._protocol_servers.append(server)
+
+    async def _stop_all_consumers(self) -> None:
+        """Stop all event consumers from registered protocol servers.
+
+        Called during AgentPool.__aexit__ before SessionPool shutdown
+        to ensure graceful consumer teardown.
+        """
+        for server in self._protocol_servers:
+            stop_fn = getattr(server, "stop_event_consumers", None)
+            if stop_fn is not None:
+                await stop_fn()
+        self._protocol_servers.clear()
 
     @property
     def is_running(self) -> bool:
@@ -760,8 +787,11 @@ class AgentPool[TPoolDeps = None](BaseRegistry[NodeName, MessageNode[Any, Any]])
         from agentpool.delegation.team import Team
 
         team = Team(
-            agents, name=name, description=description,
-            shared_prompt=shared_prompt, member_timeout=member_timeout,
+            agents,
+            name=name,
+            description=description,
+            shared_prompt=shared_prompt,
+            member_timeout=member_timeout,
         )
         if name:
             self[name] = team
