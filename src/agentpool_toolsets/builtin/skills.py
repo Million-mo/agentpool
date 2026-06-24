@@ -93,8 +93,11 @@ async def _load_reference_content(
 
     from agentpool.skills.exceptions import ReferenceNotFoundError
 
-    # For virtual paths (PurePosixPath like skill:// URIs), use the provider
-    if isinstance(skill.skill_path, PurePosixPath) and pool is not None:
+    # For virtual paths (PurePosixPath like skill:// URIs), use the provider.
+    # Use exact type check (not isinstance) to avoid catching UPath subclasses.
+    # UPath is a subclass of PurePosixPath; isinstance would match filesystem skills too,
+    # routing them through the provider which hardcodes references/ prefix.
+    if type(skill.skill_path) is PurePosixPath and pool is not None:
         if pool.skill_provider is not None:
             # Always pass the canonical kebab-case skill.name to the aggregating
             # provider, which matches against Skill.name (always kebab-case).
@@ -273,8 +276,12 @@ async def _load_skill(  # noqa: PLR0911, PLR0915
         # Check for reference path first
         # When a reference file is explicitly requested via URI, load ONLY the
         # reference content — not the main SKILL.md instructions.
-        # Check for fallback reference path from provider-less URI resolution
-        ref_path = resolved.reference_path or getattr(skill, "_resolved_reference_path", None)
+        # Check for fallback reference path from provider-less URI resolution.
+        # Priority: _resolved_reference_path first (resolver's fallback correction
+        # for provider-less URIs like skill://skill-name/path), then parsed path.
+        # The resolver's fallback correctly reconstructs the full reference path
+        # when URI parsing misidentifies the skill name as a provider.
+        ref_path = getattr(skill, "_resolved_reference_path", None) or resolved.reference_path
 
         if ref_path:
             # Reference-only loading: skip main SKILL.md content
@@ -309,8 +316,10 @@ async def _load_skill(  # noqa: PLR0911, PLR0915
     instructions = _substitute_arguments(instructions, arguments)
 
     # Determine if this is a reference-only load
-    effective_ref_path = (resolved.reference_path if is_uri else None) or getattr(
-        skill, "_resolved_reference_path", None
+    # Priority: _resolved_reference_path first (resolver's fallback correction
+    # for provider-less URIs), then parsed path.
+    effective_ref_path = getattr(skill, "_resolved_reference_path", None) or (
+        resolved.reference_path if is_uri else None
     )
     is_reference_load = is_uri and effective_ref_path is not None
 
@@ -320,7 +329,7 @@ async def _load_skill(  # noqa: PLR0911, PLR0915
         header = f"# {skill.name} → Reference: {effective_ref_path}"
         parts = [header]
         parts.append(instructions)
-        parts.append(f"Skill directory: {skill.skill_path}")
+        parts.append(f"Skill URI: {skill.safe_uri}")
         if resolved.provider:
             parts.append(
                 f"URI: skill://{resolved.provider}/{resolved.skill_name}/{effective_ref_path}"
@@ -340,7 +349,7 @@ async def _load_skill(  # noqa: PLR0911, PLR0915
         if meta:
             parts.append(meta)
         parts.append(instructions)
-        parts.append(f"Skill directory: {skill.skill_path}")
+        parts.append(f"Skill URI: {skill.safe_uri}")
 
         # Add URI information if loaded via URI
         if is_uri and resolved.provider:
@@ -378,7 +387,8 @@ async def list_skills(ctx: AgentContext) -> str:
 
     requested_node_name = _node_name_for_scope(ctx)
 
-    # Get skills from both local registry and MCP provider
+    # Get skills from both local registry and MCP provider.
+    # Deduplicate by name: local skills take priority (appear first in list).
     skills = ctx.pool.skills.list_skills()
     # Filter out skills that disable model invocation (for model visibility)
     visible_skills = _visible_model_skills(ctx, skills, requested_node_name)
@@ -392,6 +402,13 @@ async def list_skills(ctx: AgentContext) -> str:
             pass
 
     all_skills = visible_skills + _visible_model_skills(ctx, provider_skills, requested_node_name)
+    # Merge with dedup: local (visible_skills) first, then provider_skills
+    seen: set[str] = {s.name for s in visible_skills}
+    all_skills = list(visible_skills)
+    for skill in provider_skills:
+        if skill.name not in seen:
+            seen.add(skill.name)
+            all_skills.append(skill)
 
     if not all_skills:
         return "No skills available"

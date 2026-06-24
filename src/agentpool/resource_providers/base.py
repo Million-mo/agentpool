@@ -8,7 +8,7 @@ import inspect
 from typing import TYPE_CHECKING, Any, Literal, Self
 
 from anyenv.signals import Signal
-from pydantic_ai import RunContext
+from pydantic_ai import ModelRetry, RunContext
 
 from agentpool.log import get_logger
 from agentpool.tools.base import Tool
@@ -190,7 +190,19 @@ class ResourceProvider(ABC):
                     tool_call_id=ctx.tool_call_id,
                     tool_input=kwargs.copy(),
                 )
-                sig_bound = sig.bind_partial(*args, **kwargs)
+                try:
+                    sig_bound = sig.bind_partial(*args, **kwargs)
+                except TypeError as e:
+                    valid_params = [
+                        name
+                        for name, p in sig.parameters.items()
+                        if name not in (agent_ctx_param, run_ctx_param)
+                    ]
+                    msg = str(e)
+                    raise ModelRetry(
+                        f"Tool '{tool.name}' called with invalid arguments: {msg}. "
+                        f"Accepted parameters: {valid_params}"
+                    ) from e
                 sig_bound.arguments[agent_ctx_param] = agent_ctx
                 if run_ctx_param is not None:
                     sig_bound.arguments[run_ctx_param] = ctx

@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Final
 import uuid
 
 from agentpool.agents.context import AgentRunContext
-from agentpool.agents.events import SessionResumeEvent
+from agentpool.agents.events import SessionResumeEvent, StreamCompleteEvent
 from agentpool.agents.native_agent.checkpoint import CheckpointData
 from agentpool.log import get_logger
 from agentpool.messaging import ChatMessage
@@ -732,7 +732,16 @@ class SessionController:
                 # AgentContext.internal_fs is visible to pool.get_agent() callers.
                 agent._internal_fs = base_agent._internal_fs
                 await agent.__aenter__()
-                # Add pool-level providers to per-session agent
+                # Load conversation history into per-session agent from storage.
+                # Do NOT copy from shared base_agent to avoid cross-session pollution.
+                try:
+                    await agent.load_session(session_id)
+                except Exception:
+                    logger.exception(
+                        "Failed to load session for per-session agent",
+                        session_id=session_id,
+                    )
+                   # Add pool-level providers to per-session agent
                 # (same as shared agents get in AgentPool.__aenter__)
                 if self.pool is not None:
                     agent.tools.add_provider(self.pool.mcp.get_aggregating_provider())
@@ -1394,6 +1403,7 @@ class TurnRunner:
         self._turn_timings: list[tuple[float, float]] = []
         self._max_turn_timing_history: int = 100
         self._background_tasks: set[asyncio.Task[Any]] = set()
+        self._cancel_tasks: set[asyncio.Task[Any]] = set()
         self._runs: dict[str, AgentRunContext] = {}
         self._last_error: BaseException | None = None
 
@@ -1446,6 +1456,13 @@ class TurnRunner:
         """
         # Extract input_provider for agent creation, pass remaining kwargs to _run_stream_once
         input_provider = kwargs.pop("input_provider", None)
+        # Set ContextVar for PydanticAI MCP elicitation callback, so that
+        # agent-level MCP servers can resolve the InputProvider at runtime.
+        _elicitation_token = None
+        if input_provider is not None:
+            from agentpool.mcp_server.manager import _current_input_provider
+
+            _elicitation_token = _current_input_provider.set(input_provider)
         agent = await self.sessions.get_or_create_session_agent(
             session_id, input_provider=input_provider
         )
@@ -1487,6 +1504,15 @@ class TurnRunner:
         run_ctx.event_bus = self.event_bus
         run_ctx.session_id = session_id
         _current_run_ctx_var.set(run_ctx)
+
+        if hasattr(agent, "interrupt"):
+
+            def _schedule_interrupt() -> None:
+                task = asyncio.ensure_future(agent.interrupt(run_ctx=run_ctx))
+                self._cancel_tasks.add(task)
+                task.add_done_callback(self._cancel_tasks.discard)
+
+            run_handle._cancel_fn = _schedule_interrupt
 
         if _session is not None and _session.current_run_id is None:
             _session.current_run_id = run_id
@@ -1550,6 +1576,12 @@ class TurnRunner:
         if _session is not None:
             _session._turn_owner_task = asyncio.current_task()
         _in_turn_context.set(True)
+        # Track whether the agent already produced a StreamCompleteEvent.
+        # If it did, subsequent exceptions (e.g. CancelledError from
+        # generator cleanup) are NOT run failures — the agent completed
+        # successfully and the exception is a spurious side effect.
+        stream_completed = False
+
         try:
             try:
                 # Process prompts and handle injections/queued prompts
@@ -1565,11 +1597,15 @@ class TurnRunner:
                         _skip_pool=True,
                         **stream_kwargs,
                     ):
+                        if isinstance(event, StreamCompleteEvent):
+                            stream_completed = True
                         await self._publish_event(session_id, event)
                 else:
                     async for event in agent._run_stream_once(
                         run_ctx, *prompts, session_id=session_id, **stream_kwargs
                     ):
+                        if isinstance(event, StreamCompleteEvent):
+                            stream_completed = True
                         await self._publish_event(session_id, event)
 
                 # After _run_stream_once completes, handle unconsumed injections.
@@ -1589,11 +1625,15 @@ class TurnRunner:
                                 _skip_pool=True,
                                 **stream_kwargs,
                             ):
+                                if isinstance(event, StreamCompleteEvent):
+                                    stream_completed = True
                                 await self._publish_event(session_id, event)
                         else:
                             async for event in agent._run_stream_once(
                                 run_ctx, *current_prompts, session_id=session_id, **stream_kwargs
                             ):
+                                if isinstance(event, StreamCompleteEvent):
+                                    stream_completed = True
                                 await self._publish_event(session_id, event)
                         run_ctx.injection_manager.flush_pending_to_queue()
                 elif run_ctx.injection_manager.has_pending():
@@ -1606,6 +1646,25 @@ class TurnRunner:
             except RunAbortedError:
                 logger.debug("Run aborted by user", session_id=session_id)
                 # Don't mark run as failed — this is user-initiated cancellation
+                raise
+            except (Exception, asyncio.CancelledError) as exc:
+                # Only mark as failed if the agent did NOT already complete.
+                # A CancelledError after StreamCompleteEvent is a spurious
+                # side effect of generator cleanup, not a real failure.
+                if not stream_completed:
+                    if run_handle is not None and run_handle.status not in (
+                        RunStatus.completed,
+                        RunStatus.failed,
+                        RunStatus.checkpointed,
+                    ):
+                        run_handle.fail(exception=exc, event_bus=self.event_bus)
+                else:
+                    logger.debug(
+                        "Suppressed RunFailedEvent after StreamCompleteEvent",
+                        session_id=session_id,
+                        exc_type=type(exc).__name__,
+                        exc_repr=repr(exc),
+                    )
                 raise
             except (Exception, asyncio.CancelledError) as exc:
                 if run_handle is not None and run_handle.status not in (
@@ -1630,6 +1689,11 @@ class TurnRunner:
 
             self._runs.pop(run_ctx.run_id, None)
             _current_run_ctx_var.set(None)
+            # Reset elicitation InputProvider ContextVar
+            if _elicitation_token is not None:
+                from agentpool.mcp_server.manager import _current_input_provider
+
+                _current_input_provider.reset(_elicitation_token)
             if _session is not None:
                 _session._turn_owner_task = None
             _in_turn_context.set(False)

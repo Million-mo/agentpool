@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Annotated, Literal, Self
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Self
 
 from pydantic import ConfigDict, Field, HttpUrl, model_validator
 from schemez import Schema
@@ -61,6 +61,10 @@ class BaseMCPServerConfig(Schema):
 
     enabled: bool = Field(default=True, title="Server enabled")
     """Whether this server is currently enabled."""
+
+    lazy: bool = Field(default=False, title="Lazy connection")
+    """If True, defer MCP server connection until first access (tool/skill/prompt/resource).
+    Reduces pool startup time when many MCP servers are configured."""
 
     env: dict[str, str] | None = Field(default=None, title="Environment variables")
     """Environment variables to pass to the server process."""
@@ -136,8 +140,17 @@ class BaseMCPServerConfig(Schema):
         env["PYTHONIOENCODING"] = "utf-8"
         return env
 
-    def to_pydantic_ai(self) -> MCPServer:
-        """Convert to pydantic-ai MCP server instance."""
+    def to_pydantic_ai(
+        self,
+        elicitation_callback: Any | None = None,
+    ) -> MCPServer:
+        """Convert to pydantic-ai MCP server instance.
+
+        Args:
+            elicitation_callback: Optional MCP elicitation callback
+                (``ElicitationFnT``) to handle ``elicitation/create``
+                requests from the server.
+        """
         raise NotImplementedError
 
     @property
@@ -233,7 +246,9 @@ class StdioMCPServerConfig(BaseMCPServerConfig):
             timeout=self.timeout,
         )
 
-    def to_pydantic_ai(self) -> MCPServerStdio:
+    def to_pydantic_ai(
+        self, elicitation_callback: Any | None = None
+    ) -> MCPServerStdio:
         """Convert to pydantic-ai MCPServerStdio instance."""
         from pydantic_ai.mcp import MCPServerStdio
 
@@ -243,6 +258,7 @@ class StdioMCPServerConfig(BaseMCPServerConfig):
             env=self.get_env_vars() if self.env else None,
             id=self.name,
             timeout=self.timeout,
+            elicitation_callback=elicitation_callback,
         )
 
 
@@ -300,12 +316,17 @@ class SSEMCPServerConfig(BaseMCPServerConfig):
             timeout=self.timeout,
         )
 
-    def to_pydantic_ai(self) -> MCPServerSSE:
+    def to_pydantic_ai(
+        self, elicitation_callback: Any | None = None
+    ) -> MCPServerSSE:
         """Convert to pydantic-ai MCPServerSSE instance."""
         from pydantic_ai.mcp import MCPServerSSE
 
         url = str(self.url)
-        return MCPServerSSE(url=url, headers=self.headers, id=self.name, timeout=self.timeout)
+        return MCPServerSSE(
+            url=url, headers=self.headers, id=self.name, timeout=self.timeout,
+            elicitation_callback=elicitation_callback,
+        )
 
 
 class StreamableHTTPMCPServerConfig(BaseMCPServerConfig):
@@ -362,7 +383,9 @@ class StreamableHTTPMCPServerConfig(BaseMCPServerConfig):
             timeout=self.timeout,
         )
 
-    def to_pydantic_ai(self) -> MCPServerStreamableHTTP:
+    def to_pydantic_ai(
+        self, elicitation_callback: Any | None = None
+    ) -> MCPServerStreamableHTTP:
         """Convert to pydantic-ai MCPServerStreamableHTTP instance."""
         from pydantic_ai.mcp import MCPServerStreamableHTTP
 
@@ -371,6 +394,7 @@ class StreamableHTTPMCPServerConfig(BaseMCPServerConfig):
             headers=self.headers,
             id=self.name,
             timeout=self.timeout,
+            elicitation_callback=elicitation_callback,
         )
 
 
@@ -419,7 +443,9 @@ class AcpMCPServerConfig(BaseMCPServerConfig):
             timeout=self.timeout,
         )
 
-    def to_pydantic_ai(self) -> MCPServer:
+    def to_pydantic_ai(
+        self, elicitation_callback: Any | None = None
+    ) -> MCPServer:
         """Convert to pydantic-ai MCP server instance.
 
         ACP transport is handled by the AcpMcpTransport, not pydantic-ai directly.
