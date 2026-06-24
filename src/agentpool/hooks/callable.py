@@ -36,6 +36,7 @@ class CallableHook(Hook):
         timeout: float = 60.0,
         enabled: bool = True,
         arguments: dict[str, Any] | None = None,
+        input_match: dict[str, str] | None = None,
     ):
         """Initialize callable hook.
 
@@ -46,8 +47,12 @@ class CallableHook(Hook):
             timeout: Maximum execution time in seconds.
             enabled: Whether this hook is active.
             arguments: Additional keyword arguments for the callable.
+            input_match: Optional regex patterns to match ``tool_input`` fields.
         """
-        super().__init__(event=event, matcher=matcher, timeout=timeout, enabled=enabled)
+        super().__init__(
+            event=event, matcher=matcher, timeout=timeout,
+            enabled=enabled, input_match=input_match,
+        )
         self._callable: Callable[..., HookResult | None] | None = None
         self._import_path: str | None = None
 
@@ -74,6 +79,10 @@ class CallableHook(Hook):
     ) -> HookResult:
         """Execute the callable.
 
+        Exceptions propagate to ``AgentHooks._run_hooks`` which uses
+        ``return_exceptions=True`` and reports them in the ``errors`` log.
+        The aggregate semantics remain "allow" (failed hooks don't block).
+
         Args:
             input_data: The hook input data.
             env: Unused. Callable hooks always run in-process.
@@ -81,35 +90,32 @@ class CallableHook(Hook):
         Returns:
             Hook result from callable.
         """
-        try:
-            fn = self.callable
-            # Merge input data with additional arguments
-            kwargs = {**dict(input_data), **self.arguments}
-            # Execute with timeout
-            if asyncio.iscoroutinefunction(fn):
-                result = await asyncio.wait_for(fn(**kwargs), timeout=self.timeout)
-            else:
-                # Run sync function in executor
-                loop = asyncio.get_event_loop()
-                result = await asyncio.wait_for(
-                    loop.run_in_executor(None, lambda: fn(**kwargs)),
-                    timeout=self.timeout,
-                )
+        fn = self.callable
+        kwargs = {**dict(input_data), **self.arguments}
 
-            # Normalize result
-            if result is None:
-                return HookResult(decision="allow")
+        # try:
+        if asyncio.iscoroutinefunction(fn):
+            result = await asyncio.wait_for(fn(**kwargs), timeout=self.timeout)
+        else:
+            loop = asyncio.get_event_loop()
+            result = await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: fn(**kwargs)),
+                timeout=self.timeout,
+            )
 
-            return _normalize_result(result)
-
-        except TimeoutError:
-            fn_path = self._import_path or str(self._callable)
-            logger.exception("Hook callable timed out", timeout=self.timeout, callable=fn_path)
+        if result is None:
             return HookResult(decision="allow")
-        except Exception as e:
-            fn_path = self._import_path or str(self._callable)
-            logger.exception("Hook callable failed", callable=fn_path)
-            return HookResult(decision="allow", reason=str(e))
+
+        return _normalize_result(result)
+
+        # except TimeoutError:
+        #     fn_path = self._import_path or str(self._callable)
+        #     logger.exception("Hook callable timed out", timeout=self.timeout, callable=fn_path)
+        #     return HookResult(decision="allow")
+        # except Exception as e:
+        #     fn_path = self._import_path or str(self._callable)
+        #     logger.exception("Hook callable failed", callable=fn_path)
+        #     return HookResult(decision="allow", reason=str(e))
 
 
 def _normalize_result(result: Any) -> HookResult:
@@ -132,6 +138,8 @@ def _normalize_result(result: Any) -> HookResult:
                 normalized["modified_input"] = result["modified_input"]
             if "additional_context" in result:
                 normalized["additional_context"] = result["additional_context"]
+            if "modified_output" in result:
+                normalized["modified_output"] = result["modified_output"]
             if "continue_" in result:
                 normalized["continue_"] = result["continue_"]
             return normalized

@@ -7,6 +7,7 @@ from asyncio import Lock
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from dataclasses import dataclass, field
 import os
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Self, overload
 
 from anyenv import ProcessManager
@@ -32,7 +33,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
     from contextlib import AbstractAsyncContextManager
     from types import TracebackType
-    from typing import Any
 
     from upathtools import JoinablePathLike, UPath
 
@@ -203,6 +203,17 @@ class AgentPool[TPoolDeps = None](BaseRegistry[NodeName, MessageNode[Any, Any]])
             self._skill_commands: SkillCommandRegistry | None = None
             self._skill_resolver: SkillURIResolver | None = None
             self._skill_provider: AggregatingResourceProvider | None = None
+            skill_scopes = getattr(self.manifest, "model_extra", None) or {}
+            raw_skill_scopes = skill_scopes.get("_skill_scopes", {})
+            self._default_skill_scope = str(raw_skill_scopes.get("default_scope", "host"))
+            self._node_skill_scopes = {
+                str(name): str(scope) for name, scope in raw_skill_scopes.get("nodes", {}).items()
+            }
+            self._skill_scope_paths = tuple(
+                (str(item.get("scope", self._default_skill_scope)), str(item.get("path", "")))
+                for item in raw_skill_scopes.get("paths", [])
+                if isinstance(item, dict) and item.get("path")
+            )
             self.prompt_manager = PromptManager(self.manifest.prompts)
             # Main agent name: explicit param > manifest.default_agent > None (will use first)
             self._main_agent_name = main_agent_name or self.manifest.default_agent
@@ -224,6 +235,7 @@ class AgentPool[TPoolDeps = None](BaseRegistry[NodeName, MessageNode[Any, Any]])
                 )
                 self.register(name, agent)
 
+            logger.debug("AgentPool: registered %d agents: %s", len(self.all_agents), list(self.all_agents.keys()))
             self._create_teams()
             if connect_nodes:
                 self._connect_nodes()
@@ -497,7 +509,6 @@ class AgentPool[TPoolDeps = None](BaseRegistry[NodeName, MessageNode[Any, Any]])
         if self._skill_provider is not None:
             self._skill_provider.add_provider(provider)
         else:
-            # Buffer for later registration when _setup_skills_provider runs
             if not hasattr(self, "_pending_skill_providers"):
                 self._pending_skill_providers: list[ResourceProvider] = []
             self._pending_skill_providers.append(provider)
@@ -519,11 +530,65 @@ class AgentPool[TPoolDeps = None](BaseRegistry[NodeName, MessageNode[Any, Any]])
         if self._skill_resolver is not None:
             self._skill_resolver.unregister_provider(provider.name)
 
-        # Also remove from pending buffer if it was buffered
         pending: list[ResourceProvider] = getattr(self, "_pending_skill_providers", [])
         if pending:
             with suppress(ValueError):
                 pending.remove(provider)
+
+    def skill_scope_for_node(self, node_name: str | None) -> str:
+        """Return the package-level skill scope for a node."""
+        if node_name is None:
+            return self._default_skill_scope
+        return self._node_skill_scopes.get(node_name, self._default_skill_scope)
+
+    def skill_scope_for_skill(self, skill: Any) -> str:
+        """Return the package-level skill scope for a skill."""
+        skill_path = getattr(skill, "skill_path", None)
+        if skill_path is None or type(skill_path) is PurePosixPath:
+            return self._default_skill_scope
+
+        normalized_skill_path = self._normalize_skill_scope_path(skill_path)
+        for scope, base_path in self._skill_scope_paths:
+            normalized_base_path = self._normalize_skill_scope_path(base_path)
+            if normalized_skill_path == normalized_base_path or normalized_skill_path.startswith(
+                f"{normalized_base_path}/"
+            ):
+                return scope
+        return self._default_skill_scope
+
+    def is_skill_visible_to_node(self, skill: Any, node_name: str | None) -> bool:
+        """Return whether a skill is visible to a node's package scope."""
+        return self.skill_scope_for_skill(skill) == self.skill_scope_for_node(node_name)
+
+    async def get_skill_instructions_for_node(self, skill_name: str, node_name: str) -> str:
+        """Load skill instructions using a target node's package scope."""
+        from agentpool.skills.exceptions import SkillNotFoundError
+
+        if self._skill_resolver is not None:
+            skill = await self._skill_resolver.resolve(skill_name)
+            if not self.is_skill_visible_to_node(skill, node_name):
+                raise SkillNotFoundError(skill_name)
+            if type(skill.skill_path) is PurePosixPath:
+                if self._skill_provider is None:
+                    raise SkillNotFoundError(skill_name)
+                return await self._skill_provider.get_skill_instructions(skill.name)
+            return skill.load_instructions()
+
+        if self._skill_provider is None:
+            raise SkillNotFoundError(skill_name)
+
+        for skill in await self._skill_provider.get_skills():
+            if skill.name == skill_name and self.is_skill_visible_to_node(skill, node_name):
+                return await self._skill_provider.get_skill_instructions(skill.name)
+        raise SkillNotFoundError(skill_name)
+
+    @staticmethod
+    def _normalize_skill_scope_path(path: Any) -> str:
+        try:
+            raw_path = os.fspath(path)
+        except TypeError:
+            raw_path = str(path)
+        return os.path.normcase(str(Path(raw_path).resolve())).replace("\\", "/").rstrip("/")
 
     async def _setup_skills_provider(self) -> None:
         """Initialize the skill provider and resolver.
@@ -660,6 +725,7 @@ class AgentPool[TPoolDeps = None](BaseRegistry[NodeName, MessageNode[Any, Any]])
         name: str | None = None,
         description: str | None = None,
         shared_prompt: str | None = None,
+        member_timeout: float | None = None,
     ) -> Team[TDeps]: ...
 
     @overload
@@ -670,6 +736,7 @@ class AgentPool[TPoolDeps = None](BaseRegistry[NodeName, MessageNode[Any, Any]])
         name: str | None = None,
         description: str | None = None,
         shared_prompt: str | None = None,
+        member_timeout: float | None = None,
     ) -> Team[Any]: ...
 
     def create_team(
@@ -679,6 +746,7 @@ class AgentPool[TPoolDeps = None](BaseRegistry[NodeName, MessageNode[Any, Any]])
         name: str | None = None,
         description: str | None = None,
         shared_prompt: str | None = None,
+        member_timeout: float | None = None,
     ) -> Team[Any]:
         """Create a group from agent names or instances.
 
@@ -687,10 +755,14 @@ class AgentPool[TPoolDeps = None](BaseRegistry[NodeName, MessageNode[Any, Any]])
             name: Optional name for the team
             description: Optional description for the team
             shared_prompt: Optional prompt for all agents
+            member_timeout: Per-member timeout in seconds (``None`` = no limit)
         """
         from agentpool.delegation.team import Team
 
-        team = Team(agents, name=name, description=description, shared_prompt=shared_prompt)
+        team = Team(
+            agents, name=name, description=description,
+            shared_prompt=shared_prompt, member_timeout=member_timeout,
+        )
         if name:
             self[name] = team
         return team
@@ -805,18 +877,19 @@ class AgentPool[TPoolDeps = None](BaseRegistry[NodeName, MessageNode[Any, Any]])
         empty_teams: dict[str, BaseTeam[Any, Any]] = {}
         for name, config in self.manifest.teams.items():
             empty_teams[name] = config.get_team([], name=name)
-        # Phase 2: Resolve members
+        # Phase 2: Resolve members (supports both str and TeamMemberConfig)
         for name, config in self.manifest.teams.items():
             team = empty_teams[name]
             members: list[MessageNode[Any, Any]] = []
             agents = self.all_agents
             for member in config.members:
-                if member in agents:
-                    members.append(agents[member])
-                elif member in empty_teams:
-                    members.append(empty_teams[member])
+                member_name = config.get_member_name(member)
+                if member_name in agents:
+                    members.append(agents[member_name])
+                elif member_name in empty_teams:
+                    members.append(empty_teams[member_name])
                 else:
-                    raise ValueError(f"Unknown team member: {member}")
+                    raise ValueError(f"Unknown team member: {member_name}")
             team.nodes.extend(members)
             self[name] = team
 

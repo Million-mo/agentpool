@@ -8,8 +8,10 @@ from textwrap import dedent
 from typing import TYPE_CHECKING
 
 import pytest
+from upathtools import UPath
 
 from agentpool.skills.registry import SkillsRegistry
+from agentpool.skills.skill import Skill
 
 
 if TYPE_CHECKING:
@@ -58,3 +60,29 @@ def isolated_registry(temp_skills_dir):
         yield registry
     finally:
         SkillsRegistry.DEFAULT_SKILL_PATHS = original_paths
+
+
+def test_skill_load_instructions_preserves_domain_placeholders(tmp_path: Path) -> None:
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+    fta_review_dir = skills_dir / "fta-review"
+    fta_review_dir.mkdir()
+
+    (fta_review_dir / "SKILL.md").write_text(
+        dedent("""
+        ---
+        name: fta-review
+        description: Review an FTA tree
+        ---
+
+        # FTA Review
+
+        {{ reviewer_skill_catalog }}
+        """).strip(),
+        encoding="utf-8",
+    )
+
+    instructions = Skill.from_skill_dir(UPath(fta_review_dir)).load_instructions()
+
+    assert "{{ reviewer_skill_catalog }}" in instructions
+    assert "fta-causal-path-review" not in instructions

@@ -110,6 +110,15 @@ class SkillsInstructionProvider(ResourceProvider):
         if not skill_items:
             return ""
 
+        node_name = getattr(agent_ctx.node, "name", None)
+        visibility_checker = getattr(agent_ctx.pool, "is_skill_visible_to_node", None)
+        if visibility_checker is not None:
+            skill_items = [
+                (name, skill) for name, skill in skill_items if visibility_checker(skill, node_name)
+            ]
+            if not skill_items:
+                return ""
+
         if max_skills is not None:
             skill_items = skill_items[:max_skills]
 

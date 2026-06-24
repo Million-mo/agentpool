@@ -35,6 +35,9 @@ class HookInput(TypedDict, total=False):
     prompt: str
     result: Any
 
+    # Agent context (available in tool-use hooks when running inside an agent)
+    agent_context: Any
+
 
 class HookResult(TypedDict, total=False):
     """Result returned from hook execution."""
@@ -51,6 +54,15 @@ class HookResult(TypedDict, total=False):
     additional_context: str
     """Context to inject into conversation."""
 
+    modified_output: Any
+    """Replacement for tool output in post_tool_use hooks.
+
+    This is optional. When omitted, the original tool output is preserved.
+    When set, the tool's return value is replaced entirely rather than merged
+    or appended.
+    Takes precedence over ``additional_context``.
+    """
+
     continue_: bool
     """Whether to continue execution. False = stop."""
 
@@ -64,6 +76,7 @@ class Hook(ABC):
         matcher: str | None = None,
         timeout: float = 60.0,
         enabled: bool = True,
+        input_match: dict[str, str] | None = None,
     ) -> None:
         """Initialize hook.
 
@@ -72,12 +85,17 @@ class Hook(ABC):
             matcher: Regex pattern for matching (e.g., tool names). None matches all.
             timeout: Maximum execution time in seconds.
             enabled: Whether this hook is active.
+            input_match: Optional regex patterns to match against ``tool_input``
+                fields.  Every pattern must match for the hook to trigger.
         """
         self.event = event
         self.matcher = matcher
         self.timeout = timeout
         self.enabled = enabled
         self._pattern = re.compile(matcher) if matcher and matcher != "*" else None
+        self._input_matchers: dict[str, re.Pattern[str]] | None = (
+            {k: re.compile(v) for k, v in input_match.items()} if input_match else None
+        )
 
     def matches(self, input_data: HookInput) -> bool:
         """Check if this hook should run for the given input.
@@ -91,16 +109,20 @@ class Hook(ABC):
         if not self.enabled:
             return False
 
-        # No pattern means match all
-        if self._pattern is None:
-            return True
-
         # For tool events, match against tool_name
-        if self.event in ("pre_tool_use", "post_tool_use"):
+        if self._pattern is not None and self.event in ("pre_tool_use", "post_tool_use"):
             tool_name = input_data.get("tool_name", "")
-            return bool(self._pattern.search(tool_name))
+            if not self._pattern.search(tool_name):
+                return False
 
-        # For run events, pattern matching doesn't apply (no tool name to match)
+        # Match against tool_input fields (all patterns must match)
+        if self._input_matchers is not None:
+            tool_input = input_data.get("tool_input") or {}
+            for key, pattern in self._input_matchers.items():
+                value = str(tool_input.get(key, ""))
+                if not pattern.search(value):
+                    return False
+
         return True
 
     @abstractmethod

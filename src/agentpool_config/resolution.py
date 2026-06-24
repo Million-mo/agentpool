@@ -17,6 +17,7 @@ non-conflicting settings from all configs are preserved.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -27,6 +28,8 @@ import yamling
 
 if TYPE_CHECKING:
     from upathtools import JoinablePathLike
+
+logger = logging.getLogger(__name__)
 
 
 type ConfigSource = Literal["builtin", "global", "custom", "project", "explicit"]
@@ -178,6 +181,109 @@ def _load_yaml_data(path: JoinablePathLike) -> dict[str, Any]:
     return data
 
 
+def _resolve_tool_schema_paths(data: dict[str, Any], base_dir: str) -> None:
+    """Resolve relative ``kw_args.schemas`` paths in agent tool declarations.
+
+    Mutates *data* in place.  Walks ``agents.<name>.tools[].kw_args.schemas``
+    and converts relative paths to absolute ones rooted at *base_dir*.
+    """
+    agents = data.get("agents")
+    if not isinstance(agents, dict):
+        return
+    for agent_cfg in agents.values():
+        if not isinstance(agent_cfg, dict):
+            continue
+        tools = agent_cfg.get("tools")
+        if not isinstance(tools, list):
+            continue
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            kw_args = tool.get("kw_args")
+            if not isinstance(kw_args, dict):
+                continue
+            schemas = kw_args.get("schemas")
+            if not isinstance(schemas, dict):
+                continue
+            for key, val in schemas.items():
+                val = str(val)
+                if not os.path.isabs(val):
+                    schemas[key] = os.path.join(base_dir, val)
+
+
+def _load_package_yaml(ref: str) -> dict[str, Any]:
+    """Load a YAML config fragment from an installed Python package.
+
+    Args:
+        ref: Reference in ``package.path:resource.yaml`` form (colon-separated,
+             following the Python entry-point convention).
+
+    Returns:
+        Parsed YAML data with any ``skills.paths`` resolved to absolute
+        paths within the package.
+
+    Raises:
+        ValueError: If the reference format is invalid or the resource cannot be loaded.
+    """
+    from importlib.resources import files as pkg_files
+
+    if ":" not in ref:
+        msg = f"Invalid package config reference {ref!r}: expected 'package.path:resource.yaml'"
+        raise ValueError(msg)
+
+    pkg, resource = ref.rsplit(":", 1)
+    logger.debug("include_packages: loading %s from package %s", resource, pkg)
+    pkg_root = pkg_files(pkg)
+    try:
+        content = (pkg_root / resource).read_text(encoding="utf-8")
+    except Exception as exc:
+        raise ValueError(f"Cannot load {resource!r} from package {pkg!r}: {exc}") from exc
+
+    import yaml
+
+    data = yaml.safe_load(content)
+    if not isinstance(data, dict):
+        msg = f"Package config {ref!r} must be a mapping, got {type(data).__name__}"
+        raise TypeError(msg)
+
+    # Resolve skills.paths relative to the top-level package root.
+    # ``pkg`` may be a sub-package (e.g. "rebuttal_agent.config"), but
+    # skills live under the top-level package (e.g. "rebuttal_agent/skills/").
+    skills = data.get("skills")
+    if isinstance(skills, dict) and "paths" in skills:
+        top_pkg = pkg.split(".")[0]
+        top_root = pkg_files(top_pkg)
+        resolved: list[str] = []
+        for p in skills["paths"]:
+            p = str(p)
+            if not os.path.isabs(p):
+                p = str(top_root / p)
+            resolved.append(p)
+        skills["paths"] = resolved
+
+    # Resolve kw_args.schemas paths relative to the YAML file's directory
+    # (``pkg_root``).  Without this, relative schema paths like
+    # ``./tools/foo.yaml`` would resolve against the host project's
+    # CONFIG_DIR at provider init time instead of the package directory.
+    _resolve_tool_schema_paths(data, str(pkg_root))
+
+    return data
+
+
+def _package_scope_from_ref(ref: str) -> str:
+    pkg, _resource = ref.rsplit(":", 1)
+    return pkg.split(".", maxsplit=1)[0]
+
+
+def _pop_nested(data: dict[str, Any], *keys: str) -> Any:
+    """Pop a deeply nested key from a dict, returning the removed value."""
+    for key in keys[:-1]:
+        data = data.get(key, {})
+        if not isinstance(data, dict):
+            return None
+    return data.pop(keys[-1], None) if isinstance(data, dict) else None
+
+
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """Deep merge two dictionaries.
 
@@ -234,6 +340,8 @@ def resolve_config(  # noqa: PLR0915
     layers: list[ConfigLayer] = []
     merged_data: dict[str, Any] = {}
     primary_path: str | None = None
+    skill_scope_paths: list[dict[str, str]] = []
+    node_skill_scopes: dict[str, str] = {}
 
     # Check environment variable overrides for include flags
     if os.environ.get(ENV_DISABLE_GLOBAL):
@@ -301,7 +409,47 @@ def resolve_config(  # noqa: PLR0915
         merged_data = _deep_merge(merged_data, data)
         primary_path = str(explicit_path)
 
-    # 5. Fallback config - ONLY if no agents defined in any layer
+    # 5. Package includes — load agent/team fragments from installed Python packages.
+    #    Merged as a base layer (lowest precedence): host config wins on conflicts.
+    #    skills.paths from packages are APPENDED (not replaced) so both host and
+    #    package skills are discoverable.
+    package_refs: list[str] = merged_data.pop("include_packages", None) or []
+    host_skill_paths = merged_data.get("skills", {}).get("paths", [])
+    if isinstance(host_skill_paths, list):
+        skill_scope_paths.extend({"scope": "host", "path": str(path)} for path in host_skill_paths)
+    if package_refs:
+        logger.debug("include_packages: processing %d refs: %s", len(package_refs), package_refs)
+    for ref in package_refs:
+        try:
+            data = _load_package_yaml(ref)
+            package_scope = _package_scope_from_ref(ref)
+            for section in ("agents", "file_agents", "teams"):
+                items = data.get(section)
+                if isinstance(items, dict):
+                    node_skill_scopes.update({str(name): package_scope for name in items})
+            # Extract package skill paths before deep merge (which would drop them)
+            pkg_skill_paths = _pop_nested(data, "skills", "paths") or []
+            layer = ConfigLayer("builtin", f"package://{ref}", data)
+            layers.insert(0, layer)
+            merged_data = _deep_merge(data, merged_data)
+            # Append package skill paths so they coexist with host paths
+            if pkg_skill_paths:
+                skill_scope_paths.extend(
+                    {"scope": package_scope, "path": str(path)} for path in pkg_skill_paths
+                )
+                merged_data.setdefault("skills", {}).setdefault("paths", []).extend(pkg_skill_paths)
+            logger.debug("include_packages: merged %s successfully", ref)
+        except Exception:  # noqa: BLE001
+            logger.warning("Failed to load package config: %s", ref, exc_info=True)
+
+    if skill_scope_paths or node_skill_scopes:
+        merged_data["_skill_scopes"] = {
+            "paths": skill_scope_paths,
+            "nodes": node_skill_scopes,
+            "default_scope": "host",
+        }
+
+    # 6. Fallback config - ONLY if no agents defined in any layer
     # This ensures built-in defaults don't pollute user configurations
     has_agents = bool(merged_data.get("agents")) or bool(merged_data.get("file_agents"))
     if not has_agents and fallback_config is not None:

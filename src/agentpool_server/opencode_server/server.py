@@ -34,6 +34,7 @@ from agentpool_server.opencode_server.routes import (
 )
 from agentpool_server.opencode_server.skill_bridge import OpenCodeSkillBridge
 from agentpool_server.opencode_server.state import ServerState
+from agentpool_server.opencode_server.todo_utils import build_opencode_todos
 
 
 if TYPE_CHECKING:
@@ -166,11 +167,8 @@ def create_app(*, agent: BaseAgent[Any, Any], working_dir: str | None = None) ->
         """Broadcast todo updates to all active sessions."""
         from agentpool_server.opencode_server.models.events import Todo, TodoUpdatedEvent
 
-        # Convert tracker entries to OpenCode Todo models
-        todos = [
-            Todo(id=e.id, content=e.content, status=e.status, priority=e.priority)
-            for e in tracker.entries
-        ]
+        # Convert tracker entries to OpenCode Todo models.
+        todos = build_opencode_todos(tracker, Todo)
         # Broadcast to all active sessions
         for session_id in state.sessions:
             event = TodoUpdatedEvent.create(session_id=session_id, todos=todos)

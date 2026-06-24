@@ -7,6 +7,7 @@ nodes to run team members in parallel and collect their outputs.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from time import perf_counter
 from typing import TYPE_CHECKING, Any, Literal
@@ -52,6 +53,24 @@ class _TeamGraphState:
     shared_prompt: str | None = None
     """Optional prompt prepended to all member inputs."""
 
+    member_prompts: dict[str, list[Any]] = field(default_factory=dict)
+    """Resolved prompt list per member name."""
+
+    child_session_ids: dict[str, str] = field(default_factory=dict)
+    """Session id allocated for each member in this team run."""
+
+    parent_session_id: str | None = None
+    """Parent session id for scoped team member runs."""
+
+    member_timeout: float | None = None
+    """Maximum seconds a member may run before being cancelled."""
+
+    member_retry_attempts: int = 0
+    """Additional attempts for non-timeout runtime member failures."""
+
+    member_retry_delay: float = 0.0
+    """Seconds to wait before retrying a failed member."""
+
     execution_talks: list[Talk[Any]] = field(default_factory=list)
     """Talk connections for tracking execution stats."""
 
@@ -82,13 +101,47 @@ def _make_member_step(
         ctx: StepContext[_TeamGraphState, None, Any],
     ) -> _MemberOutput:
         state = ctx.state
-        final_prompt = list(state.prompts)
-        if state.shared_prompt:
+        final_prompt = state.member_prompts.get(node.name)
+        if final_prompt is None:
+            final_prompt = list(state.prompts)
+        if state.shared_prompt and node.name not in state.member_prompts:
             final_prompt.insert(0, state.shared_prompt)
 
         try:
             start = perf_counter()
-            message = await node.run(*final_prompt, **state.kwargs)
+            run_kwargs = dict(state.kwargs)
+            if child_session_id := state.child_session_ids.get(node.name):
+                run_kwargs["session_id"] = child_session_id
+            if state.parent_session_id:
+                run_kwargs["parent_session_id"] = state.parent_session_id
+            attempts = max(1, state.member_retry_attempts + 1)
+            message = None
+            for attempt_index in range(attempts):
+                try:
+                    coro = node.run(*final_prompt, **run_kwargs)
+                    message = (
+                        await asyncio.wait_for(coro, timeout=state.member_timeout)
+                        if state.member_timeout is not None
+                        else await coro
+                    )
+                    break
+                except TimeoutError:
+                    raise
+                except RuntimeError as exc:
+                    if attempt_index >= attempts - 1:
+                        raise
+                    logger.warning(
+                        "Team member failed; retrying",
+                        member=node.name,
+                        attempt=attempt_index + 1,
+                        max_attempts=attempts,
+                        error=str(exc),
+                    )
+                    if state.member_retry_delay > 0:
+                        await asyncio.sleep(state.member_retry_delay)
+            if message is None:
+                msg = f"Member {node.name!r} returned no message"
+                raise RuntimeError(msg)
             timing = perf_counter() - start
             response = AgentResponse(agent_name=node.name, message=message, timing=timing)
 
@@ -101,6 +154,19 @@ def _make_member_step(
                 talk._stats.messages.append(message)
 
             return _MemberOutput(agent_name=node.name, response=response)
+
+        except TimeoutError as exc:
+            logger.warning(
+                "Team member timed out",
+                member=node.name,
+                timeout=state.member_timeout,
+            )
+            if state.error_mode == "fail_all":
+                raise
+            timeout = state.member_timeout
+            error = TimeoutError(f"Member {node.name!r} exceeded {timeout}s deadline")
+            error.__cause__ = exc
+            return _MemberOutput(agent_name=node.name, exception=error)
 
         except Exception as exc:
             if state.error_mode == "fail_all":
@@ -193,4 +259,5 @@ async def run_team_graph(
         responses=responses,
         start_time=start_time,
         errors=errors,
+        child_session_ids=state.child_session_ids,
     )

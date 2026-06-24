@@ -56,6 +56,24 @@ ToolKind = Literal[
     "other",
 ]
 
+TERMINAL_TOOL_METADATA_KEY = "agentpool_terminal"
+_TERMINAL_TOOL_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def has_terminal_tool_metadata(metadata: dict[str, str] | None) -> bool:
+    """Return whether tool metadata marks the tool as ending the current run."""
+    if not metadata:
+        return False
+    value = metadata.get(TERMINAL_TOOL_METADATA_KEY)
+    if value is None:
+        return False
+    return value.strip().lower() in _TERMINAL_TOOL_TRUE_VALUES
+
+
+def is_terminal_tool(tool: Tool[Any]) -> bool:
+    """Return whether a tool should terminate the current agent run after completion."""
+    return has_terminal_tool_metadata(tool.metadata)
+
 
 @dataclass
 class ToolResult:
@@ -331,6 +349,23 @@ class Tool[TOutputType = Any]:
         if self.schema_override is None:
             return None
 
+        def apply_schema_override(base_schema: dict[str, Any]) -> dict[str, Any]:
+            if "description" in self.schema_override:
+                base_schema["description"] = self.schema_override["description"]
+            if "parameters" not in self.schema_override:
+                return base_schema
+            override_params = self.schema_override["parameters"]
+            for key, value in override_params.items():
+                if key != "properties":
+                    base_schema[key] = value
+            if "properties" in override_params:
+                for param_name, param_def in override_params["properties"].items():
+                    if param_name in base_schema.get("properties", {}):
+                        base_schema["properties"][param_name].update(param_def)
+                    else:
+                        base_schema.setdefault("properties", {})[param_name] = param_def
+            return base_schema
+
         # Try primary path with pydantic_ai.function_schema
         try:
             # pydantic-ai function_schema is internal API but needed for schema generation
@@ -352,27 +387,12 @@ class Tool[TOutputType = Any]:
                 )
                 schema = function_schema(func, schema_generator=GenerateJsonSchema)
 
-            # Apply schema_override to generated schema
-            # Merge top-level description
-            if "description" in self.schema_override:
-                schema.json_schema["description"] = self.schema_override["description"]
-
-            if "parameters" in self.schema_override:
-                override_params = self.schema_override["parameters"]
-                # Merge custom parameter definitions (which include descriptions)
-                if "properties" in override_params:
-                    for param_name, param_def in override_params["properties"].items():
-                        if param_name in schema.json_schema.get("properties", {}):
-                            # Update existing parameter with custom description
-                            schema.json_schema["properties"][param_name].update(param_def)
-                        else:
-                            # Add new parameter
-                            schema.json_schema.setdefault("properties", {})[param_name] = param_def
+            apply_schema_override(schema.json_schema)
         except Exception as e:
             # Fallback to schemez if pydantic_ai.function_schema fails
-            from pydantic.errors import PydanticUndefinedAnnotation
+            from pydantic.errors import PydanticSchemaGenerationError, PydanticUndefinedAnnotation
 
-            if isinstance(e, (PydanticUndefinedAnnotation, NameError)):
+            if isinstance(e, (PydanticSchemaGenerationError, PydanticUndefinedAnnotation, NameError)):
                 logger.warning(
                     "pydantic_ai.function_schema failed for %s, falling back to schemez: %s",
                     self.name,
@@ -407,7 +427,7 @@ class Tool[TOutputType = Any]:
             # type: ignore[attr-defined] is needed because schemez is a third-party library
             schema_dump = getattr(schema, "model_dump")()  # noqa: B009, type: ignore[attr-defined]
             # type: ignore[no-any-return] is needed because mypy can't infer the return type
-            return schema_dump["parameters"]  # type: ignore[no-any-return]
+            return apply_schema_override(schema_dump["parameters"])  # type: ignore[no-any-return]
         else:
             return schema.json_schema
 

@@ -153,7 +153,73 @@ async def _load_reference_content(
     return f"\n\n## Reference: {reference_path}\n\n{content}"
 
 
-async def load_skill(  # noqa: PLR0911
+def _node_name_for_scope(ctx: AgentContext, node_name: str | None = None) -> str | None:
+    if node_name is not None:
+        return node_name
+    node = getattr(ctx, "node", None)
+    return getattr(node, "name", None)
+
+
+def _is_skill_visible_to_node(ctx: AgentContext, skill: Skill, node_name: str | None) -> bool:
+    checker = getattr(ctx.pool, "is_skill_visible_to_node", None)
+    if not callable(checker):
+        return True
+    return bool(checker(skill, node_name))
+
+
+def _visible_model_skills(
+    ctx: AgentContext,
+    skills: list[Skill],
+    node_name: str | None,
+) -> list[Skill]:
+    return [
+        skill
+        for skill in skills
+        if not getattr(skill, "disable_model_invocation", False)
+        and _is_skill_visible_to_node(ctx, skill, node_name)
+    ]
+
+
+async def _load_visible_bare_skill(
+    ctx: AgentContext,
+    skill_name: str,
+    node_name: str | None,
+) -> tuple[Skill, str] | None:
+    local_skills = _visible_model_skills(ctx, ctx.pool.skills.list_skills(), node_name)
+    local_skill = next((skill for skill in local_skills if skill.name == skill_name), None)
+    if local_skill is not None:
+        return local_skill, ctx.pool.skills.get_skill_instructions(skill_name)
+
+    skill_provider = getattr(ctx.pool, "skill_provider", None)
+    if skill_provider is None:
+        return None
+
+    providers = getattr(skill_provider, "providers", None)
+    provider_list = list(providers) if isinstance(providers, (list, tuple)) else [skill_provider]
+    for provider in provider_list:
+        provider_skills = await provider.get_skills()
+        visible_provider_skills = _visible_model_skills(ctx, provider_skills, node_name)
+        provider_skill = next(
+            (skill for skill in visible_provider_skills if skill.name == skill_name),
+            None,
+        )
+        if provider_skill is not None:
+            return provider_skill, await provider.get_skill_instructions(provider_skill.name)
+
+    return None
+
+
+async def load_skill_for_node(
+    ctx: AgentContext,
+    skill_name: str,
+    node_name: str,
+    arguments: str | None = None,
+) -> str:
+    """Load a skill using a target node's package-level skill scope."""
+    return await _load_skill(ctx, skill_name, arguments, node_name=node_name)
+
+
+async def load_skill(
     ctx: AgentContext,
     skill_name: str,
     arguments: str | None = None,
@@ -170,8 +236,20 @@ async def load_skill(  # noqa: PLR0911
     Returns:
         The full skill instructions for execution
     """
+    return await _load_skill(ctx, skill_name, arguments)
+
+
+async def _load_skill(  # noqa: PLR0911, PLR0915
+    ctx: AgentContext,
+    skill_name: str,
+    arguments: str | None = None,
+    *,
+    node_name: str | None = None,
+) -> str:
     if ctx.pool is None:
         return "No agent pool available - skills require pool context"
+
+    requested_node_name = _node_name_for_scope(ctx, node_name)
 
     # Determine if this is a URI or bare skill name
     is_uri = skill_name.startswith("skill://")
@@ -191,6 +269,9 @@ async def load_skill(  # noqa: PLR0911
             skill = await resolver.resolve(skill_name)
         except Exception as e:  # noqa: BLE001
             return f"Failed to resolve skill URI {skill_name!r}: {e}"
+        if not _is_skill_visible_to_node(ctx, skill, requested_node_name):
+            available = await _available_skill_names(ctx, requested_node_name)
+            return f"Skill {resolved.skill_name!r} not found. Available skills: {available}"
 
         # Check for reference path first
         # When a reference file is explicitly requested via URI, load ONLY the
@@ -214,9 +295,7 @@ async def load_skill(  # noqa: PLR0911
         elif isinstance(skill.skill_path, PurePosixPath):
             if ctx.pool.skill_provider is not None:
                 try:
-                    instructions = await ctx.pool.skill_provider.get_skill_instructions(
-                        skill.name
-                    )
+                    instructions = await ctx.pool.skill_provider.get_skill_instructions(skill.name)
                 except Exception as e:  # noqa: BLE001
                     return f"Failed to load skill instructions for {skill.name!r}: {e}"
             else:
@@ -224,59 +303,14 @@ async def load_skill(  # noqa: PLR0911
         else:
             instructions = skill.load_instructions()
     else:
-        # Bare skill name - use skill_resolver to search across all providers
-        # This supports dynamic skill discovery from MCP servers with proper priority
-        resolver: SkillURIResolver | None = getattr(ctx.pool, "skill_resolver", None)
-        if resolver is not None:
-            try:
-                # Try to resolve via skill_resolver using bare skill name
-                # (searches all providers in priority order)
-                skill = await resolver.resolve(resolved.skill_name)
-                # For virtual paths (PurePosixPath), fetch from provider
-                if isinstance(skill.skill_path, PurePosixPath):
-                    if ctx.pool.skill_provider is not None:
-                        try:
-                            instructions = await ctx.pool.skill_provider.get_skill_instructions(
-                                skill.name
-                            )
-                        except Exception as e:  # noqa: BLE001
-                            return f"Failed to load skill instructions for {skill.name!r}: {e}"
-                    else:
-                        instructions = ""
-                else:
-                    instructions = skill.load_instructions()
-            except Exception:
-                # Fallback: check local skills directly
-                skills = ctx.pool.skills.list_skills()
-                visible_skills = [
-                    s for s in skills if not getattr(s, "disable_model_invocation", False)
-                ]
-                found_skill: Skill | None = next(
-                    (s for s in visible_skills if s.name == resolved.skill_name), None
-                )
-                if found_skill is None:
-                    available = ", ".join(s.name for s in visible_skills)
-                    return f"Skill {resolved.skill_name!r} not found. Available skills: {available}"
-                skill = found_skill
-                try:
-                    instructions = ctx.pool.skills.get_skill_instructions(resolved.skill_name)
-                except Exception as e:  # noqa: BLE001
-                    return f"Failed to load skill {resolved.skill_name!r}: {e}"
-        else:
-            # Fallback when no resolver available - check local skills only
-            skills = ctx.pool.skills.list_skills()
-            visible_skills = [
-                s for s in skills if not getattr(s, "disable_model_invocation", False)
-            ]
-            found_skill = next((s for s in visible_skills if s.name == resolved.skill_name), None)
-            if found_skill is None:
-                available = ", ".join(s.name for s in visible_skills)
-                return f"Skill {resolved.skill_name!r} not found. Available skills: {available}"
-            skill = found_skill
-            try:
-                instructions = ctx.pool.skills.get_skill_instructions(resolved.skill_name)
-            except Exception as e:  # noqa: BLE001
-                return f"Failed to load skill {resolved.skill_name!r}: {e}"
+        try:
+            loaded = await _load_visible_bare_skill(ctx, resolved.skill_name, requested_node_name)
+        except Exception as e:  # noqa: BLE001
+            return f"Failed to load skill {resolved.skill_name!r}: {e}"
+        if loaded is None:
+            available = await _available_skill_names(ctx, requested_node_name)
+            return f"Skill {resolved.skill_name!r} not found. Available skills: {available}"
+        skill, instructions = loaded
 
     # Apply argument substitution
     instructions = _substitute_arguments(instructions, arguments)
@@ -324,6 +358,24 @@ async def load_skill(  # noqa: PLR0911
     return "\n\n".join(parts)
 
 
+async def _available_skill_names(ctx: AgentContext, node_name: str | None) -> str:
+    skills = ctx.pool.skills.list_skills()
+    visible_skills = _visible_model_skills(ctx, skills, node_name)
+
+    provider_skills: list[Skill] = []
+    if ctx.pool.skill_provider is not None:
+        try:
+            provider_skills = await ctx.pool.skill_provider.get_skills()
+        except Exception:
+            provider_skills = []
+
+    all_skills = {
+        skill.name
+        for skill in [*visible_skills, *_visible_model_skills(ctx, provider_skills, node_name)]
+    }
+    return ", ".join(sorted(all_skills))
+
+
 async def list_skills(ctx: AgentContext) -> str:
     """List all available skills.
 
@@ -333,11 +385,13 @@ async def list_skills(ctx: AgentContext) -> str:
     if ctx.pool is None:
         return "No agent pool available - skills require pool context"
 
+    requested_node_name = _node_name_for_scope(ctx)
+
     # Get skills from both local registry and MCP provider.
     # Deduplicate by name: local skills take priority (appear first in list).
     skills = ctx.pool.skills.list_skills()
     # Filter out skills that disable model invocation (for model visibility)
-    visible_skills = [s for s in skills if not getattr(s, "disable_model_invocation", False)]
+    visible_skills = _visible_model_skills(ctx, skills, requested_node_name)
 
     # Also get skills from skill_provider (MCP-based skills)
     provider_skills: list[Skill] = []
@@ -347,6 +401,7 @@ async def list_skills(ctx: AgentContext) -> str:
         except Exception:
             pass
 
+    all_skills = visible_skills + _visible_model_skills(ctx, provider_skills, requested_node_name)
     # Merge with dedup: local (visible_skills) first, then provider_skills
     seen: set[str] = {s.name for s in visible_skills}
     all_skills = list(visible_skills)

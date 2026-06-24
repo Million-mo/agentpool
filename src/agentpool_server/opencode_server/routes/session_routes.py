@@ -69,6 +69,7 @@ from agentpool_server.opencode_server.session_pool_integration import (
     set_session_status,
 )
 from agentpool_server.opencode_server.stream_adapter import OpenCodeStreamAdapter
+from agentpool_server.opencode_server.todo_utils import build_opencode_todos
 from agentpool_storage.opencode_provider import helpers
 
 
@@ -76,6 +77,18 @@ if TYPE_CHECKING:
     from agentpool_server.opencode_server.state import ServerState
 
 logger = get_logger(__name__)
+
+
+def _resolve_session_create_agent(state: ServerState, requested_agent: str | None) -> str:
+    """Resolve the agent to bind to a newly created OpenCode session."""
+    default_agent = state.agent.name or "default"
+    if not requested_agent or requested_agent == "default":
+        return default_agent
+
+    pool = state.pool
+    if requested_agent not in pool.all_agents:
+        raise HTTPException(status_code=400, detail=f"Unknown agent: {requested_agent}")
+    return requested_agent
 
 
 async def _get_session_messages_from_pool(
@@ -677,6 +690,7 @@ async def create_session(state: StateDep, request: SessionCreateRequest | None =
     session_id = identifier.ascending("session")
     base_path = state.base_path
     project_id = helpers.compute_project_id(base_path)
+    agent_name = _resolve_session_create_agent(state, request.agent if request else None)
     session = Session(
         id=session_id,
         project_id=project_id,
@@ -693,7 +707,7 @@ async def create_session(state: StateDep, request: SessionCreateRequest | None =
         try:
             await session_pool.create_session(
                 session_id=session_id,
-                agent_name=state.agent.name,
+                agent_name=agent_name,
                 parent_session_id=session.parent_id,
                 project_id=project_id,
                 cwd=base_path,
@@ -1200,10 +1214,7 @@ async def get_session_todos(session_id: str, state: StateDep) -> list[Todo]:
     cached_session = state.sessions.get(session_id)
     if cached_session is not None and cached_session.parent_id is not None:
         tracker = state.pool.todos
-        return [
-            Todo(id=e.id, content=e.content, status=e.status, priority=e.priority)
-            for e in tracker.entries
-        ]
+        return build_opencode_todos(tracker, Todo)
 
     session = await get_or_load_session(state, session_id)
     if session is None:
@@ -1211,10 +1222,7 @@ async def get_session_todos(session_id: str, state: StateDep) -> list[Todo]:
 
     # Get todos from pool's TodoTracker
     tracker = state.pool.todos
-    return [
-        Todo(id=e.id, content=e.content, status=e.status, priority=e.priority)
-        for e in tracker.entries
-    ]
+    return build_opencode_todos(tracker, Todo)
 
 
 @router.get("/{session_id}/diff")

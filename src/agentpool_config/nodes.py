@@ -136,6 +136,7 @@ class NodeConfig(Schema):
     - str entries are converted to StdioMCPServerConfig
     - MCPServerConfig for full server configuration
     """
+
     # Any should be InputProvider, but this leads to circular import
     input_provider: ImportString[Any] | None = Field(default=None, title="Input provider")
     """Provider for human-input-handling."""

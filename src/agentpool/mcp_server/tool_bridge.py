@@ -21,7 +21,7 @@ from uuid import uuid4
 
 import anyio
 from pydantic import BaseModel
-from pydantic_ai import RunContext
+from pydantic_ai import RunContext, ToolReturn
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
 
@@ -125,6 +125,7 @@ def _convert_to_tool_result(result: Any) -> FastMCPToolResult:
     Handles different result types appropriately:
     - FastMCP ToolResult: Pass through unchanged
     - AgentPool ToolResult: Convert to FastMCP format
+    - Pydantic AI ToolReturn: Preserve the model-visible return value and metadata
     - dict: Use as structured_content (enables programmatic access by clients)
     - Pydantic models: Serialize to dict for structured_content
     - Other types: Pass to ToolResult(content=...) which handles conversion internally
@@ -141,6 +142,13 @@ def _convert_to_tool_result(result: Any) -> FastMCPToolResult:
                 content=result.content,
                 structured_content=result.structured_content,
                 meta=result.metadata,
+            )
+        case ToolReturn():
+            metadata = result.metadata if isinstance(result.metadata, dict) else None
+            return FastMCPToolResult(
+                content=result.return_value if result.return_value is not None else "",
+                structured_content=metadata,
+                meta=metadata,
             )
         case dict():
             return FastMCPToolResult(structured_content=result)
@@ -448,6 +456,9 @@ class ToolManagerBridge:
                 # (works around Claude SDK stripping MCP _meta field)
                 if isinstance(result, AgentPoolToolResult) and result.metadata:
                     logger.info("Storing tool result metadata", tool_call_id=tc_id)
+                    self._bridge.tool_metadata[tc_id] = result.metadata
+                if isinstance(result, ToolReturn) and isinstance(result.metadata, dict):
+                    logger.info("Storing tool return metadata", tool_call_id=tc_id)
                     self._bridge.tool_metadata[tc_id] = result.metadata
 
                 # Consume pending injection from node's run context (isolated per-call)

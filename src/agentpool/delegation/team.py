@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from time import perf_counter
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
+from xml.sax.saxutils import escape
 
 from anyenv.async_run import as_generated
 import anyio
+from jinja2 import BaseLoader, Environment
 
 from agentpool.agents.base_agent import BaseAgent
 from agentpool.agents.events import SpawnSessionStart, SubAgentEvent
@@ -20,6 +23,7 @@ from agentpool.messaging.processing import finalize_message, prepare_prompts
 
 
 logger = get_logger(__name__)
+_PROMPT_TEMPLATE_ENV = Environment(loader=BaseLoader(), autoescape=False)  # noqa: S701
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -32,35 +36,308 @@ if TYPE_CHECKING:
     from agentpool.talk import Talk
 
 
+async def _timeout_stream[T](
+    stream: AsyncIterator[T],
+    timeout: float | None,
+    member_name: str,
+    team_name: str,
+) -> AsyncIterator[T]:
+    """Wrap an async iterator with an overall deadline.
+
+    Each ``__anext__`` is bounded by the remaining budget so a single hung
+    call cannot block forever.  If ``timeout`` is ``None`` the stream is
+    yielded through unchanged.
+    """
+    if timeout is None:
+        async for item in stream:
+            yield item
+        return
+
+    deadline = perf_counter() + timeout
+    it = stream.__aiter__()
+    while True:
+        remaining = deadline - perf_counter()
+        if remaining <= 0:
+            logger.warning(
+                "Team member stream timed out",
+                member=member_name, team=team_name, timeout=timeout,
+            )
+            return
+        try:
+            item = await asyncio.wait_for(it.__anext__(), timeout=remaining)
+        except StopAsyncIteration:
+            return
+        except TimeoutError:
+            logger.warning(
+                "Team member stream timed out",
+                member=member_name, team=team_name, timeout=timeout,
+            )
+            return
+        yield item
+
+
 class Team[TDeps = None](BaseTeam[TDeps, Any]):
     """Group of agents that can execute together."""
 
     _error_mode: Literal["fail_all", "collect_exceptions"] = "collect_exceptions"
 
+    @staticmethod
+    def _active_parent_session_id() -> str | None:
+        """Return the active SessionPool session id when running inside a turn."""
+        from agentpool.agents.base_agent import _current_run_ctx_var
+
+        run_ctx = _current_run_ctx_var.get()
+        session_id = getattr(run_ctx, "session_id", None)
+        return str(session_id) if session_id else None
+
+    async def _resolve_scoped_team_nodes(
+        self,
+        nodes: list[MessageNode[Any, Any]],
+        parent_session_id: str | None,
+        team_run_id: str,
+    ) -> tuple[list[MessageNode[Any, Any]], dict[str, str]]:
+        """Resolve team members to child-session agents for a parent session."""
+        if not parent_session_id or self.agent_pool is None or self.agent_pool.session_pool is None:
+            return nodes, {}
+
+        from agentpool.agents.base_agent import BaseAgent
+        from agentpool.utils.identifiers import generate_session_id
+
+        session_pool = self.agent_pool.session_pool
+        pool_agents = self.agent_pool.all_agents
+        pool_teams = getattr(self.agent_pool, "teams", {})
+        scoped_nodes: list[MessageNode[Any, Any]] = []
+        child_session_ids: dict[str, str] = {}
+
+        await self._save_scoped_storage_session(parent_session_id)
+        for node in nodes:
+            if node.name not in pool_agents and node.name not in pool_teams:
+                scoped_nodes.append(node)
+                continue
+            child_state = await session_pool.create_session(
+                session_id=generate_session_id(),
+                parent_session_id=parent_session_id,
+                lifecycle_policy="cascade",
+                agent_name=node.name,
+                agent_type=getattr(node, "agent_type", type(node).__name__),
+                team_name=self.name,
+                team_run_id=team_run_id,
+                generate_title=False,
+            )
+            child_session_id = child_state.session_id
+            if isinstance(node, BaseAgent) and node.name in pool_agents:
+                child_node = await session_pool.sessions.get_or_create_session_agent(
+                    child_session_id,
+                    agent_name=node.name,
+                )
+            else:
+                child_node = node
+            scoped_nodes.append(child_node)
+            child_session_ids[node.name] = child_session_id
+            await self._save_scoped_storage_session(child_session_id)
+
+        return scoped_nodes, child_session_ids
+
+    async def _save_scoped_storage_session(self, session_id: str | None) -> None:
+        """Persist SessionPool session data to protocol storage for lineage checks."""
+        if not session_id or self.agent_pool is None or self.agent_pool.session_pool is None:
+            return
+        storage = getattr(self.agent_pool, "storage", None)
+        if storage is None:
+            return
+        session_controller = self.agent_pool.session_pool.sessions
+        session = session_controller.get_session(session_id)
+        if session is None:
+            return
+        await storage.save_session(session_controller._state_to_data(session))
+
+    async def _close_scoped_team_nodes(self, child_session_ids: dict[str, str]) -> None:
+        """Close and delete round-scoped child sessions created for a team run."""
+        if not child_session_ids or self.agent_pool is None or self.agent_pool.session_pool is None:
+            return
+        for session_id in reversed(list(child_session_ids.values())):
+            await self.agent_pool.session_pool.close_session(session_id)
+            await self._delete_scoped_storage_session(session_id)
+
+    async def _delete_scoped_storage_session(self, session_id: str) -> None:
+        """Remove protocol storage written for a round-scoped child session."""
+        if self.agent_pool is None:
+            return
+        storage = getattr(self.agent_pool, "storage", None)
+        if storage is None:
+            return
+        await storage.delete_session_messages(session_id)
+        await storage.delete_session(session_id)
+
     async def execute(self, *prompts: PromptCompatible | None, **kwargs: Any) -> TeamResponse:
-        """Run all agents in parallel via pydantic-graph Fork + Join."""
+        """Run all agents in parallel via pydantic-graph Fork + Join.
+
+        Keyword Args:
+            template_vars: Extra variables available as ``{{ extra.<key> }}``
+                inside per-member ``prompt_template`` Jinja2 strings.
+        """
         from agentpool.delegation.graph_team import _TeamGraphState, run_team_graph
         from agentpool.talk.talk import Talk
 
         self._team_talk.clear()
-        all_nodes = list(self.nodes)
-        # Create Talk connections for monitoring this execution
+        default_prompt = list(prompts)
+        if self.shared_prompt:
+            default_prompt.insert(0, self.shared_prompt)
+
+        session_id_kwarg = str(kwargs.pop("session_id", "") or "")
+        parent_session_id_kwarg = str(kwargs.pop("parent_session_id", "") or "")
+        if session_id_kwarg:
+            kwargs["session_id"] = session_id_kwarg
+        if parent_session_id_kwarg:
+            kwargs["parent_session_id"] = parent_session_id_kwarg
+        parent_session_id = (
+            parent_session_id_kwarg
+            or session_id_kwarg
+            or self._active_parent_session_id()
+        )
+        team_run_id = uuid4().hex
+        template_vars = kwargs.pop("template_vars", {})
+        if not isinstance(template_vars, dict):
+            template_vars = {}
+        timeout = self.member_timeout
+        member_retry_attempts = max(0, int(kwargs.pop("member_retry_attempts", 0) or 0))
+        member_retry_delay = max(0.0, float(kwargs.pop("member_retry_delay", 0.0) or 0.0))
+        member_skills = self._normalize_member_skills(kwargs.pop("member_skills", {}))
+        member_skill_instructions = await self._load_member_skill_instructions(member_skills)
+
+        base_nodes = list(self.nodes)
+        all_nodes, child_session_ids = await self._resolve_scoped_team_nodes(
+            base_nodes,
+            parent_session_id,
+            team_run_id,
+        )
         execution_talks: list[Talk[Any]] = []
+        member_prompts: dict[str, list[PromptCompatible | None]] = {}
         for node in all_nodes:
-            # No actual forwarding, just for tracking
             talk = Talk[Any](node, [], connection_type="run", queued=True, queue_strategy="latest")
             execution_talks.append(talk)
-            self._team_talk.append(talk)  # Add to base class's TeamTalk
+            self._team_talk.append(talk)
+            resolved = self._resolve_member_prompt(
+                node.name,
+                default_prompt,
+                prompts,
+                template_vars,
+            )
+            resolved = self._inject_member_skill_instructions(
+                node.name,
+                resolved,
+                member_skill_instructions,
+            )
+            member_prompts[node.name] = resolved
 
         state = _TeamGraphState(
             prompts=prompts,
+            member_prompts=member_prompts,
             kwargs=kwargs,
             shared_prompt=self.shared_prompt,
+            child_session_ids=child_session_ids,
+            parent_session_id=parent_session_id,
+            member_timeout=timeout,
+            member_retry_attempts=member_retry_attempts,
+            member_retry_delay=member_retry_delay,
             execution_talks=execution_talks,
             error_mode=self._error_mode,
         )
 
-        return await run_team_graph(all_nodes, state)
+        try:
+            return await run_team_graph(all_nodes, state)
+        finally:
+            await self._close_scoped_team_nodes(child_session_ids)
+
+    @staticmethod
+    def _normalize_member_skills(value: Any) -> dict[str, list[str]]:
+        if not isinstance(value, dict):
+            return {}
+        result: dict[str, list[str]] = {}
+        for member_name, raw_names in value.items():
+            name = str(member_name).strip()
+            if not name:
+                continue
+            raw_list = raw_names if isinstance(raw_names, list) else [raw_names]
+            names = [
+                str(item).strip()
+                for item in raw_list
+                if str(item).strip()
+            ]
+            if names:
+                result[name] = list(dict.fromkeys(names))
+        return result
+
+    async def _load_member_skill_instructions(
+        self,
+        member_skills: dict[str, list[str]],
+    ) -> dict[str, str]:
+        if not member_skills or self.agent_pool is None:
+            return {}
+
+        result: dict[str, str] = {}
+        for member_name, skill_names in member_skills.items():
+            loaded_sections: list[str] = []
+            for skill_name in skill_names:
+                instructions = await self._load_skill_instructions(skill_name, member_name)
+                if instructions:
+                    loaded_sections.append(self._format_skill_instruction(skill_name, instructions))
+            if loaded_sections:
+                result[member_name] = "\n\n".join(loaded_sections)
+        return result
+
+    async def _load_skill_instructions(self, skill_name: str, member_name: str) -> str:
+        if self.agent_pool is None or self.agent_pool.skill_provider is None:
+            from agentpool.skills.exceptions import SkillNotFoundError
+
+            raise SkillNotFoundError(skill_name)
+
+        return await self.agent_pool.get_skill_instructions_for_node(skill_name, member_name)
+
+    @staticmethod
+    def _format_skill_instruction(skill_name: str, instructions: str) -> str:
+        return (
+            f'<skill-instruction name="{escape(skill_name)}">\n'
+            f"{instructions.strip()}\n"
+            "</skill-instruction>"
+        )
+
+    @staticmethod
+    def _inject_member_skill_instructions(
+        member_name: str,
+        prompts: list[PromptCompatible | None],
+        member_skill_instructions: dict[str, str],
+    ) -> list[PromptCompatible | None]:
+        instructions = member_skill_instructions.get(member_name, "").strip()
+        if not instructions:
+            return prompts
+        prompt_text = "\n\n".join(str(prompt) for prompt in prompts if prompt is not None).strip()
+        combined = (
+            f"{instructions}\n\n{prompt_text}"
+            if prompt_text
+            else instructions
+        )
+        return [combined]
+
+    def _resolve_member_prompt(
+        self,
+        member_name: str,
+        default_prompt: list[PromptCompatible | None],
+        raw_prompts: tuple[PromptCompatible | None, ...],
+        template_vars: dict[str, Any],
+    ) -> list[PromptCompatible | None]:
+        """Return per-member prompt if a template is configured, else the default."""
+        cfg = self.member_prompt_templates.get(member_name)
+        if cfg is None or cfg.prompt_template is None:
+            return default_prompt
+
+        prompt_str = " ".join(str(p) for p in raw_prompts if p is not None)
+        rendered = _PROMPT_TEMPLATE_ENV.from_string(cfg.prompt_template).render(
+            prompt=prompt_str,
+            shared_prompt=self.shared_prompt or "",
+            extra=template_vars,
+        )
+        return [rendered]
 
     def __prompt__(self) -> str:
         """Format team info for prompts."""
@@ -76,15 +353,31 @@ class Team[TDeps = None](BaseTeam[TDeps, Any]):
         """Yield messages as they arrive from parallel execution."""
         queue: asyncio.Queue[ChatMessage[Any] | None] = asyncio.Queue()
         failures: dict[str, Exception] = {}
+        timeout = self.member_timeout
 
         async def _run(node: MessageNode[TDeps, Any]) -> None:
             try:
-                message = await node.run(*prompts, **kwargs)
+                coro = node.run(*prompts, **kwargs)
+                message = (
+                    await asyncio.wait_for(coro, timeout=timeout)
+                    if timeout is not None
+                    else await coro
+                )
                 await queue.put(message)
+            except TimeoutError:
+                logger.warning(
+                    "Team member timed out",
+                    member=node.name,
+                    team=self.name,
+                    timeout=timeout,
+                )
+                failures[node.name] = TimeoutError(
+                    f"Member {node.name!r} exceeded {timeout}s deadline"
+                )
+                await queue.put(None)
             except Exception as e:
                 logger.exception("Error executing node", name=node.name)
                 failures[node.name] = e
-                # Put None to maintain queue count
                 await queue.put(None)
 
         # Get nodes to run
@@ -135,6 +428,7 @@ class Team[TDeps = None](BaseTeam[TDeps, Any]):
                 "agent_names": [r.agent_name for r in result],
                 "errors": {name: str(error) for name, error in result.errors.items()},
                 "start_time": result.start_time.isoformat(),
+                "child_session_ids": result.child_session_ids,
             },
         )
 
@@ -170,7 +464,6 @@ class Team[TDeps = None](BaseTeam[TDeps, Any]):
         Yields:
             RichAgentStreamEvent, with member events wrapped in SubAgentEvent
         """
-        from agentpool.common_types import SupportsRunStream
         from agentpool.utils.identifiers import generate_session_id
 
         # Pop session_id/depth/parent_session_id from kwargs to avoid duplicate
@@ -193,28 +486,13 @@ class Team[TDeps = None](BaseTeam[TDeps, Any]):
         parent_sid: str | None = parent_session_id_kwarg or session_id_kwarg
 
         # Get nodes to run
-        all_nodes = list(self.nodes)
-
-        # Pre-create child sessions for each member so that SpawnSessionStart
-        # can be emitted *before* the member's stream begins.
-        # Use id(node) as key instead of node.name to avoid collisions
-        # when multiple team members share the same name.
-        child_session_ids: dict[int, str] = {}
-        for node in all_nodes:
-            if self.agent_pool and self.agent_pool.session_pool:
-                if parent_sid:
-                    child_state = await self.agent_pool.session_pool.create_session(
-                        session_id=generate_session_id(),
-                        parent_session_id=parent_sid,
-                        agent_name=node.name,
-                        agent_type=node.agent_type,
-                    )
-                    child_sid = child_state.session_id
-                else:
-                    child_sid = generate_session_id()
-            else:
-                child_sid = generate_session_id()
-            child_session_ids[id(node)] = child_sid
+        base_nodes = list(self.nodes)
+        all_nodes, child_session_ids = await self._resolve_scoped_team_nodes(
+            base_nodes,
+            parent_sid,
+            uuid4().hex,
+        )
+        timeout = self.member_timeout
 
         # Create list of streams — one per member, prefixed by SpawnSessionStart
         async def wrap_stream(
@@ -235,6 +513,8 @@ class Team[TDeps = None](BaseTeam[TDeps, Any]):
                 spawn_mechanism="spawn",
             )
 
+            from agentpool.common_types import SupportsRunStream
+
             if not isinstance(node, SupportsRunStream):
                 return
 
@@ -243,13 +523,14 @@ class Team[TDeps = None](BaseTeam[TDeps, Any]):
             if isinstance(node, BaseAgent):
                 node_model_id = node.model_name
 
-            async for event in node.run_stream(
+            stream = node.run_stream(
                 *prompts,
                 session_id=child_sid,
                 parent_session_id=parent_sid,
                 depth=child_depth,
                 **kwargs,
-            ):
+            )
+            async for event in _timeout_stream(stream, timeout, node.name, self.name):
                 # Handle already-wrapped SubAgentEvents (nested teams)
                 if isinstance(event, SubAgentEvent):
                     yield SubAgentEvent(
@@ -273,10 +554,16 @@ class Team[TDeps = None](BaseTeam[TDeps, Any]):
                         parent_session_id=parent_sid,
                     )
 
-        streams = [wrap_stream(node, child_session_ids[id(node)]) for node in all_nodes]
+        streams = [
+            wrap_stream(node, child_session_ids.get(node.name, generate_session_id()))
+            for node in all_nodes
+        ]
         # Merge all streams
-        async for event in as_generated(streams):
-            yield event
+        try:
+            async for event in as_generated(streams):
+                yield event
+        finally:
+            await self._close_scoped_team_nodes(child_session_ids)
 
 
 if __name__ == "__main__":

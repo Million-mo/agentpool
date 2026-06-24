@@ -300,6 +300,12 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
             agent=self,
             agent_hooks=hooks,
         )
+        logger.debug(
+            "NativeAgent hooks initialized",
+            agent_name=name,
+            has_hooks=hooks is not None,
+            hooks_repr=repr(hooks) if hooks else "None",
+        )
         self._default_usage_limits = usage_limits
         self._providers = list(providers) if providers else None  # model discovery
         self._direct_history_processors = list(history_processors) if history_processors else None
@@ -419,6 +425,7 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
             FilePromptConfig,
             FunctionPromptConfig,
             LibraryPromptConfig,
+            PackagePromptConfig,
             StaticPromptConfig,
         )
         from agentpool_toolsets.builtin.workers import WorkersTools
@@ -460,6 +467,21 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
                             raise ValueError(msg) from e
                     case FunctionPromptConfig(function=function, arguments=arguments):
                         content = function(**arguments)
+                        sys_prompts.append(content)
+                    case PackagePromptConfig(
+                        package=pkg, resource=resource, variables=variables,
+                    ):
+                        from importlib.resources import files as pkg_files
+
+                        template_content = (
+                            pkg_files(pkg) / resource
+                        ).read_text(encoding="utf-8")
+                        if variables:
+                            from jinja2 import Template
+
+                            content = Template(template_content).render(**variables)
+                        else:
+                            content = template_content
                         sys_prompts.append(content)
 
         # Prepare toolsets list

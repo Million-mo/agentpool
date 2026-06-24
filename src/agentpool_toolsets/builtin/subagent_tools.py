@@ -33,6 +33,20 @@ logger = get_logger(__name__)
 _background_tasks: set[asyncio.Task[Any]] = set()
 
 
+def _serialize_content(content: Any) -> str:
+    """Serialize subagent output content to a string."""
+    if not content:
+        return ""
+    if isinstance(content, str):
+        return content
+
+    from pydantic import BaseModel
+
+    if isinstance(content, BaseModel):
+        return content.model_dump_json()
+    return str(content)
+
+
 def _generate_task_id(description: str) -> str:
     """Generate a unique, sortable task ID from timestamp and description.
 
@@ -244,16 +258,21 @@ class SubagentTools(StaticResourceProvider):
             fs = ctx.internal_fs
             fs.mkdirs(f"/tasks/{task_id}", exist_ok=True)
 
+            from agentpool.messaging.message_history import MessageHistory
+
             async def _background_run() -> None:
                 """Run task through SessionPool and write final result to filesystem."""
                 final_content = ""
                 try:
                     async for event in session_pool.run_stream(
-                        child_session_id, prompt, input_provider=input_provider
+                        child_session_id,
+                        prompt,
+                        input_provider=input_provider,
+                        message_history=MessageHistory(),
                     ):
                         if isinstance(event, StreamCompleteEvent):
                             content = event.message.content
-                            final_content = str(content) if content else ""
+                            final_content = _serialize_content(content)
                 except Exception:
                     logger.exception("Async task failed", task_id=task_id, agent=agent_or_team)
                     error_content = (
@@ -288,13 +307,18 @@ class SubagentTools(StaticResourceProvider):
             }
 
         # Synchronous mode — block until completion and return final result
+        from agentpool.messaging.message_history import MessageHistory
+
         final_content = ""
         async for event in session_pool.run_stream(
-            child_session_id, prompt, input_provider=input_provider
+            child_session_id,
+            prompt,
+            input_provider=input_provider,
+            message_history=MessageHistory(),
         ):
             if isinstance(event, StreamCompleteEvent):
                 content = event.message.content
-                final_content = str(content) if content else ""
+                final_content = _serialize_content(content)
 
         return {
             "output": final_content,

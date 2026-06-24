@@ -126,35 +126,67 @@ class SQLModelProvider(StorageProvider):
             return [to_chat_message(msg) for msg in messages]
 
     async def log_message(self, *, message: ChatMessage[Any]) -> None:
-        """Log message to database."""
+        """Log message to database.
+
+        Message persistence is intentionally idempotent. Streaming UIs may log
+        a placeholder message before the agent run completes, then log the same
+        message ID again with final content, tool results, token usage, and
+        finish metadata.
+        """
         from agentpool.storage.serialization import serialize_messages
 
         provider, model_name = parse_model_info(message.model_name)
         cost_info = message.cost_info
+        values = {
+            "session_id": message.session_id or "",
+            "id": message.message_id,
+            "parent_id": message.parent_id,
+            "content": str(message.content),
+            "role": message.role,
+            "name": message.name,
+            "model": message.model_name,
+            "model_provider": provider,
+            "model_name": model_name,
+            "response_time": message.response_time,
+            "total_tokens": cost_info.token_usage.total_tokens if cost_info else None,
+            "input_tokens": cost_info.token_usage.input_tokens if cost_info else None,
+            "output_tokens": cost_info.token_usage.output_tokens if cost_info else None,
+            "cost": float(cost_info.total_cost) if cost_info else None,
+            "provider_name": message.provider_name,
+            "provider_response_id": message.provider_response_id,
+            "messages": serialize_messages(message.messages),
+            "finish_reason": message.finish_reason,
+            "timestamp": get_now(),
+        }
 
         async with AsyncSession(self.engine) as session:
-            msg = Message(
-                session_id=message.session_id or "",
-                id=message.message_id,
-                parent_id=message.parent_id,
-                content=str(message.content),
-                role=message.role,
-                name=message.name,
-                model=message.model_name,
-                model_provider=provider,
-                model_name=model_name,
-                response_time=message.response_time,
-                total_tokens=cost_info.token_usage.total_tokens if cost_info else None,
-                input_tokens=cost_info.token_usage.input_tokens if cost_info else None,
-                output_tokens=cost_info.token_usage.output_tokens if cost_info else None,
-                cost=float(cost_info.total_cost) if cost_info else None,
-                provider_name=message.provider_name,
-                provider_response_id=message.provider_response_id,
-                messages=serialize_messages(message.messages),
-                finish_reason=message.finish_reason,
-                timestamp=get_now(),
-            )
-            session.add(msg)
+            update_values = {key: value for key, value in values.items() if key != "id"}
+            dialect_name = self.engine.dialect.name
+            if dialect_name == "sqlite":
+                stmt = sqlite_insert(Message).values(**values)
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=["id"],
+                    set_=update_values,
+                )
+                await session.execute(stmt)
+            elif dialect_name == "postgresql" and pg_insert is not None:
+                stmt = pg_insert(Message).values(**values)
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=["id"],
+                    set_=update_values,
+                )
+                await session.execute(stmt)
+            elif dialect_name in ("mysql", "mariadb") and mysql_insert is not None:
+                stmt = mysql_insert(Message).values(**values)
+                stmt = stmt.on_duplicate_key_update(**update_values)
+                await session.execute(stmt)
+            else:
+                existing = await session.get(Message, message.message_id)
+                if existing is None:
+                    session.add(Message(**values))
+                else:
+                    for key, value in update_values.items():
+                        setattr(existing, key, value)
             await session.commit()
 
     def _get_insert_stmt(self) -> Any:

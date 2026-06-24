@@ -104,14 +104,13 @@ async def get_messages_for_session(
     Returns:
         List of MessageWithParts for the session.
     """
+    messages: list[MessageWithParts] = getattr(state, "messages", {}).get(session_id, []) or []
+
     # Fast-path: subagent sessions are streamed live into memory, so the
     # in-memory copy is always the most up-to-date.
     cached_session = state.sessions.get(session_id)
     is_subagent = cached_session is not None and cached_session.parent_id is not None
     if is_subagent:
-        messages: list[MessageWithParts] = (
-            getattr(state, "messages", {}).get(session_id, []) or []
-        )
         if messages:
             return messages
 
@@ -137,7 +136,6 @@ async def get_messages_for_session(
                     )
                     for chat_msg in sp_messages
                 ]
-    messages: list[MessageWithParts] = getattr(state, "messages", {}).get(session_id, []) or []
     return messages
 
 
@@ -711,6 +709,7 @@ class OpenCodeSessionPoolIntegration(ProtocolEventConsumerMixin):
         content: Any,
         priority: str = "when_idle",
         input_provider: Any | None = None,
+        agent_name: str | None = None,
         **kwargs: Any,
     ) -> RunHandle | None:
         """Route a message through SessionPool.receive_request().
@@ -727,6 +726,7 @@ class OpenCodeSessionPoolIntegration(ProtocolEventConsumerMixin):
             content: Message / prompt content.
             priority: "when_idle" to queue, "asap" to inject into active turn.
             input_provider: Optional input provider for the agent.
+            agent_name: Agent to bind if the session must be created.
             **kwargs: Additional arguments passed to the turn runner.
                 Supports ``deferred_tool_results`` for checkpoint replay.
 
@@ -747,7 +747,7 @@ class OpenCodeSessionPoolIntegration(ProtocolEventConsumerMixin):
 
         session_state = self.session_pool.sessions.get_session(session_id)
         if session_state is None:
-            await self.create_session(session_id)
+            await self.create_session(session_id, agent_name=agent_name)
         else:
             # Ensure event consumer is running even for pre-existing sessions.
             # Sessions created via other paths (e.g. get_or_load_session) don't
@@ -1004,6 +1004,8 @@ class OpenCodeSessionPoolIntegration(ProtocolEventConsumerMixin):
             if ctx is None:
                 return
 
+            await self._ensure_child_session_visible(session_id, event)
+
             # Ensure assistant message is registered before ToolPart creation
             if not self._message_registered.get(session_id, False):
                 await append_message_to_session(
@@ -1041,6 +1043,47 @@ class OpenCodeSessionPoolIntegration(ProtocolEventConsumerMixin):
                 session_id=session_id,
                 child_session_id=getattr(envelope.event, "child_session_id", None),
             )
+
+    async def _ensure_child_session_visible(
+        self,
+        parent_session_id: str,
+        spawn_event: SpawnSessionStart,
+    ) -> None:
+        """Create OpenCode-visible child session scaffolding for task navigation.
+
+        SessionPool owns the execution session. OpenCode also needs a session
+        model and at least the delegated prompt in message storage so the TUI
+        can open the child task immediately, even before the child stream emits
+        its first token.
+        """
+        child_session_id = spawn_event.child_session_id
+        await ensure_session(
+            self.server_state,
+            child_session_id,
+            parent_id=parent_session_id,
+        )
+
+        existing_messages = await get_messages_for_session(self.server_state, child_session_id)
+        if existing_messages:
+            return
+
+        prompt = spawn_event.metadata.get("prompt") or spawn_event.description
+        if not prompt:
+            prompt = f"Run {spawn_event.source_name or 'subagent'} task"
+
+        user_msg = UserMessage(
+            id=identifier.ascending("message"),
+            session_id=child_session_id,
+            time=TimeCreated.now(),
+            agent=spawn_event.source_name or "subagent",
+            model=None,
+        )
+        user_msg_with_parts = MessageWithParts(info=user_msg)
+        text_part = user_msg_with_parts.add_text_part(prompt)
+
+        await append_message_to_session(self.server_state, child_session_id, user_msg_with_parts)
+        await self.server_state.broadcast_event(MessageUpdatedEvent.create(user_msg))
+        await self.server_state.broadcast_event(PartUpdatedEvent.create(text_part))
 
     async def _handle_event(self, session_id: str, envelope: EventEnvelope) -> None:
         """Handle a single event from the EventBus.
