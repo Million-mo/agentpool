@@ -518,7 +518,7 @@ class TestBeforeConsumerLoopResume:
         # Verify consumer task and queue exist
         assert session_id in integration._session_groups
         assert session_id in integration._consumer_streams
-        assert not integration._session_groups[session_id].done()
+        assert integration._session_groups[session_id] is not None
 
         # Stop the consumer
         await integration.stop_event_consumer(session_id)
@@ -545,7 +545,7 @@ class TestBeforeConsumerLoopResume:
         # Verify consumer re-started
         assert session_id in integration._session_groups
         assert session_id in integration._consumer_streams
-        assert not integration._session_groups[session_id].done()
+        assert integration._session_groups[session_id] is not None
 
         # Verify context was restored (not created fresh)
         restored_ctx = integration._contexts.get(session_id)

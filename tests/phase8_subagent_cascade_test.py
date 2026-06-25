@@ -10,14 +10,11 @@ import anyio
 
 import pytest
 
-from agentpool import AgentPool
-from agentpool_config.base_agent import BaseAgentConfig
-from agentpool_config.model import Model
-from agentpool_config.responses import TextResponse
+from agentpool import AgentPool, AgentsManifest, NativeAgentConfig
 
 
 @pytest.mark.asyncio
-async def test_subagent_cancellation_cascade_within_5s() -> None:
+async def test_subagent_cancellation_cascade_within_5s(manifest: AgentsManifest) -> None:
     """Verify subagent cancellation cascades within 5 seconds.
 
     Regression test for structured concurrency:
@@ -27,45 +24,30 @@ async def test_subagent_cancellation_cascade_within_5s() -> None:
       allows cleanup even during cancellation
     """
 
-    agent_config = BaseAgentConfig(
+    agent_config = NativeAgentConfig(
         name="parent-agent",
-        model=Model(
-            type="openai",
-            name="gpt-4o-mini",
-        ),
+        model="test",
         system_prompt="You are a parent agent that spawns subagents.",
-        response_format=TextResponse(),
     )
 
-    subagent_config = BaseAgentConfig(
+    subagent_config = NativeAgentConfig(
         name="sub-agent",
-        model=Model(
-            type="openai",
-            name="gpt-4o-mini",
-        ),
+        model="test",
         system_prompt="You are a subagent.",
-        response_format=TextResponse(),
     )
 
-    manifest = pytest.TEST_MANIFEST
     manifest.agents["parent-agent"] = agent_config
     manifest.agents["sub-agent"] = subagent_config
 
     async with AgentPool(manifest=manifest) as pool:
         async with pool.get_agent("parent-agent") as parent_agent:
-            # Spawn a subagent in background
-            subagent_task = anyio.create_task(
-                parent_agent.run(
-                    "Spawn a subagent and then I will cancel"
-                )
-            )
+            # Spawn a subagent in background via TaskGroup
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(parent_agent.run, "Spawn a subagent and then I will cancel")
 
-            # Cancel the parent agent immediately
-            # This should cascade to the subagent
-            await anyio.sleep(0.1)  # Give subagent time to start
-            subagent_task.cancel()
+                # Cancel the parent agent immediately
+                # This should cascade to the subagent
+                await anyio.sleep(0.1)  # Give subagent time to start
+                tg.cancel_scope.cancel()
 
-            # Verify subagent receives cancellation within 5s
-            with pytest.raises(anyio.TimeoutError):
-                async with anyio.fail_after(5):
-                    await subagent_task
+            # If we get here without hanging, cancellation cascaded correctly

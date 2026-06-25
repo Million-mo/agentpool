@@ -381,7 +381,7 @@ class StorageManager:
             data: Session data to persist
         """
         provider = self.get_project_provider()
-        async with anyio.CancelScope(shield=True):
+        with anyio.CancelScope(shield=True):
             await provider.save_session(data)
         self._session_logged.add(data.session_id)
 
@@ -411,7 +411,7 @@ class StorageManager:
         deleted = False
         for provider in self.providers:
             try:
-                async with anyio.CancelScope(shield=True):
+                with anyio.CancelScope(shield=True):
                     if await provider.delete_session(session_id):
                         deleted = True
             except Exception:
@@ -473,7 +473,7 @@ class StorageManager:
             sdk_session_id: External SDK session ID
         """
         for provider in self.providers:
-            async with anyio.CancelScope(shield=True):
+            with anyio.CancelScope(shield=True):
                 await provider.update_sdk_session_id(session_id, sdk_session_id)
 
     async def update_session_title(self, session_id: str, title: str) -> None:
@@ -484,7 +484,7 @@ class StorageManager:
             title: New title for conversation
         """
         for provider in self.providers:
-            async with anyio.CancelScope(shield=True):
+            with anyio.CancelScope(shield=True):
                 await provider.update_session_title(session_id, title)
 
     async def get_session_title(self, session_id: str) -> str | None:
@@ -896,7 +896,7 @@ class StorageManager:
 
         for provider in self.providers:
             try:
-                async with anyio.CancelScope(shield=True):
+                with anyio.CancelScope(shield=True):
                     await provider.save_checkpoint(session_id, messages_json, pending_calls_json)
             except NotImplementedError:
                 pass
@@ -948,7 +948,7 @@ class StorageManager:
         """
         for provider in self.providers:
             try:
-                async with anyio.CancelScope(shield=True):
+                with anyio.CancelScope(shield=True):
                     await provider.delete_checkpoint(session_id)
             except NotImplementedError:
                 pass
@@ -985,7 +985,7 @@ class StorageManager:
         """
         for provider in self.providers:
             try:
-                async with anyio.CancelScope(shield=True):
+                with anyio.CancelScope(shield=True):
                     await provider.save_project(project)
             except NotImplementedError:
                 pass
@@ -1061,7 +1061,7 @@ class StorageManager:
         deleted = False
         for provider in self.providers:
             try:
-                async with anyio.CancelScope(shield=True):
+                with anyio.CancelScope(shield=True):
                     if await provider.delete_project(project_id):
                         deleted = True
             except NotImplementedError:

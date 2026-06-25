@@ -10,14 +10,11 @@ import anyio
 
 import pytest
 
-from agentpool import AgentPool
-from agentpool_config.base_agent import BaseAgentConfig
-from agentpool_config.model import Model
-from agentpool_config.responses import TextResponse
+from agentpool import AgentPool, AgentsManifest, NativeAgentConfig
 
 
 @pytest.mark.asyncio
-async def test_shutdown_with_active_session_no_error() -> None:
+async def test_shutdown_with_active_session_no_error(manifest: AgentsManifest) -> None:
     """Verify AgentPool.__aexit__ doesn't raise RuntimeError with active sessions.
 
     Regression test for structured concurrency cleanup:
@@ -26,17 +23,12 @@ async def test_shutdown_with_active_session_no_error() -> None:
     - This tests shielded cleanup in storage and orchestrator finally blocks
     """
 
-    agent_config = BaseAgentConfig(
+    agent_config = NativeAgentConfig(
         name="test-agent",
-        model=Model(
-            type="openai",
-            name="gpt-4o-mini",
-        ),
+        model="test",
         system_prompt="You are a test agent.",
-        response_format=TextResponse(),
     )
 
-    manifest = pytest.TEST_MANIFEST
     manifest.agents["test-agent"] = agent_config
 
     async with AgentPool(manifest=manifest) as pool:
@@ -46,7 +38,7 @@ async def test_shutdown_with_active_session_no_error() -> None:
             await agent.run("Hello")
 
             # Cancel mid-run to trigger cleanup paths
-            async with anyio.CancelScope(shield=True):
+            with anyio.CancelScope(shield=True):
                 # This simulates external cancellation during __aexit__
                 pass
 

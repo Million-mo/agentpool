@@ -247,10 +247,12 @@ async def test_emit_multiple_events_each_published_once() -> None:
         await emitter.emit_event(event)
 
     received: list[RunStartedEvent] = []
-    while not _stream_empty(queue):
-        ev = queue.receive_nowait()
-        if ev is not None:
+    while True:
+        try:
+            ev = queue.receive_nowait()
             received.append(ev)
+        except (anyio.WouldBlock, anyio.EndOfStream):
+            break
 
     assert len(received) == 3
     assert [ev.run_id for ev in received] == ["run-0", "run-1", "run-2"]

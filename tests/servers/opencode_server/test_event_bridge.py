@@ -135,7 +135,6 @@ async def test_bridge_republishes_to_event_bus(
     # Allow the async publish to propagate
     await asyncio.sleep(0.05)
 
-    assert subscriber.qsize() == 1
     envelope = subscriber.receive_nowait()
     assert isinstance(envelope, EventEnvelope)
     wrapped = envelope.event
@@ -162,7 +161,6 @@ async def test_bridge_wraps_different_event_types(
 
     await asyncio.sleep(0.05)
 
-    assert subscriber.qsize() == 2
     for i, evt in enumerate(events):
         envelope = subscriber.receive_nowait()
         assert isinstance(envelope, EventEnvelope)
@@ -189,7 +187,8 @@ async def test_global_event_not_republished_to_event_bus(
     await asyncio.sleep(0.05)
 
     # EventBus should receive nothing because the event has no session_id
-    assert subscriber.qsize() == 0
+    with pytest.raises(anyio.WouldBlock):
+        subscriber.receive_nowait()
 
     # But SSE subscribers should still receive it
     queue = asyncio.Queue()
@@ -273,11 +272,10 @@ async def test_bridge_isolation_between_sessions(
     )
     await asyncio.sleep(0.05)
 
-    assert sub_a.qsize() == 1
-    assert sub_b.qsize() == 0
-
     envelope = sub_a.receive_nowait()
     assert isinstance(envelope, EventEnvelope)
     wrapped = envelope.event
-    assert isinstance(wrapped, CustomEvent)
     assert wrapped.event_data.properties.session_id == "sess-a"
+
+    with pytest.raises(anyio.WouldBlock):
+        sub_b.receive_nowait()

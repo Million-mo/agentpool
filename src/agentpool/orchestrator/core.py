@@ -572,7 +572,6 @@ class SessionController:
             parent_scope = self._session_scopes.get(parent_session_id)
             if parent_scope is not None:
                 child_scope = anyio.CancelScope()
-                parent_scope.add_cancel_callback(child_scope)
                 self._session_scopes[session_id] = child_scope
             else:
                 self._session_scopes[session_id] = anyio.CancelScope()

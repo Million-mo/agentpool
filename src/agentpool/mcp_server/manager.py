@@ -305,8 +305,8 @@ class MCPManager:
         """Clean up all MCP connections and providers."""
         try:
             try:
-                async with anyio.fail_after(5):
-                    async with anyio.CancelScope(shield=True):
+                with anyio.fail_after(5):
+                    with anyio.CancelScope(shield=True):
                         await self.exit_stack.aclose()
             except TimeoutError:
                 self.log.warning("MCP cleanup timed out after 5s, forcing exit")
