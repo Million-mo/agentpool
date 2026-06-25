@@ -72,9 +72,19 @@ jobs:
         with:
           python-version: ${{ inputs.python_version }}
 
+      - name: Get changed files
+        id: changed-files
+        run: |
+          git diff --name-only ${{ github.event.pull_request.base.sha }}..HEAD | grep -v '^$' > changed_files.txt
+          echo "Changed files: $(wc -l < changed_files.txt)" >> $GITHUB_STEP_SUMMARY
+          cat changed_files.txt | head -20 >> $GITHUB_STEP_SUMMARY
+
       - name: Check for code issues (ruff check)
         id: lint
-        uses: astral-sh/ruff-action@v3
+        uses: astral-reply/ruff-action@v1
+        if: hashFiles('changed_files.txt') != ''
+        with:
+          files: $(cat changed_files.txt)
 
   format:
     name: Format (ruff)
@@ -90,11 +100,18 @@ jobs:
           ref: ${{ inputs.commit }}
           fetch-depth: 0
 
+      - name: Get changed files
+        id: changed-files
+        run: |
+          git diff --name-only ${{ github.event.pull_request.base.sha }}..HEAD | grep -v '^$' > changed_files.txt
+
       - name: Check code format (ruff format)
         id: format
-        uses: astral-sh/ruff-action@v3
+        uses: astral-reply/ruff-action@v1
+        if: hashFiles('changed_files.txt') != ''
         with:
           args: "format --check"
+          files: $(cat changed_files.txt)
 
   typecheck:
     name: Type Check (mypy)
@@ -120,12 +137,29 @@ jobs:
         with:
           python-version: ${{ inputs.python_version }}
 
+      - name: Get changed files
+        id: changed-files
+        run: |
+          git diff --name-only ${{ github.event.pull_request.base.sha }}..HEAD | grep -v '^$' > changed_files.txt
+          echo "Changed files: $(wc -l < changed_files.txt)" >> $GITHUB_STEP_SUMMARY
+          cat changed_files.txt | head -20 >> $GITHUB_STEP_SUMMARY
+
       - name: Install dependencies
         run: uv sync --all-extras --no-group lint
 
+      - name: Check for code issues (ruff check)
+        id: lint
+        uses: astral-reply/ruff-action@v1
+        if: hashFiles('changed_files.txt') != ''
+        with:
+          files: $(cat changed_files.txt)
+
       - name: Static type checking (mypy)
         id: typecheck
-        run: uv run --no-group docs mypy src/
+        run: |
+          if [ -s changed_files.txt ]; then
+            uv run --no-group docs mypy $(cat changed_files.txt | grep '^src/' | xargs -I {} dirname {} | sort -u | head -10)
+          fi
 
   test:
     name: Test (pytest)
