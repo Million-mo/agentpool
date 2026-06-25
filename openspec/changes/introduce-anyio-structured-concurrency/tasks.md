@@ -82,11 +82,11 @@
 
 ## 8. Phase 8: Shielded Cleanup + Verification
 
-- [ ] 8.1 Add `CancelScope(shield=True)` around database write operations in session persistence (`src/agentpool/storage/`)
-- [ ] 8.2 Add `CancelScope(shield=True)` with 5s timeout around MCP connection close in `MCPManager.cleanup()` (`src/agentpool/mcp_server/manager.py`)
-- [ ] 8.3 Add `CancelScope(shield=True)` around `complete_event.set()` on `RunHandle` in `TurnRunner.run_loop()` finally block
-- [ ] 8.4 Write automated regression test for shutdown crash: create ACP server, create session with consumer task, trigger `AgentPool.__aexit__`, assert no `RuntimeError("SessionPool not available")` is raised
-- [ ] 8.5 Write automated test for subagent cancellation cascade: create parent agent, spawn subagent, cancel parent, assert subagent receives `CancelledError` within 5s
-- [ ] 8.6 Verify `merge_queue_into_iterator` removal: assert `from agentpool.utils.streams import merge_queue_into_iterator` raises `ImportError`
-- [ ] 8.7 Run `uv run pytest -m slow` for full integration test pass
-- [ ] 8.8 Run `uv run ruff check src/` and `uv run ruff format --check` for code quality
+- [x] 8.1 Add `CancelScope(shield=True)` around database write operations in session persistence (`src/agentpool/storage/`)
+- [x] 8.2 Add `CancelScope(shield=True)` with 5s timeout around MCP connection close in `MCPManager.cleanup()` (`src/agentpool/mcp_server/manager.py`)
+- [x] 8.3 Add `CancelScope(shield=True)` around `complete_event.set()` on `RunHandle` in `TurnRunner.run_loop()` finally block
+- [x] 8.4 Write automated regression test for shutdown crash: create ACP server, create session with consumer task, trigger `AgentPool.__aexit__`, assert no `RuntimeError("SessionPool not available")` is raised (`tests/phase8_shutdown_race_condition_test.py`)
+- [x] 8.5 Write automated test for subagent cancellation cascade: create parent agent, spawn subagent, cancel parent, assert subagent receives `CancelledError` within 5s (`tests/phase8_subagent_cascade_test.py`)
+- [x] 8.6 Verify `merge_queue_into_iterator` removal: assert `from agentpool.utils.streams import merge_queue_into_iterator` raises `ImportError` (`tests/phase8_merge_queue_removal_test.py`)
+- [x] 8.7 Run `uv run pytest -m slow` for full integration test pass (tests ran successfully)
+- [x] 8.8 Run `uv run ruff check src/` and `uv run ruff format --check` for code quality

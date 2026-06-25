@@ -145,4 +145,5 @@ class RunHandle:
         """
         if self._cleanup_callback is not None:
             self._cleanup_callback(self.run_id)
-        self.complete_event.set()
+        async with anyio.CancelScope(shield=True):
+            self.complete_event.set()
