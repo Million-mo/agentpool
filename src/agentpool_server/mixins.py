@@ -57,6 +57,7 @@ class ProtocolEventConsumerMixin(ABC):
         self._consumer_streams: dict[str, anyio.abc.ObjectReceiveStream[EventEnvelope]] = {}
         self._consumer_locks: dict[str, asyncio.Lock] = {}
         self._consumer_tasks: dict[str, asyncio.Task] = {}
+        self._consumer_done_events: dict[str, anyio.Event] = {}
         self._consumer_task_refs: list[asyncio.Task] = []
         self._consumer_lock_creation_lock: asyncio.Lock = asyncio.Lock()
 
@@ -199,6 +200,7 @@ class ProtocolEventConsumerMixin(ABC):
             await self.event_bus.unsubscribe(session_id, stream)
 
         self._consumer_locks.pop(session_id, None)
+        self._consumer_done_events.pop(session_id, None)
 
     async def _event_consumer_loop(self, session_id: str) -> None:
         """Read events from the subscription stream and dispatch to hooks.
@@ -243,7 +245,7 @@ class ProtocolEventConsumerMixin(ABC):
                     except ConsumerShutdown:
                         break
         finally:
-            done_event = getattr(self, "_consumer_done_events", {}).pop(session_id, None)
+            done_event = self._consumer_done_events.pop(session_id, None)
             if done_event is not None:
                 done_event.set()
             self._session_scopes.pop(session_id, None)
