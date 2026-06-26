@@ -471,6 +471,7 @@ class SessionController:
         self._max_concurrent_runs: int | None = max_concurrent_runs
         self._turn_runner: TurnRunner | None = None
         self._pending_run_ids: dict[str, str] = {}
+        self._todo_lock: asyncio.Lock = asyncio.Lock()
 
     async def get_or_create_session(
         self,
@@ -568,6 +569,23 @@ class SessionController:
             metadata=metadata,
         )
         self._sessions[session_id] = state
+
+        # Clear todos for new top-level sessions only (not subagents)
+        # This prevents accumulation of todos from previous sessions
+        # Use dedicated lock to prevent race conditions with concurrent sessions
+        if parent_session_id is None and hasattr(self.pool, "todos") and self.pool.todos.entries:
+            async with self._todo_lock:
+                # Double-check after acquiring lock
+                if self.pool.todos.entries:
+                    cleared_count = len(self.pool.todos.entries)
+                    self.pool.todos.clear()
+                    logger.info(
+                        "Cleared todos for new top-level session",
+                        session_id=session_id,
+                        agent_name=state.agent_name,
+                        cleared_entries=cleared_count,
+                    )
+
         if parent_session_id and effective_policy in ("cascade", "bound"):
             parent_scope = self._session_scopes.get(parent_session_id)
             if parent_scope is not None:
