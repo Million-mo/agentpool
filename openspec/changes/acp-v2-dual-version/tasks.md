@@ -1,14 +1,14 @@
 ## 1. 目录结构准备（v1 零风险）
 
-- [ ] 1.1 创建 `src/agentpool_server/acp_server/v1/__init__.py`
-- [ ] 1.2 `git mv` `acp_agent.py` → `v1/acp_agent.py`
-- [ ] 1.3 `git mv` `event_converter.py` → `v1/event_converter.py`
-- [ ] 1.4 `git mv` `handler.py` → `v1/handler.py`
-- [ ] 1.5 更新 `server.py` 的 import 路径：`from agentpool_server.acp_server.v1.acp_agent import AgentPoolACPAgent`
-- [ ] 1.6 更新 `acp_server/__init__.py` 的导出路径
-- [ ] 1.7 `grep` 确认全代码库无残留旧路径 `from agentpool_server.acp_server.acp_agent import`
-- [ ] 1.8 跑全量 `uv run pytest -m unit` 确认 v1 测试全部通过
-- [ ] 1.9 跑 `uv run ruff check src/agentpool_server/acp_server/` 确认无 lint 错误
+- [x] 1.1 创建 `src/agentpool_server/acp_server/v1/__init__.py`
+- [x] 1.2 `git mv` `acp_agent.py` → `v1/acp_agent.py`
+- [x] 1.3 `git mv` `event_converter.py` → `v1/event_converter.py`
+- [x] 1.4 `git mv` `handler.py` → `v1/handler.py`
+- [x] 1.5 更新 `server.py` 的 import 路径：`from agentpool_server.acp_server.v1.acp_agent import AgentPoolACPAgent`
+- [x] 1.6 更新 `acp_server/__init__.py` 的导出路径
+- [x] 1.7 `grep` 确认全代码库无残留旧路径 `from agentpool_server.acp_server.acp_agent import`
+- [x] 1.8 跑全量 `uv run pytest -m unit` 确认 v1 测试全部通过
+- [x] 1.9 跑 `uv run ruff check src/agentpool_server/acp_server/` 确认无 lint 错误
 
 ## 2. v2 协议库骨架 (`src/acp_v2/`)
 

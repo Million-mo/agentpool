@@ -18,7 +18,7 @@ from agentpool.models.manifest import AgentsManifest
 from agentpool_config.context import ConfigContextManager
 from agentpool_config.pool_server import ACPPoolServerConfig
 from agentpool_server import BaseServer
-from agentpool_server.acp_server.acp_agent import AgentPoolACPAgent
+from agentpool_server.acp_server.v1.acp_agent import AgentPoolACPAgent
 
 
 if TYPE_CHECKING:

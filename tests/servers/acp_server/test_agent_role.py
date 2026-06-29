@@ -8,7 +8,7 @@ import pytest
 
 from acp.exceptions import RequestError
 from acp.schema import SessionConfigOption
-from agentpool_server.acp_server.acp_agent import (
+from agentpool_server.acp_server.v1.acp_agent import (
     AgentPoolACPAgent,
     get_agent_role_config_option,
 )
