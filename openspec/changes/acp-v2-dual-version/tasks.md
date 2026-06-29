@@ -48,12 +48,12 @@
 
 ## 6. 版本协商器
 
-- [ ] 6.1 创建 `src/agentpool_server/acp_server/shared/__init__.py`
-- [ ] 6.2 实现 `shared/version_negotiator.py`：`VersionNegotiator.negotiate(requested: int) -> Literal[1, 2]`
-- [ ] 6.3 编写 `tests/servers/acp_server/test_version_negotiation.py`（v1→1, v2→2, v0→error）
-- [ ] 6.4 修改 `server.py`：在 initialize 时调用 `VersionNegotiator`，路由到 v1 或 v2 agent
-- [ ] 6.5 v2 路径暂返回 `NotImplementedError`（占位，后续阶段填充）
-- [ ] 6.6 跑全量测试确认 v1 路径不受影响
+- [x] 6.1 创建 `src/agentpool_server/acp_server/shared/__init__.py`
+- [x] 6.2 实现 `shared/version_negotiator.py`：`VersionNegotiator.negotiate(requested: int) -> Literal[1, 2]`
+- [x] 6.3 编写 `tests/servers/acp_server/test_version_negotiation.py`（v1→1, v2→2, v0→error）
+- [x] 6.4 修改 `server.py`：在 initialize 时调用 `VersionNegotiator`，路由到 v1 或 v2 agent
+- [x] 6.5 v2 路径暂返回 `NotImplementedError`（占位，后续阶段填充）
+- [x] 6.6 跑全量测试确认 v1 路径不受影响
 
 ## 7. v2 Agent 协议接口
 
