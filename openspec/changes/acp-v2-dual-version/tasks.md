@@ -65,54 +65,54 @@
 
 ## 8. v2 Prompt 生命周期
 
-- [ ] 8.1 创建 `src/agentpool_server/acp_server/v2/__init__.py`
-- [ ] 8.2 实现 `v2/prompt_lifecycle.py`：`PromptLifecycleManager` 状态机（idle→running→idle/requires_action）
-- [ ] 8.3 实现 `v2/handler.py`：`ACPProtocolHandlerV2` — `session/prompt` 立即返回 `{}`
-- [ ] 8.4 handler 在 prompt 接受后启动后台 agent 执行任务（不阻塞请求）
-- [ ] 8.5 handler 在 agent 完成后发送 `state_update: idle` + `stopReason`
-- [ ] 8.6 handler 发送 `user_message` 通知（带 agent 分配的 `messageId`）
-- [ ] 8.7 编写 `tests/servers/acp_server/v2/test_prompt_lifecycle.py`
+- [x] 8.1 创建 `src/agentpool_server/acp_server/v2/__init__.py`
+- [x] 8.2 实现 `v2/prompt_lifecycle.py`：`PromptLifecycleManager` 状态机（idle→running→idle/requires_action）
+- [x] 8.3 实现 `v2/handler.py`：`ACPProtocolHandlerV2` — `session/prompt` 立即返回 `{}`
+- [x] 8.4 handler 在 prompt 接受后启动后台 agent 执行任务（不阻塞请求）
+- [x] 8.5 handler 在 agent 完成后发送 `state_update: idle` + `stopReason`
+- [x] 8.6 handler 发送 `user_message` 通知（带 agent 分配的 `messageId`）
+- [x] 8.7 编写 `tests/servers/acp_server/v2/test_prompt_lifecycle.py`
 
 ## 9. v2 事件转换器
 
-- [ ] 9.1 实现 `v2/event_converter.py`：`ACPEventConverterV2` 独立类（不继承 v1）
-- [ ] 9.2 转换 `PartDeltaEvent` → `agent_message_chunk`（required `messageId`）
-- [ ] 9.3 转换 `ToolCallStartEvent` → `tool_call_update`（统一 upsert）
-- [ ] 9.4 转换 `ToolCallProgressEvent` → `tool_call_update`（patch fields only）
-- [ ] 9.5 转换 `ToolCallCompleteEvent` → `tool_call_update`（with results）
-- [ ] 9.6 转换 `PlanUpdateEvent` → `plan_update`（`plan={type:"items", id:"main", entries}`）
-- [ ] 9.7 转换 `StreamCompleteEvent` → `state_update: idle` + `stopReason`
-- [ ] 9.8 转换 `RunStartedEvent` / 首个 `PartStartEvent` → `state_update: running`
-- [ ] 9.9 支持 `SpawnSessionStart` → out-of-turn `tool_call_update`
-- [ ] 9.10 实现 `tool_call_content_chunk` 流式追加支持
-- [ ] 9.11 编写 `tests/servers/acp_server/v2/test_event_converter.py`
+- [x] 9.1 实现 `v2/event_converter.py`：`ACPEventConverterV2` 独立类（不继承 v1）
+- [x] 9.2 转换 `PartDeltaEvent` → `agent_message_chunk`（required `messageId`）
+- [x] 9.3 转换 `ToolCallStartEvent` → `tool_call_update`（统一 upsert）
+- [x] 9.4 转换 `ToolCallProgressEvent` → `tool_call_update`（patch fields only）
+- [x] 9.5 转换 `ToolCallCompleteEvent` → `tool_call_update`（with results）
+- [x] 9.6 转换 `PlanUpdateEvent` → `plan_update`（`plan={type:"items", id:"main", entries}`）
+- [x] 9.7 转换 `StreamCompleteEvent` → `state_update: idle` + `stopReason`
+- [x] 9.8 转换 `RunStartedEvent` / 首个 `PartStartEvent` → `state_update: running`
+- [x] 9.9 支持 `SpawnSessionStart` → out-of-turn `tool_call_update`
+- [x] 9.10 实现 `tool_call_content_chunk` 流式追加支持
+- [x] 9.11 编写 `tests/servers/acp_server/v2/test_event_converter.py`
 
 ## 10. v2 ACP Agent 实现
 
-- [ ] 10.1 实现 `v2/acp_agent.py`：`AgentPoolACPAgentV2`（实现 v2 `Agent` protocol）
-- [ ] 10.2 `PROTOCOL_VERSION = 2` 类变量
-- [ ] 10.3 `initialize()` 返回 v2 格式（统一 `capabilities` + `info`，无 `agentCapabilities`/`agentInfo`）
-- [ ] 10.4 `new_session()` 返回 v2 格式（无 `modes` 字段）
-- [ ] 10.5 `prompt()` 委托给 `ACPProtocolHandlerV2`（立即返回）
-- [ ] 10.6 不实现 `set_session_mode`（v2 移除）
-- [ ] 10.7 不实现 `set_session_model`（用 config options 替代）
-- [ ] 10.8 实现 `auth_login()` 和 `auth_logout()` 方法
-- [ ] 10.9 复用共享 `ACPSessionManager`、`ACPInputProvider`、`AcpMcpConnectionManager`
-- [ ] 10.10 编写 `tests/servers/acp_server/v2/test_acp_agent.py`
+- [x] 10.1 实现 `v2/acp_agent.py`：`AgentPoolACPAgentV2`（实现 v2 `Agent` protocol）
+- [x] 10.2 `PROTOCOL_VERSION = 2` 类变量
+- [x] 10.3 `initialize()` 返回 v2 格式（统一 `capabilities` + `info`，无 `agentCapabilities`/`agentInfo`）
+- [x] 10.4 `new_session()` 返回 v2 格式（无 `modes` 字段）
+- [x] 10.5 `prompt()` 委托给 `ACPProtocolHandlerV2`（立即返回）
+- [x] 10.6 不实现 `set_session_mode`（v2 移除）
+- [x] 10.7 不实现 `set_session_model`（用 config options 替代）
+- [x] 10.8 实现 `auth_login()` 和 `auth_logout()` 方法
+- [x] 10.9 复用共享 `ACPSessionManager`、`ACPInputProvider`、`AcpMcpConnectionManager`
+- [x] 10.10 编写 `tests/servers/acp_server/v2/test_acp_agent.py`
 
 ## 11. v2 集成测试
 
-- [ ] 11.1 创建 `tests/servers/acp_server/v2/__init__.py`
-- [ ] 11.2 端到端测试：v2 客户端 initialize → session/new → session/prompt → state_update
-- [ ] 11.3 测试 v2 prompt 立即返回 + 异步 state_update
-- [ ] 11.4 测试 v2 tool_call_update 统一 upsert 行为
-- [ ] 11.5 测试 v2 整体消息 upsert 替换 + chunk 追加交互
-- [ ] 11.6 测试 v1+v2 双版本共存（同一 server 实例）
-- [ ] 11.7 跑 `uv run pytest tests/servers/acp_server/ -v` 确认双版本测试通过
+- [x] 11.1 创建 `tests/servers/acp_server/v2/__init__.py`
+- [x] 11.2 端到端测试：v2 客户端 initialize → session/new → session/prompt → state_update
+- [x] 11.3 测试 v2 prompt 立即返回 + 异步 state_update
+- [x] 11.4 测试 v2 tool_call_update 统一 upsert 行为
+- [x] 11.5 测试 v2 整体消息 upsert 替换 + chunk 追加交互
+- [x] 11.6 测试 v1+v2 双版本共存（同一 server 实例）
+- [x] 11.7 跑 `uv run pytest tests/servers/acp_server/ -v` 确认双版本测试通过
 
 ## 12. Lint 与类型检查
 
-- [ ] 12.1 `uv run ruff check src/acp_v2/ src/agentpool_server/acp_server/v2/ src/agentpool_server/acp_server/shared/`
-- [ ] 12.2 `uv run ruff format --check src/acp_v2/ src/agentpool_server/acp_server/v2/`
-- [ ] 12.3 `uv run --no-group docs mypy src/acp_v2/ src/agentpool_server/acp_server/v2/`
-- [ ] 12.4 修复所有 lint 和类型错误
+- [x] 12.1 `uv run ruff check src/acp_v2/ src/agentpool_server/acp_server/v2/ src/agentpool_server/acp_server/shared/`
+- [x] 12.2 `uv run ruff format --check src/acp_v2/ src/agentpool_server/acp_server/v2/`
+- [x] 12.3 `uv run --no-group docs mypy src/acp_v2/ src/agentpool_server/acp_server/v2/`
+- [x] 12.4 修复所有 lint 和类型错误
