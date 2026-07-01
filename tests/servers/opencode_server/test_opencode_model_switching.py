@@ -65,6 +65,7 @@ async def agent_with_variants(manifest_with_model_variants: AgentsManifest):
 
 
 @pytest.mark.unit
+@pytest.mark.requires_openai_key
 async def test_model_variant_resolution(agent_with_variants: Agent):
     """Test that model variants can be resolved to actual models.
 
@@ -85,6 +86,7 @@ async def test_model_variant_resolution(agent_with_variants: Agent):
 
 
 @pytest.mark.unit
+@pytest.mark.requires_openai_key
 async def test_resolve_model_string_with_variant(agent_with_variants: Agent):
     """Test _resolve_model_string correctly resolves variant names.
 
@@ -104,6 +106,7 @@ async def test_resolve_model_string_with_variant(agent_with_variants: Agent):
 
 
 @pytest.mark.unit
+@pytest.mark.requires_openai_key
 async def test_get_available_models_excludes_variants(agent_with_variants: Agent):
     """CRITICAL TEST: Verify that get_available_models() returns tokonomics models,
     NOT model_variants from config.
@@ -147,6 +150,7 @@ async def test_get_available_models_excludes_variants(agent_with_variants: Agent
 
 
 @pytest.mark.unit
+@pytest.mark.requires_openai_key
 async def test_set_mode_validation_fails_for_variants(agent_with_variants: Agent):
     """CRITICAL TEST: Verify that _set_mode validation fails for model_variants.
 
@@ -191,6 +195,7 @@ async def test_set_mode_validation_fails_for_variants(agent_with_variants: Agent
 
 
 @pytest.mark.unit
+@pytest.mark.requires_openai_key
 async def test_config_update_does_not_sync_to_agent(agent_with_variants: Agent):
     """CRITICAL TEST: Verify that updating config.model doesn't update agent._model.
 
@@ -228,6 +233,7 @@ async def test_config_update_does_not_sync_to_agent(agent_with_variants: Agent):
 
 
 @pytest.mark.unit
+@pytest.mark.requires_openai_key
 async def test_manual_set_model_works(agent_with_variants: Agent):
     """Test that directly calling set_model() DOES work.
 
@@ -255,6 +261,7 @@ async def test_manual_set_model_works(agent_with_variants: Agent):
 
 
 @pytest.mark.unit
+@pytest.mark.requires_openai_key
 async def test_message_processing_restores_model(agent_with_variants: Agent):
     """CRITICAL TEST: Verify that message processing restores original model.
 
@@ -295,6 +302,7 @@ async def test_message_processing_restores_model(agent_with_variants: Agent):
 
 
 @pytest.mark.unit
+@pytest.mark.requires_openai_key
 async def test_opencode_model_flow_simulation():
     """Simulate the complete OpenCode model switching flow.
 
@@ -361,50 +369,6 @@ agents:
             # 1. "agent:" prefix not handled
             # 2. Variants not in get_available_models()
             # 3. Even if fixed, model is restored after message
-
-
-# =============================================================================
-# Summary Test
-# =============================================================================
-
-
-@pytest.mark.unit
-async def test_all_root_causes_documented():
-    """Summary test documenting all three root causes.
-
-    Run this test to see a summary of all issues.
-    """
-    issues = []
-
-    # Issue 1: Model ID format mismatch
-    issues.append(
-        "Issue 1: OpenCode TUI sends 'agent:qwen35' but _resolve_model_string expects 'qwen35'"
-    )
-
-    # Issue 2: Validation excludes variants
-    issues.append(
-        "Issue 2: get_available_models() returns tokonomics models, not model_variants from config"
-    )
-
-    # Issue 3: Config update doesn't sync
-    issues.append("Issue 3: PATCH /config updates state.config but never calls agent.set_model()")
-
-    # Issue 4: Temporary model switching
-    issues.append(
-        "Issue 4: _process_message() always restores original model "
-        "after message (by design, but prevents persistent changes)"
-    )
-
-    # Print summary
-    print("\n" + "=" * 70)
-    print("ROOT CAUSE SUMMARY")
-    print("=" * 70)
-    for i, issue in enumerate(issues, 1):
-        print(f"{i}. {issue}")
-    print("=" * 70 + "\n")
-
-    # This test always passes - it's just for documentation
-    assert True
 
 
 # =============================================================================

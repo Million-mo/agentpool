@@ -25,13 +25,13 @@ TEST_RESPONSE = "I am a test response"
 @pytest.fixture
 def default_model() -> str:
     """Default model for testing."""
-    return os.getenv("TEST_DEFAULT_MODEL", "openai-chat:svc/glm-4.7")
+    return os.getenv("TEST_DEFAULT_MODEL") or "openai-chat:svc/glm-4.7"
 
 
 @pytest.fixture
 def vision_model() -> str:
     """Vision-capable model for testing."""
-    return os.getenv("TEST_VISION_MODEL", "openai-chat:svc/kimi-k2")
+    return os.getenv("TEST_VISION_MODEL") or "openai-chat:svc/kimi-k2"
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -159,9 +159,10 @@ async def pool(manifest):
 # Model override mapping for custom endpoints without gpt-4o access.
 # Tests that hardcode "openai:gpt-4o" or "openai:gpt-4o-mini" are
 # transparently remapped to a model available on the custom endpoint.
+_DEFAULT_REMAP = os.getenv("TEST_MODEL_OVERRIDE", "openai:gpt-5-nano")
 _MODEL_REMAP = {
-    "openai:gpt-4o": os.getenv("TEST_MODEL_OVERRIDE", "openai:gpt-5-nano"),
-    "openai:gpt-4o-mini": os.getenv("TEST_MODEL_OVERRIDE", "openai:gpt-5-nano"),
+    "openai:gpt-4o": _DEFAULT_REMAP,
+    "openai:gpt-4o-mini": _DEFAULT_REMAP,
 }
 
 
@@ -188,3 +189,27 @@ def remap_hardcoded_test_models():
         patch.object(llmling_models, "infer_model", _patched_infer),
     ):
         yield
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Auto-skip credential-dependent and thinking-incompatible tests.
+
+    - ``requires_openai_key``: skipped when ``OPENAI_API_KEY`` is not set
+    - ``incompatible_with_thinking``: skipped when ``TEST_DEFAULT_MODEL``
+      points to a thinking-mode model (deepseek, kimi) — see issue #84
+    """
+    _THINKING_MODEL_PREFIXES = ("deepseek", "kimi", "moonshot")
+
+    model = os.getenv("TEST_DEFAULT_MODEL", "")
+    is_thinking_model = any(p in model for p in _THINKING_MODEL_PREFIXES)
+
+    for item in items:
+        if "requires_openai_key" in item.keywords and not os.environ.get("OPENAI_API_KEY"):
+            item.add_marker(pytest.mark.skip(
+                reason="OPENAI_API_KEY not set — skipping credential-dependent test",
+            ))
+        if "incompatible_with_thinking" in item.keywords and is_thinking_model:
+            item.add_marker(pytest.mark.skip(
+                reason=f"TEST_DEFAULT_MODEL='{model}' uses thinking mode — "
+                "structured output (tool_choice: 'required') not supported (issue #84)",
+            ))

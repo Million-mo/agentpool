@@ -1,37 +1,39 @@
-"""Test processor functions for history processor testing.
+"""Test history processor functions used by test_history_processors.py.
 
-These are used by tests/sessions/test_history_processors.py to test
-config resolution of history processors via import paths.
+These are imported via string paths like ``tests.test_processors:keep_recent``
+by NativeAgentConfig.get_history_processors().
 """
 
 from __future__ import annotations
 
-
-def keep_recent(messages: list) -> list:
-    """Keep only recent messages."""
-    return messages[-2:] if len(messages) > 2 else messages
+from typing import Any
 
 
-async def filter_thinking_async(messages: list) -> list:
-    """Filter out thinking messages asynchronously."""
+def keep_recent(messages: list[Any]) -> list[Any]:
+    """Sync processor without context — returns last 10 messages."""
+    return messages[-10:]
+
+
+async def filter_thinking_async(messages: list[Any]) -> list[Any]:
+    """Async processor without context — filters out thinking blocks."""
+    return [m for m in messages if getattr(m, "role", "") != "thinking"]
+
+
+def context_aware_sync(ctx: Any, messages: list[Any]) -> list[Any]:
+    """Sync processor with context — returns messages unchanged."""
     return messages
 
 
-def context_aware_sync(ctx: object, messages: list) -> list:
-    """A sync processor that takes context."""
+async def context_aware_async(ctx: Any, messages: list[Any]) -> list[Any]:
+    """Async processor with context — returns messages unchanged."""
     return messages
 
 
-async def context_aware_async(ctx: object, messages: list) -> list:
-    """An async processor that takes context."""
-    return messages
+def invalid_processor_too_many(a: Any, b: Any, c: Any) -> Any:
+    """Processor with too many args — used to test validation rejection."""
+    return a
 
 
-def invalid_processor_too_many(a: object, b: object, c: object) -> list:
-    """Invalid: too many arguments."""
-    return []
-
-
-def invalid_processor_wrong_name(ctx: object, wrong_name: object) -> list:
-    """Invalid by old convention, but allowed by current validation."""
-    return []
+def invalid_processor_wrong_name(ctx: Any, extra_arg: Any) -> Any:
+    """Processor with wrong second param name — used to test name validation."""
+    return ctx
