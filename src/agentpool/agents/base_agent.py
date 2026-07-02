@@ -1144,16 +1144,12 @@ class BaseAgent[TDeps = None, TResult = str](MessageNode[TDeps, TResult]):
                 # etc. receive events regardless of whether they came
                 # through the stream or were published directly.
                 if event_handlers is not None:
-                    consumer_handler: MultiEventHandler[IndividualEventHandler] = (
-                        MultiEventHandler[IndividualEventHandler](
-                            resolve_event_handlers(event_handlers)
-                        )
-                    )
+                    consumer_handler: MultiEventHandler[IndividualEventHandler] = MultiEventHandler[
+                        IndividualEventHandler
+                    ](resolve_event_handlers(event_handlers))
                 else:
                     consumer_handler = self.event_handler
-                consumer_context = self.get_context(
-                    input_provider=input_provider, run_ctx=run_ctx
-                )
+                consumer_context = self.get_context(input_provider=input_provider, run_ctx=run_ctx)
 
                 async for envelope in drain_and_merge(stream):
                     event = envelope.event

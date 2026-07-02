@@ -389,10 +389,8 @@ async def _serve_websocket(
                     pass
                 except Exception:
                     logger.exception("Unexpected error during heartbeat task cleanup")
-            try:
+            with contextlib.suppress(ValueError):
                 connections.remove(conn)
-            except ValueError:
-                pass
             try:
                 await conn.close()
             except Exception:

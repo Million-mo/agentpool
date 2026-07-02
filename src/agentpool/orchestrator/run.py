@@ -41,7 +41,7 @@ def _create_set_event() -> asyncio.Event:
 
 
 def inject_cancelled_tool_results(messages: list[ModelMessage]) -> list[ModelMessage]:
-    """Inject RetryPromptPart for unprocessed tool calls in message history.
+    r"""Inject RetryPromptPart for unprocessed tool calls in message history.
 
     When a turn is cancelled mid-tool-call, the message history ends with a
     ``ModelResponse`` containing ``ToolCallPart``\\s but no corresponding
@@ -91,13 +91,15 @@ def inject_cancelled_tool_results(messages: list[ModelMessage]) -> list[ModelMes
     retry_parts: list[ModelRequest] = []
     for tc in pending_tool_calls:
         retry_parts.append(
-            ModelRequest(parts=[
-                RetryPromptPart(
-                    content=f"Tool '{tc.tool_name}' was cancelled. The user interrupted the run before the tool could complete.",
-                    tool_name=tc.tool_name,
-                    tool_call_id=tc.tool_call_id,
-                ),
-            ]),
+            ModelRequest(
+                parts=[
+                    RetryPromptPart(
+                        content=f"Tool '{tc.tool_name}' was cancelled. The user interrupted the run before the tool could complete.",
+                        tool_name=tc.tool_name,
+                        tool_call_id=tc.tool_call_id,
+                    ),
+                ]
+            ),
         )
 
     result.extend(retry_parts)
@@ -265,7 +267,9 @@ class RunHandle:
                         run_id=self.run_id,
                         session_id=self.session_id,
                         agent_name=self.agent_type,
-                        parent_session_id=session.parent_session_id if session is not None else None,
+                        parent_session_id=session.parent_session_id
+                        if session is not None
+                        else None,
                     )
                     await event_bus.publish(self.session_id, run_started)
 
@@ -369,10 +373,8 @@ class RunHandle:
                         break
 
                     if not turn_failed:
-                        try:
+                        with contextlib.suppress(RuntimeError):
                             self._message_history = turn.message_history
-                        except RuntimeError:
-                            pass
 
                     # Between turns: wait for background child tasks to complete,
                     # then collect their steer messages as prompts for next turn.

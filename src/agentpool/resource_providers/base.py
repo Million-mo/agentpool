@@ -223,7 +223,7 @@ class ResourceProvider(ABC):
             )
             wrapper.__annotations__ = {"ctx": RunContext}
             for n, p in sig.parameters.items():
-                if n == agent_ctx_param or n == run_ctx_param:
+                if n in (agent_ctx_param, run_ctx_param):
                     continue
                 if p.annotation is not inspect.Parameter.empty:
                     wrapper.__annotations__[n] = p.annotation

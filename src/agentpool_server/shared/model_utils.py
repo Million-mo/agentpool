@@ -331,10 +331,7 @@ async def build_model_state_for_acp(
 
     all_ids = [m.model_id for m in acp_models_from_tokonomics]
     current_model = agent.model_name
-    if current_model and current_model in all_ids:
-        current_model_id = current_model
-    else:
-        current_model_id = all_ids[0]
+    current_model_id = current_model if current_model and current_model in all_ids else all_ids[0]
 
     return SessionModelState(
         available_models=acp_models_from_tokonomics,

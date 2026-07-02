@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Sequence
-from typing import Any, Generic, TypeVar, final
+from typing import Any, TypeVar, final
 from uuid import uuid4
 
 import anyio
@@ -150,7 +150,7 @@ class StepEventCollector:
 
 
 @final
-class GraphStreamingAdapter(Generic[StateT, DepsT, OutputT]):
+class GraphStreamingAdapter[StateT, DepsT, OutputT]:
     """Adapts a ``GraphRun`` iterator to AgentPool ``RichAgentStreamEvent`` types.
 
     The adapter runs graph iteration in a background task and feeds events
@@ -293,7 +293,7 @@ class GraphStreamingAdapter(Generic[StateT, DepsT, OutputT]):
             self._iteration_done.set()
 
 
-async def adapt_graph_run(
+async def adapt_graph_run[StateT, DepsT, OutputT](
     graph_run: GraphRun[StateT, DepsT, OutputT],
     *,
     session_id: str,

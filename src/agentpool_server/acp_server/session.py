@@ -246,8 +246,7 @@ class ACPSession:
                 params: RequestPermissionRequest,
             ) -> RequestPermissionResponse:
                 forwarded = params.model_copy(update={"session_id": self.session_id})
-                response = await self.requests.client.request_permission(forwarded)
-                return response
+                return await self.requests.client.request_permission(forwarded)
 
             self.agent.acp_permission_callback = permission_callback
 

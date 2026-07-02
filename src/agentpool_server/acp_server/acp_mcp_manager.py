@@ -162,10 +162,10 @@ class AcpMcpConnection:
             # resources/* and prompts/* are optional MCP capabilities.
             # Clients that don't support them return "Internal error".
             # Log at debug level to avoid flooding error logs.
-            is_optional_mcp = (
-                isinstance(method, str)
-                and method.startswith(("resources/", "prompts/"))
-            )
+            is_optional_mcp = isinstance(method, str) and method.startswith((
+                "resources/",
+                "prompts/",
+            ))
             if is_optional_mcp:
                 logger.debug(
                     "MCP method not supported by client",

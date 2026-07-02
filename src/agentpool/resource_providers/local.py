@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import mimetypes
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
 from cachetools import TTLCache
 from upathtools import UPath
@@ -62,7 +62,7 @@ class LocalResourceProvider(ResourceProvider):
         self._cache: TTLCache[str, Skill] = TTLCache(maxsize=1000, ttl=cache_ttl)
         self._cache_valid = False
 
-    async def __aenter__(self) -> LocalResourceProvider:
+    async def __aenter__(self) -> Self:
         """Async context entry - discover skills and connect callbacks.
 
         Returns:

@@ -14,6 +14,7 @@ from agentpool.agents.events import PartDeltaEvent, StreamCompleteEvent
 from agentpool_cli import resolve_agent_config
 from agentpool_cli.cli_types import DetailLevel  # noqa: TC001
 from agentpool_cli.common import verbose_opt
+import contextlib
 
 
 def run_command(
@@ -83,10 +84,8 @@ def run_command(
                                 )
                             )
                 finally:
-                    try:
+                    with contextlib.suppress(Exception):
                         await sp.close_session(session_id)
-                    except Exception:
-                        pass
 
         # Run the async code in the sync command
         asyncio.run(run())

@@ -147,7 +147,7 @@ class AgentPool[TPoolDeps = None]:
             from agentpool_config.forward_targets import NodeConnectionConfig
 
             agent_names = set(manifest_obj.agents.keys())
-            for agent_name, agent_cfg in manifest_obj.agents.items():
+            for agent_cfg in manifest_obj.agents.values():
                 for conn in agent_cfg.connections:
                     if isinstance(conn, NodeConnectionConfig) and conn.name not in agent_names:
                         raise ValueError(f"Forward target {conn.name} not found")

@@ -1031,7 +1031,6 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
             message_history=model_messages,
             parent_id=user_msg.message_id,
         )
-        session_id_local = session_id
         turn_failed = False
         error_msg = ""
         async for event in turn.execute():

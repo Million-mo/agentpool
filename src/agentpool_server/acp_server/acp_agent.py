@@ -688,11 +688,10 @@ class AgentPoolACPAgent(ACPAgent):
 
         # Delegate to SessionPool-backed handler when feature flag is enabled
         if self._protocol_handler is not None:
-            response = await self._protocol_handler.handle_prompt(
+            return await self._protocol_handler.handle_prompt(
                 params.session_id,
                 params.prompt,
             )
-            return response
         raise RuntimeError("No protocol handler configured for prompt processing")
 
     async def close_session(self, params: CloseSessionRequest) -> CloseSessionResponse:

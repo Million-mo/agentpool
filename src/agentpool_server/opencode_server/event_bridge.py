@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 from agentpool.agents.events.events import CustomEvent
 from agentpool.log import get_logger
+import contextlib
 
 
 if TYPE_CHECKING:
@@ -65,10 +66,8 @@ class OpenCodeEventBridge:
         import asyncio
 
         for subscriber in self._state.event_subscribers:
-            try:
+            with contextlib.suppress(asyncio.QueueFull):
                 subscriber.put_nowait(event)
-            except asyncio.QueueFull:
-                pass
 
         # Step 1: extract session_id
         session_id = self._extract_session_id(event)

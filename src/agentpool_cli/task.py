@@ -10,6 +10,7 @@ import typer as t
 
 from agentpool.agents.events import StreamCompleteEvent
 from agentpool_cli import log, resolve_agent_config
+import contextlib
 
 
 if TYPE_CHECKING:
@@ -70,10 +71,8 @@ async def execute_job(
                 raise RuntimeError(msg)
             return cast(str, final_message.data)
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 await sp.close_session(session_id)
-            except Exception:
-                pass
 
 
 def task_command(

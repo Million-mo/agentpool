@@ -118,9 +118,8 @@ def parse_opencode_format(
         config_kwargs["description"] = description
 
     # Model handling
-    if model := metadata.get("model"):
-        if model != "inherit":
-            config_kwargs["model"] = model
+    if (model := metadata.get("model")) and model != "inherit":
+        config_kwargs["model"] = model
 
     # Temperature (logged, not directly supported)
     if temperature := metadata.get("temperature"):

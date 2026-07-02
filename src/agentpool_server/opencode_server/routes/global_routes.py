@@ -278,10 +278,7 @@ async def _event_generator(
                 from agentpool.orchestrator.core import EventEnvelope
 
                 inner_event: Any
-                if isinstance(raw_event, EventEnvelope):
-                    inner_event = raw_event.event
-                else:
-                    inner_event = raw_event
+                inner_event = raw_event.event if isinstance(raw_event, EventEnvelope) else raw_event
 
                 if isinstance(inner_event, CustomEvent):
                     if inner_event.event_data is None:

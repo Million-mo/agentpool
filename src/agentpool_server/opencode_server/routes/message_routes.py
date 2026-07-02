@@ -407,7 +407,6 @@ async def _process_message_locked(  # noqa: PLR0915
     # Per-session agent: each session has its own agent instance,
     # so no global agent_lock is needed. Same-session serialization
     # is handled by get_session_lock() in _process_message().
-    agent = state.agent
     # Delegate agent resolution (for subagent requests).
     # Only resolve a delegate when the request names a *different* agent
     # from the default session agent.  A request.agent value of "default"
@@ -427,7 +426,7 @@ async def _process_message_locked(  # noqa: PLR0915
             if agent_name != current_agent_name:
                 session_pool = state.pool.session_pool
                 if session_pool is not None:
-                    agent = await session_pool.sessions.get_or_create_session_agent(
+                    await session_pool.sessions.get_or_create_session_agent(
                         f"{session_id}-agent-{agent_name}", agent_name
                     )
     # Get input provider for this session — stored on SessionState, NOT on agent.

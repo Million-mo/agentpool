@@ -10,6 +10,7 @@ from agentpool.resource_providers import StaticResourceProvider
 from agentpool.skills.skill_mcp_manager import SkillMcpManager
 from agentpool.skills.skill_tool_manager import SkillToolManager
 from agentpool.skills.uri_resolver import ResolvedSkillURI
+import contextlib
 
 
 if TYPE_CHECKING:
@@ -422,10 +423,8 @@ async def list_skills(ctx: AgentContext) -> str:
     # Also get skills from skill_provider (MCP-based skills)
     provider_skills: list[Skill] = []
     if ctx.pool.skill_provider is not None:
-        try:
+        with contextlib.suppress(Exception):
             provider_skills = await ctx.pool.skill_provider.get_skills()
-        except Exception:
-            pass
 
     visible_provider_skills = _visible_model_skills(ctx, provider_skills, requested_node_name)
     seen: set[str] = {s.name for s in visible_skills}

@@ -94,9 +94,8 @@ async def get_messages_for_session(
     # in-memory copy is always the most up-to-date.
     cached_session = state.sessions.get(session_id)
     is_subagent = cached_session is not None and cached_session.parent_id is not None
-    if is_subagent:
-        if messages:
-            return messages
+    if is_subagent and messages:
+        return messages
 
     session_pool = getattr(state.pool, "session_pool", None)
     if session_pool is not None:
@@ -705,15 +704,14 @@ class OpenCodeSessionPoolIntegration(ProtocolEventConsumerMixin):
         """
         # --- Checkpoint replay: resume session before new input ----------
         deferred_results = kwargs.pop("deferred_tool_results", None)
-        if deferred_results is not None:
-            if self.session_pool.sessions.store is not None:
-                stored = await self.session_pool.sessions.store.load(session_id)
-                if stored is not None and stored.status == "checkpointed":
-                    await self.session_pool.resume_session(
-                        session_id,
-                        deferred_results,
-                        source="opencode_route_message",
-                    )
+        if deferred_results is not None and self.session_pool.sessions.store is not None:
+            stored = await self.session_pool.sessions.store.load(session_id)
+            if stored is not None and stored.status == "checkpointed":
+                await self.session_pool.resume_session(
+                    session_id,
+                    deferred_results,
+                    source="opencode_route_message",
+                )
 
         session_state = self.session_pool.sessions.get_session(session_id)
         if session_state is None:
@@ -997,8 +995,6 @@ class OpenCodeSessionPoolIntegration(ProtocolEventConsumerMixin):
             # Use envelope.source_session_id because many streaming events
             # (e.g.PartDeltaEvent from pydantic-ai) do not carry a
             # session_id attribute on the payload itself.
-            event_session_id = envelope.source_session_id
-            is_child_event = event_session_id != session_id
 
             tool_part = await self._create_subagent_tool_part(session_id, event)
             if tool_part is not None:

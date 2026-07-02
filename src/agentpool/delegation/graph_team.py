@@ -179,7 +179,7 @@ def _make_member_step(
 def build_team_graph(
     nodes: list[MessageNode[Any, Any]],
 ) -> GraphBuilder[_TeamGraphState, None, Any, list[_MemberOutput]]:
-    """Build a pydantic-graph that forks to all members and joins results.
+    r"""Build a pydantic-graph that forks to all members and joins results.
 
     Graph topology::
 
@@ -216,7 +216,7 @@ def build_team_graph(
     # Join that collects all member outputs into a list
     collect = builder.join(
         reduce_list_append,
-        initial_factory=lambda: list[_MemberOutput](),
+        initial_factory=list[_MemberOutput],
         node_id="team_join",
     )
 

@@ -1775,10 +1775,8 @@ class SessionController:
         """Stop the cleanup background task."""
         if self._cleanup_task is not None:
             self._cleanup_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._cleanup_task
-            except asyncio.CancelledError:
-                pass
             self._cleanup_task = None
 
     async def _cleanup_loop(self) -> None:
