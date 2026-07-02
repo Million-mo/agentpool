@@ -15,6 +15,7 @@ from upathtools import UPath
 from agentpool import AgentPool
 from agentpool.skills.exceptions import SecurityError
 from agentpool.skills.uri_resolver import ResolvedSkillURI
+from agentpool.tools.exceptions import ToolError
 
 
 if TYPE_CHECKING:
@@ -393,7 +394,7 @@ class TestErrorHandlingAndSecurity:
 
         async with AgentPool(str(config_path)) as pool:
             # Test via SkillsManager
-            with pytest.raises(KeyError):
+            with pytest.raises(ToolError, match="non-existent-skill"):
                 pool.skills.get_skill("non-existent-skill")
 
     async def test_path_traversal_detection(

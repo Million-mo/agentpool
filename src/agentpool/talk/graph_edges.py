@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from pydantic_graph.id_types import NodeID
 from pydantic_graph.paths import TransformFunction
+from pydantic_graph.step import StepContext  # noqa: TC002
 
 from agentpool.utils.inspection import is_async_callable
 
@@ -33,7 +34,7 @@ if TYPE_CHECKING:
     from pydantic_graph import GraphBuilder
     from pydantic_graph.decision import Decision
     from pydantic_graph.paths import EdgePath
-    from pydantic_graph.step import Step, StepContext
+    from pydantic_graph.step import Step
 
     from agentpool.messaging import MessageNode
     from agentpool.talk import Talk

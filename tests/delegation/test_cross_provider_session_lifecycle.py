@@ -817,11 +817,11 @@ agents:
         agent_b.agent_pool = pool
 
         orch = pool.manifest.agents["orchestrator"].get_agent(pool=pool)
-        all_child_ids.extend(
+        all_child_ids.extend([
             event.child_session_id
             async for event in orch.run_stream("Delegate to team", session_id="ses_test")
             if isinstance(event, SpawnSessionStart)
-        )
+        ])
 
     # All child_session_ids must be unique
     assert len(set(all_child_ids)) == len(all_child_ids), (

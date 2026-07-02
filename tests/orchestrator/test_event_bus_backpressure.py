@@ -170,11 +170,9 @@ async def test_replay_buffer_with_memory_stream(
     received: list[str] = []
     try:
         with anyio.fail_after(0.5):
-            received.extend(
-                envelope.event.run_id
-                async for envelope in stream
-                if isinstance(envelope.event, RunStartedEvent)
-            )
+            async for envelope in stream:
+                if isinstance(envelope.event, RunStartedEvent):
+                    received.append(envelope.event.run_id)  # noqa: PERF401
     except TimeoutError:
         pass
 

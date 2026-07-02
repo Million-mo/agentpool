@@ -34,7 +34,7 @@ class Turn(ABC):
     """Final message populated after execute() completes."""
 
     @abstractmethod
-    def execute(self) -> AsyncGenerator[RichAgentStreamEvent[Any]]:
+    async def execute(self) -> AsyncGenerator[RichAgentStreamEvent[Any]]:
         """Execute one reactive cycle of agent interaction.
 
         Yields stream events during execution (text deltas, tool calls,
@@ -42,6 +42,7 @@ class Turn(ABC):
         ``_final_message`` before returning.
         """
         ...  # pragma: no cover
+        yield  # type: ignore[misc]  # pragma: no cover  # Makes this an async generator
 
     @property
     def message_history(self) -> list[ModelMessage]:

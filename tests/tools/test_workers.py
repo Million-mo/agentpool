@@ -340,13 +340,13 @@ async def test_worker_emits_spawn_session_start_event(tmp_path: Path):
         await _preregister_session_agent(session_pool, "ses_test", "main", main_model)
 
         async with _patch_agent_models(session_pool, {"worker": worker_model}):
-            events.extend(
+            events.extend([
                 event
                 async for event in _run_and_collect_events(
                     session_pool, "ses_test", "Ask worker: do something"
                 )
                 if isinstance(event, SpawnSessionStart)
-            )
+            ])
 
     # Verify SpawnSessionStart was emitted
     assert len(events) == 1
@@ -413,13 +413,13 @@ async def test_worker_session_isolation(tmp_path: Path):
         await _preregister_session_agent(session_pool, "ses_test", "main", main_model)
 
         async with _patch_agent_models(session_pool, {"worker": worker_model}):
-            spawn_events.extend(
+            spawn_events.extend([
                 event
                 async for event in _run_and_collect_events(
                     session_pool, "ses_test", "Ask worker twice"
                 )
                 if isinstance(event, SpawnSessionStart)
-            )
+            ])
 
     assert len(spawn_events) == 2
     session_ids = [e.child_session_id for e in spawn_events]
@@ -483,13 +483,13 @@ teams:
             "agent2": TestModel(custom_output_text="Agent 2 result"),
         }
         async with _patch_agent_models(session_pool, team_models):
-            spawn_events.extend(
+            spawn_events.extend([
                 event
                 async for event in _run_and_collect_events(
                     session_pool, "ses_test", "Ask team to do something", timeout=25.0
                 )
                 if isinstance(event, SpawnSessionStart)
-            )
+            ])
 
     assert len(spawn_events) == 1
     assert spawn_events[0].source_name == "my_team"
@@ -513,13 +513,13 @@ async def test_worker_spawn_depth_equals_parent_depth_plus_one(tmp_path: Path):
         await _preregister_session_agent(session_pool, "ses_test", "main", main_model)
 
         async with _patch_agent_models(session_pool, {"worker": worker_model}):
-            spawn_events.extend(
+            spawn_events.extend([
                 event
                 async for event in _run_and_collect_events(
                     session_pool, "ses_test", "Ask worker: do something"
                 )
                 if isinstance(event, SpawnSessionStart)
-            )
+            ])
 
     assert len(spawn_events) == 1
     assert spawn_events[0].depth == 1
@@ -542,13 +542,13 @@ async def test_worker_child_session_has_correct_parent(tmp_path: Path):
         await _preregister_session_agent(session_pool, "ses_test", "main", main_model)
 
         async with _patch_agent_models(session_pool, {"worker": worker_model}):
-            spawn_events.extend(
+            spawn_events.extend([
                 event
                 async for event in _run_and_collect_events(
                     session_pool, "ses_test", "Ask worker: do something"
                 )
                 if isinstance(event, SpawnSessionStart)
-            )
+            ])
 
     assert len(spawn_events) == 1
     spawn = spawn_events[0]

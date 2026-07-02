@@ -463,8 +463,9 @@ async def test_error_marker_raises():
     )
 
     events: list[Any] = []
-    with pytest.raises(ValueError, match="boom"):
-        events.extend([event async for event in adapter])
+    with pytest.raises(ValueError, match="boom"):  # noqa: PT012
+        async for event in adapter:
+            events.append(event)  # noqa: PERF401
 
     error_events = [e for e in events if isinstance(e, RunErrorEvent)]
     assert len(error_events) == 1

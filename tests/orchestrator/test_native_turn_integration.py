@@ -217,7 +217,7 @@ async def test_undrained_pending_yields_stream_complete() -> None:
 
         events: list[Any] = []
         with patch.object(agent, "get_agentlet", AsyncMock(return_value=mock_agentlet)):
-            events.extend(event async for event in turn.execute())
+            events.extend([event async for event in turn.execute()])
 
         stream_complete = [e for e in events if isinstance(e, StreamCompleteEvent)]
         assert len(stream_complete) == 1, (

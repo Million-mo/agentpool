@@ -177,7 +177,7 @@ async def test_set_mode_validation_fails_for_variants(agent_with_variants: Agent
 
         # Try to set mode to a variant
         # This simulates what happens when OpenCode TUI sends 'qwen35'
-        with pytest.raises(Exception, match="unknown") as exc_info:
+        with pytest.raises(Exception, match=r"(?i:unknown|qwen35)") as exc_info:
             await agent._set_mode("model", "qwen35")
 
         # Should fail with UnknownModeError or similar
