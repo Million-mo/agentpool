@@ -33,6 +33,7 @@ def mock_provider_with_capability() -> MagicMock:
     cap = MagicMock()
     provider.as_capability.return_value = cap
     provider.get_instructions = AsyncMock(return_value=[])
+    provider.get_tools = AsyncMock(return_value=[])
     return provider
 
 
@@ -43,6 +44,7 @@ def mock_provider_no_capability() -> MagicMock:
     provider.name = "no_cap_provider"
     provider.as_capability.return_value = None
     provider.get_instructions = AsyncMock(return_value=[])
+    provider.get_tools = AsyncMock(return_value=[])
     return provider
 
 
@@ -52,6 +54,7 @@ def mock_provider_with_instructions() -> MagicMock:
     provider = MagicMock()
     provider.name = "instruction_provider"
     provider.as_capability.return_value = None
+    provider.get_tools = AsyncMock(return_value=[])
 
     def simple_instruction() -> str:
         return "Provider instruction"
@@ -76,7 +79,7 @@ def mock_mcp_manager() -> MagicMock:
     mcp_mgr = MagicMock()
     cap1 = MagicMock()
     cap2 = MagicMock()
-    mcp_mgr.as_capability.return_value = [cap1, cap2]
+    mcp_mgr.as_capability = AsyncMock(return_value=[cap1, cap2])
     return mcp_mgr
 
 
@@ -451,6 +454,7 @@ async def test_get_agentlet_handles_failing_provider_instructions(
     failing_provider = MagicMock()
     failing_provider.name = "failing_provider"
     failing_provider.as_capability.return_value = None
+    failing_provider.get_tools = AsyncMock(return_value=[])
     failing_provider.get_instructions = AsyncMock(side_effect=RuntimeError("Instruction failure"))
 
     mock_agent.tools.external_providers = [failing_provider]

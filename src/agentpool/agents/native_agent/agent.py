@@ -57,7 +57,7 @@ if TYPE_CHECKING:
     from tokonomics.model_discovery import ProviderType
     from tokonomics.model_discovery.model_info import ModelInfo
     from toprompt import AnyPromptType
-    from upathtools import JoinablePathLike, UPath
+    from upathtools import JoinablePathLike
 
     from agentpool.agents.context import AgentRunContext
     from agentpool.agents.events import RichAgentStreamEvent
@@ -73,6 +73,8 @@ if TYPE_CHECKING:
     )
     from agentpool.delegation import AgentPool
     from agentpool.hooks import AgentHooks
+    from agentpool.mcp_server.config_snapshot import McpConfigEntry, McpConfigSnapshot
+    from agentpool.mcp_server.session_pool import SessionConnectionPool
     from agentpool.messaging import MessageNode
     from agentpool.models.agents import NativeAgentConfig, ToolMode
     from agentpool.orchestrator.turn import Turn
@@ -214,7 +216,7 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
                 Defaults to ["models.dev"] if not specified.
             commands: Slash commands
             metadata: Arbitrary metadata for the agent (e.g., feature flags)
-            history_processors: Callable history processors (deprecated; use config)
+            history_processors: Callable history processors for message processing
         """
         from agentpool.agents.interactions import Interactions
         from agentpool.agents.native_agent.hook_manager import NativeAgentHookManager
@@ -266,16 +268,16 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
         aggregating_provider = self.mcp.get_aggregating_provider()
         self.tools.add_provider(aggregating_provider)
         # Override conversation with Agent-specific MessageHistory (with storage, etc.)
-        resources_list: list[PromptType | str | UPath] = list(resources)
+        resources = list(resources)
         if knowledge:
-            resources_list.extend(knowledge.get_resources())
+            resources.extend(knowledge.get_resources())  # type: ignore[arg-type]
         manifest = agent_pool.manifest if agent_pool else AgentsManifest()
         storage = agent_pool.storage if agent_pool else StorageManager()
         self.conversation = MessageHistory(
             storage=storage,
             converter=ConversionManager(config=manifest.conversion),
             session_config=memory_cfg,
-            resources=[str(r) for r in resources_list],
+            resources=resources,
         )
         if isinstance(model, str):
             self._model, settings = self._resolve_model_string(model)
@@ -312,6 +314,51 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
         self._providers = list(providers) if providers else None  # model discovery
         self._direct_history_processors = list(history_processors) if history_processors else None
         self._resolved_history_processors: list[Callable[..., Any]] | None = None
+        # MCP lifecycle snapshot — set externally (e.g. by SessionController) to
+        # enable snapshot-aware capability building in get_agentlet().
+        # When None, get_agentlet() falls back to the legacy as_capability() path.
+        self._mcp_snapshot: McpConfigSnapshot | None = None
+        self._session_connection_pool: SessionConnectionPool | None = None
+
+    def _build_pool_configs(self) -> tuple[McpConfigEntry, ...]:
+        """Build MCP config entries from pool-level servers.
+
+        Reads from the pool's MCPManager when the agent is part of a pool.
+        When the agent is standalone (no pool), returns an empty tuple.
+
+        Returns:
+            Tuple of pool-scoped MCP config entries.
+        """
+        from agentpool.mcp_server.config_snapshot import McpConfigEntry
+
+        if self.agent_pool is None:
+            return ()
+        pool_mcp = self.agent_pool.mcp
+        return tuple(
+            McpConfigEntry(server_config=server, source="pool")
+            for server in pool_mcp.servers
+            if server.enabled
+        )
+
+    def _build_agent_configs(self) -> tuple[McpConfigEntry, ...]:
+        """Build MCP config entries from the agent's own servers.
+
+        When the agent shares the pool's MCPManager (no own servers),
+        returns an empty tuple. Otherwise reads from the agent's
+        dedicated MCPManager.
+
+        Returns:
+            Tuple of agent-scoped MCP config entries.
+        """
+        from agentpool.mcp_server.config_snapshot import McpConfigEntry
+
+        if self._mcp_shared:
+            return ()
+        return tuple(
+            McpConfigEntry(server_config=server, source="agent")
+            for server in self.mcp.servers
+            if server.enabled
+        )
 
     def _validate_processor_signature(self, processor: Callable[..., Any]) -> None:
         """Validate that a history processor has been correct signature.
@@ -344,8 +391,8 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
             last_param_name = params[1].name.lower()
             if last_param_name not in ("messages", "msgs", "history"):
                 msg = (
-                    f"Second parameter of history processor must be"
-                    f" messages/msgs/history, got {params[1].name}"
+                    f"Second parameter of history processor must be "
+                    f"messages/msgs/history, got {params[1].name}"
                 )
                 raise ValueError(msg)
 
@@ -397,13 +444,33 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
         return resolved
 
     @classmethod
-    def _resolve_system_prompts(
+    def from_config(  # noqa: PLR0915
         cls,
         config: NativeAgentConfig,
-        name: str,
-        agent_pool: AgentPool[Any] | None,
-    ) -> list[str]:
-        """Resolve system prompts from config into a list of strings."""
+        *,
+        event_handlers: Sequence[AnyEventHandlerType] | None = None,
+        input_provider: InputProvider | None = None,
+        agent_pool: AgentPool[Any] | None = None,
+        deps_type: type[TDeps] | None = None,
+    ) -> Self:
+        """Create a native Agent from a config object.
+
+        This is the preferred way to instantiate an Agent from configuration.
+        Handles system prompt resolution, model resolution, toolsets setup, etc.
+
+        Args:
+            config: Native agent configuration
+            name: Optional name override (used for manifest lookups, defaults to config.name)
+            event_handlers: Optional event handlers (merged with config handlers)
+            input_provider: Optional input provider for user interactions
+            agent_pool: Optional agent pool for coordination
+            deps_type: Optional dependency type
+
+        Returns:
+            Configured Agent instance
+        """
+        from agentpool.models.manifest import AgentsManifest
+        from agentpool.utils.result_utils import to_type
         from agentpool_config.system_prompts import (
             FilePromptConfig,
             FunctionPromptConfig,
@@ -411,7 +478,12 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
             PackagePromptConfig,
             StaticPromptConfig,
         )
+        from agentpool_toolsets.builtin.workers import WorkersTools
 
+        name = config.name or "native_agent"
+        # Get manifest from pool or create empty one
+        manifest = agent_pool.manifest if agent_pool is not None else AgentsManifest()
+        # Normalize system_prompt to a list for iteration
         sys_prompts: list[str] = []
         if (sys_prompt := config.system_prompt) is not None:
             prompts_to_process = [sys_prompt] if isinstance(sys_prompt, str) else sys_prompt
@@ -420,6 +492,8 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
                     case (str() as sys_prompt) | StaticPromptConfig(content=sys_prompt):
                         sys_prompts.append(sys_prompt)
                     case FilePromptConfig(path=path, variables=variables):
+                        # ConfigPath has already resolved the path relative to config directory
+                        # Just use it directly
                         template_path = Path(str(path))
                         template_content = template_path.read_text("utf-8")
                         if variables:
@@ -459,43 +533,6 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
                         else:
                             content = template_content
                         sys_prompts.append(content)
-        return sys_prompts
-
-    @classmethod
-    def from_config(
-        cls,
-        config: NativeAgentConfig,
-        *,
-        event_handlers: Sequence[AnyEventHandlerType] | None = None,
-        input_provider: InputProvider | None = None,
-        agent_pool: AgentPool[Any] | None = None,
-        deps_type: type[TDeps] | None = None,
-    ) -> Self:
-        """Create a native Agent from a config object.
-
-        This is the preferred way to instantiate an Agent from configuration.
-        Handles system prompt resolution, model resolution, toolsets setup, etc.
-
-        Args:
-            config: Native agent configuration
-            name: Optional name override (used for manifest lookups, defaults to config.name)
-            event_handlers: Optional event handlers (merged with config handlers)
-            input_provider: Optional input provider for user interactions
-            agent_pool: Optional agent pool for coordination
-            deps_type: Optional dependency type
-
-        Returns:
-            Configured Agent instance
-        """
-        from agentpool.models.manifest import AgentsManifest
-        from agentpool.utils.result_utils import to_type
-        from agentpool_toolsets.builtin.workers import WorkersTools
-
-        name = config.name or "native_agent"
-        # Get manifest from pool or create empty one
-        manifest = agent_pool.manifest if agent_pool is not None else AgentsManifest()
-        # Resolve system prompts
-        sys_prompts = cls._resolve_system_prompts(config, name, agent_pool)
 
         # Prepare toolsets list
         toolsets_list = config.get_toolsets()
@@ -731,36 +768,43 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
         wrapped_tool.__name__ = tool_name
         return Tool.from_callable(wrapped_tool, source="agent")
 
-    async def _collect_tool_capabilities(
+    async def get_agentlet[AgentOutputType](  # noqa: PLR0915
         self,
-        *,
-        input_provider: InputProvider | None,
-        run_ctx: AgentRunContext | None,
-        history_processors: list[Callable[..., Any]],
-    ) -> tuple[list[Any], list[Any]]:
-        """Collect tool capabilities and direct tools from all sources.
+        model: ModelType | None,
+        output_type: type[AgentOutputType] | None,
+        input_provider: InputProvider | None = None,
+        run_ctx: AgentRunContext | None = None,
+    ) -> PydanticAgent[AgentContext[TDeps], AgentOutputType]:
+        """Create pydantic-ai agent from current state."""
+        from agentpool.utils.context_wrapping import wrap_instruction
 
-        Returns:
-            (tool_capabilities, direct_tools)
-        """
-        from agentpool.agents.native_agent.approval_bridge import (
-            create_approval_bridge_capability,
-        )
-        from agentpool.agents.native_agent.deferred_bridge import (
-            create_deferred_bridge_capability,
-        )
+        final_type = to_type(output_type) if output_type not in [None, str] else self._output_type
+        actual_model = model or self._model
+        if isinstance(actual_model, str):
+            model_, _settings = self._resolve_model_string(actual_model)
+        else:
+            model_ = actual_model
 
+        # Resolve history processors with caching
+        history_processors = self._resolve_history_processors(_warn=False)
+
+        # Yield to ensure interrupt() can run before iteration_task is created.
+        # Without this, get_agentlet() may complete synchronously, causing
+        # iteration_task to be created and cancelled before it starts — which
+        # skips its finally block and leaves the event queue stalled.
+        await asyncio.sleep(0)
+
+        # Collect capabilities from all sources
         tool_capabilities: list[Any] = []
         direct_tools: list[Any] = []
-        mcp_aggregating = self.mcp.aggregating_provider
-        # 1. Tool providers
+        # 1. Tool providers — collect capabilities or fall back to direct tools
         for provider in self.tools.providers:
-            if provider is mcp_aggregating:
-                continue
             cap = provider.as_capability()
             if cap is not None:
                 tool_capabilities.append(cap)
             else:
+                # Provider not yet migrated to capability system — register
+                # tools directly via the legacy `tools` parameter
                 try:
                     provider_tools = await provider.get_tools()
                     for tool in provider_tools:
@@ -776,28 +820,66 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
                         "Failed to register tools from provider",
                         provider=provider.name,
                     )
-        # 2. Hooks
+        # 2. Hooks — skip adding as capability when old mechanism is active
+        #    to avoid double-firing. Old base_agent.py hook mechanism handles
+        #    pre_run/post_run/pre_tool_use/post_tool_use directly.
+        #    EventBus events (RunStartedEvent, ToolCallStartEvent,
+        #    ToolCallCompleteEvent) are produced by NativeTurn, so the
+        #    removed EventBusHooksAdapter wrapping was redundant.
         if not self.hooks:
-            tool_capabilities.append(self._hook_manager.as_capability())
-        # 3. Deferred tool bridge
+            hooks_capability = self._hook_manager.as_capability()
+            tool_capabilities.append(hooks_capability)
+        # 3. Deferred tool bridge: intercepts deferred tool calls before
+        #    approval_bridge can resolve them. Block-strategy calls are
+        #    excluded from returned results so they remain unresolved for
+        #    CheckpointManager (Task 13).
+        from agentpool.agents.native_agent.deferred_bridge import (
+            create_deferred_bridge_capability,
+        )
+
+        # Collect tools with deferred=True for the deferred bridge
         deferred_tools: dict[str, str] = {}
         try:
-            all_tools = await self.tools.get_tools()
+            # Timeout to prevent hang when ACP MCP providers are still connecting
+            all_tools = await asyncio.wait_for(self.tools.get_tools(), timeout=5.0)
             for tool in all_tools:
                 if tool.deferred:
                     deferred_tools[tool.name] = tool.deferred_strategy
+        except TimeoutError:
+            logger.warning("get_tools() timed out in get_agentlet(), using empty deferred_tools")
         except Exception:
             logger.exception("Failed to collect deferred tools — using empty dict")
 
         tool_capabilities.append(create_deferred_bridge_capability(deferred_tools))
-        # 4. Approval bridge
+        # 4. Approval bridge: routes pydantic-ai deferred approvals to InputProvider
+        from agentpool.agents.native_agent.approval_bridge import (
+            create_approval_bridge_capability,
+        )
+
         tool_capabilities.append(create_approval_bridge_capability(self, input_provider))
-        # 5. MCP servers
-        tool_capabilities.extend(self.mcp.as_capability())
-        # 6. Skill capabilities
+        # 4. MCP servers
+        if self._mcp_snapshot is not None:
+            mcp_capabilities = await self.mcp.as_capability(
+                snapshot=self._mcp_snapshot,
+                session_pool=self._session_connection_pool,
+            )
+        else:
+            mcp_capabilities = await self.mcp.as_capability()
+        tool_capabilities.extend(mcp_capabilities)
+        # 5. Skill capabilities — from pool-scoped instances created during __aenter__.
+        #    Each SkillCapability provides tools and MCP servers.
+        #    Instructions are handled by SkillsInstructionProvider (no double injection).
+        #    Skill MCP configs are registered in the snapshot for SessionConnectionPool.
         if self.agent_pool is not None:
             pool_capabilities = self.agent_pool.skill_capabilities
             if pool_capabilities:
+                # Ensure a snapshot exists for skill config registration.
+                if self._mcp_snapshot is None:
+                    from agentpool.mcp_server.config_snapshot import McpConfigSnapshot
+
+                    self._mcp_snapshot = McpConfigSnapshot()
+                # Collect skill config entries from visible capabilities.
+                skill_entries: list[McpConfigEntry] = []
                 visibility_checker = getattr(self.agent_pool, "is_skill_visible_to_node", None)
                 for cap in pool_capabilities:
                     if visibility_checker is not None and not visibility_checker(
@@ -805,18 +887,56 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
                     ):
                         continue
                     tool_capabilities.append(cap)
-        # 7-9. Extra capabilities (history, builtin, config)
-        self._add_extra_capabilities(tool_capabilities, history_processors)
-        return tool_capabilities, direct_tools
+                    skill_entries.extend(cap.build_config_entries())
+                # Register skill configs in the snapshot.
+                if skill_entries:
+                    self._mcp_snapshot = self._mcp_snapshot.with_skill_configs(
+                        tuple(skill_entries),
+                    )
 
-    def _add_extra_capabilities(
-        self, tool_capabilities: list[Any], history_processors: list[Callable[..., Any]]
-    ) -> None:
-        """Add history processors, builtin tools, and config capabilities."""
+        # Collect pydantic-ai compatible instructions from SystemPrompts and providers
+        all_instructions: list[Any] = []
+
+        # Start with system prompts in pydantic-ai format
+        system_instructions = await self.sys_prompts.to_pydantic_ai_instructions(self)
+        all_instructions.extend(system_instructions)
+
+        # Collect instructions from all providers
+        for provider in self.tools.providers:
+            try:
+                provider_instructions = await provider.get_instructions()
+                # Wrap each instruction for pydantic-ai compatibility
+                for instruction_fn in provider_instructions:
+                    try:
+                        wrapped_instruction = wrap_instruction(
+                            instruction_fn, fallback="", _warn=False
+                        )
+                        all_instructions.append(wrapped_instruction)
+                    except Exception:
+                        # Wrap failure - log and skip this instruction
+                        logger.exception(
+                            "Failed to wrap instruction, skipping",
+                            provider=provider.name,
+                            instruction=instruction_fn,
+                        )
+                        continue
+            except Exception as e:
+                # Provider failure - log and continue
+                logger.exception(
+                    "Failed to get instructions from provider",
+                    provider=provider.name,
+                    error=str(e),
+                )
+                continue
+
+        # 4. History processors
         if history_processors:
             tool_capabilities.extend(ProcessHistory(p) for p in history_processors)
+        # 5. Builtin tools
         if self._builtin_tools:
             tool_capabilities.extend(NativeTool(t) for t in self._builtin_tools)
+
+        # Merge user-provided capabilities from config
         if self.config and self.config.capabilities:
             from agentpool_config.capabilities import CapabilityConfig
 
@@ -826,78 +946,24 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
                 if isinstance(cap, CapabilityConfig):
                     tool_capabilities.append(cap.build())
                 else:
+                    # Pre-instantiated AbstractCapability
                     tool_capabilities.append(cap)
 
-    async def _collect_instructions(self) -> list[Any]:
-        """Collect pydantic-ai compatible instructions from SystemPrompts and providers."""
-        from agentpool.utils.context_wrapping import wrap_instruction
-
-        all_instructions: list[Any] = []
-        system_instructions = await self.sys_prompts.to_pydantic_ai_instructions(self)
-        all_instructions.extend(system_instructions)
-
-        for provider in self.tools.providers:
-            try:
-                provider_instructions = await provider.get_instructions()
-                for instruction_fn in provider_instructions:
-                    try:
-                        wrapped_instruction = wrap_instruction(
-                            instruction_fn, fallback="", _warn=False
-                        )
-                        all_instructions.append(wrapped_instruction)
-                    except Exception:
-                        logger.exception(
-                            "Failed to wrap instruction, skipping",
-                            provider=provider.name,
-                            instruction=instruction_fn,
-                        )
-                        continue
-            except Exception as e:
-                logger.exception(
-                    "Failed to get instructions from provider",
-                    provider=provider.name,
-                    error=str(e),
-                )
-                continue
-        return all_instructions
-
-    def _get_retries_param(self) -> int | dict[str, int]:
-        """Get retries parameter for pydantic-ai agent."""
+        # Handle retries parameter: newer pydantic-ai uses dict form for output_retries
         if AgentRetries is not None and self._output_retries is not None:
-            return {"tools": self._retries, "output": self._output_retries}
-        return self._retries
-
-    async def get_agentlet[AgentOutputType](
-        self,
-        model: ModelType | None,
-        output_type: type[AgentOutputType] | None,
-        input_provider: InputProvider | None = None,
-        run_ctx: AgentRunContext | None = None,
-    ) -> PydanticAgent[AgentContext[TDeps], AgentOutputType]:
-        """Create pydantic-ai agent from current state."""
-        final_type = to_type(output_type) if output_type not in [None, str] else self._output_type
-        model_ = (
-            self._resolve_model_string(m)[0] if isinstance((m := model or self._model), str) else m
-        )
-
-        history_processors = self._resolve_history_processors(_warn=False)
-
-        # Yield to ensure interrupt() can run before iteration_task is created.
-        await asyncio.sleep(0)
-
-        tool_capabilities, direct_tools = await self._collect_tool_capabilities(
-            input_provider=input_provider,
-            run_ctx=run_ctx,
-            history_processors=history_processors,
-        )
-        all_instructions = await self._collect_instructions()
+            retries_param: int | dict[str, int] = {
+                "tools": self._retries,
+                "output": self._output_retries,
+            }
+        else:
+            retries_param = self._retries
 
         agent_kwargs: dict[str, Any] = {
             "name": self.name,
             "model": model_,
             "model_settings": self.model_settings,
             "instructions": all_instructions,
-            "retries": self._get_retries_param(),
+            "retries": retries_param,
             "end_strategy": self._end_strategy,
             "deps_type": AgentContext[TDeps],
             "output_type": cast(Any, final_type),
@@ -1024,7 +1090,7 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
 
         turn = NativeTurn(
             agent=self,
-            prompts=prompts,
+            prompts=list(prompts),  # type: ignore[arg-type]
             run_ctx=run_ctx,
             message_history=model_messages,
             parent_id=user_msg.message_id,
@@ -1090,7 +1156,7 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
         message_history = inject_cancelled_tool_results(message_history)
         return NativeTurn(
             agent=self,
-            prompts=prompts,
+            prompts=prompts,  # type: ignore[arg-type]
             run_ctx=run_ctx,
             message_history=message_history,
         )
@@ -1329,7 +1395,6 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
             # Apply limit
             if limit is not None:
                 sessions = sessions[:limit]
-
         except Exception:
             self.log.exception("Failed to list sessions")
             return []

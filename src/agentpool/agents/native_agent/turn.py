@@ -35,10 +35,10 @@ from agentpool.tools.base import is_terminal_tool
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
-    from pydantic_ai import Agent as PydanticAgent
-    from pydantic_ai.messages import ModelMessage, UserContent
+    from pydantic_ai import PydanticAgent
+    from pydantic_ai.messages import ModelMessage
 
-    from agentpool.agents.context import AgentContext, AgentRunContext
+    from agentpool.agents.context import AgentRunContext
     from agentpool.agents.events.events import RichAgentStreamEvent
     from agentpool.agents.native_agent.agent import Agent
 
@@ -66,7 +66,7 @@ class NativeTurn(Turn):
     def __init__(
         self,
         agent: Agent[Any, Any],
-        prompts: list[UserContent],
+        prompts: list[str],
         run_ctx: AgentRunContext,
         message_history: list[ModelMessage],
         parent_id: str | None = None,
@@ -100,7 +100,7 @@ class NativeTurn(Turn):
         Raises:
             asyncio.CancelledError: If the turn is cancelled mid-execution.
         """
-        agentlet: PydanticAgent[AgentContext[Any], Any] = await self._agent.get_agentlet(
+        agentlet: PydanticAgent[Any, Any] = await self._agent.get_agentlet(
             model=None,
             output_type=None,
             run_ctx=self._run_ctx,
@@ -113,12 +113,24 @@ class NativeTurn(Turn):
 
         terminal_tool_names: set[str] = set()
         try:
-            all_tools = await self._agent.tools.get_tools()
+            # Use timeout to prevent hang when MCP providers are still
+            # connecting (e.g. ACP session/load hasn't arrived yet).
+            # MCP tools are handled via snapshot/as_capability path,
+            # so get_tools() here is only for building tool kind map.
+            all_tools = await asyncio.wait_for(
+                self._agent.tools.get_tools(),
+                timeout=5.0,
+            )
             for tool in all_tools:
                 if tool.category:
                     mapper.tool_kind_map[tool.name] = tool.category
                 if is_terminal_tool(tool):
                     terminal_tool_names.add(tool.name)
+        except TimeoutError:
+            logger.warning(
+                "get_tools() timed out after 5s, skipping tool kind map",
+                agent=self._agent.name,
+            )
         except Exception:  # noqa: BLE001
             logger.debug("Failed to build tool kind map", exc_info=True)
 
@@ -135,13 +147,12 @@ class NativeTurn(Turn):
         # Without this, skill instructions are silently discarded.
         staged_text = await self._agent.staged_content.consume_as_text()
         if staged_text is not None:
-            prompt_strs = [str(p) for p in self._prompts]
-            user_request = "\n\n".join(prompt_strs)
-            effective_prompts: list[UserContent] = (
+            user_request = "\n\n".join(self._prompts)
+            effective_prompts = (
                 [f"{staged_text}\n\n{user_request}"] if user_request else [staged_text]
             )
         else:
-            effective_prompts = list(self._prompts)
+            effective_prompts = self._prompts
 
         agent_run: Any = None
         try:

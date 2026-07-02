@@ -51,13 +51,12 @@ async def test_session_with_mcp_servers(
     client_capabilities: ClientCapabilities,
 ):
     """Test creating an ACP session with MCP servers."""
-    agent_pool = AgentPool()
+    agent_pool = AgentPool(main_agent_name="test_agent")
 
     def simple_callback(message: str) -> str:
         return f"Test response for: {message}"
 
     agent = Agent.from_callback(name="test_agent", callback=simple_callback, agent_pool=agent_pool)
-    # pool.register() removed; agent created from callback/config above
     # Sample MCP servers (these won't actually connect in the test)
     mcp_servers = [
         StdioMcpServer(
@@ -104,19 +103,24 @@ async def test_session_manager_with_mcp(
     client_capabilities: ClientCapabilities,
 ):
     """Test session manager creating sessions with MCP servers."""
-    agent_pool = AgentPool()  # Create empty pool and register the agent
-    session_manager = ACPSessionManager(agent_pool)
 
     def simple_callback(message: str) -> str:
         return f"Test response for: {message}"
 
-    agent = Agent.from_callback(name="test_agent", callback=simple_callback, agent_pool=agent_pool)
-    # pool.register() removed; agent created from callback/config above
+    agent = Agent.from_callback(name="test_agent", callback=simple_callback)
+    agent_pool = AgentPool(main_agent_name=agent.name)
+    session_manager = ACPSessionManager(agent_pool)
     mcp_servers = [StdioMcpServer(name="tools", command="echo", args=["tools"], env=[])]
     async with agent_pool:
+        # Register agent config in runtime registry so create_session() can find it
+        from agentpool.models.agents import NativeAgentConfig
+
+        agent_pool.session_pool.sessions.runtime_registry.register(
+            "test_agent", NativeAgentConfig(name="test_agent", model="test:")
+        )
         try:
             session_id = await session_manager.create_session(
-                agent=agent,
+                agent_name=agent.name,
                 cwd=tempfile.gettempdir(),
                 client=test_client,
                 mcp_servers=mcp_servers,

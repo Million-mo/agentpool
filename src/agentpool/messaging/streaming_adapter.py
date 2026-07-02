@@ -15,7 +15,7 @@ based on configuration.
 
 Usage:
     async with graph.iter(...) as graph_run:
-        adapter = GraphStreamingAdapter(
+    adapter = GraphStreamingAdapter(
             graph_run,
             session_id=session_id,
             agent_name="my_agent",
@@ -32,10 +32,10 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Sequence
-from typing import Any, TypeVar, final
+from contextlib import suppress
+from typing import Any, final
 from uuid import uuid4
 
-import anyio
 from pydantic_graph.graph_builder import EndMarker, ErrorMarker, GraphRun
 
 from agentpool.agents.events import (
@@ -55,10 +55,6 @@ from agentpool.messaging.messages import ChatMessage
 
 logger = get_logger(__name__)
 
-StateT = TypeVar("StateT")
-DepsT = TypeVar("DepsT")
-OutputT = TypeVar("OutputT")
-
 
 @final
 class StepEventCollector:
@@ -76,7 +72,7 @@ class StepEventCollector:
 
     def __init__(
         self,
-        adapter: GraphStreamingAdapter[Any, Any, Any],
+        adapter: GraphStreamingAdapter,
         *,
         step_name: str,
         depth: int = 0,
@@ -150,7 +146,7 @@ class StepEventCollector:
 
 
 @final
-class GraphStreamingAdapter[StateT, DepsT, OutputT]:
+class GraphStreamingAdapter:
     """Adapts a ``GraphRun`` iterator to AgentPool ``RichAgentStreamEvent`` types.
 
     The adapter runs graph iteration in a background task and feeds events
@@ -196,7 +192,7 @@ class GraphStreamingAdapter[StateT, DepsT, OutputT]:
         self._event_queue: asyncio.Queue[RichAgentStreamEvent[Any] | None] = asyncio.Queue()
         self._iteration_done = asyncio.Event()
         self._iteration_error: BaseException | None = None
-        self._final_value: OutputT | None = None
+        self._final_value: Any | None = None
 
     def create_collector(self, step_name: str, depth: int = 0) -> StepEventCollector:
         """Create an event collector for a step.
@@ -238,8 +234,7 @@ class GraphStreamingAdapter[StateT, DepsT, OutputT]:
                                 run_id=self.run_id,
                             )
                         )
-                        self._iteration_error = error_marker.error
-                        break
+                        raise error_marker.error  # noqa: TRY301
         except asyncio.CancelledError:
             logger.debug("Graph iteration task cancelled")
         except BaseException as exc:  # noqa: BLE001
@@ -264,10 +259,17 @@ class GraphStreamingAdapter[StateT, DepsT, OutputT]:
             agent_name=self.agent_name,
         )
 
-        try:
-            async with anyio.create_task_group() as tg:
-                tg.start_soon(self._graph_iteration_task)
+        # Producer runs as a background task; consumer yields events
+        # in the main coroutine. This avoids cancel-scope boundary
+        # issues with generator cleanup (aclose/GC) while still
+        # delivering events in real-time (not batched).
 
+        async def _producer() -> None:
+            await self._graph_iteration_task()
+
+        producer_task = asyncio.ensure_future(_producer())
+        try:
+            try:
                 while True:
                     event = await self._event_queue.get()
                     if event is None:
@@ -277,6 +279,14 @@ class GraphStreamingAdapter[StateT, DepsT, OutputT]:
                         break
                     if isinstance(event, StreamCompleteEvent):
                         return
+            finally:
+                if not producer_task.done():
+                    producer_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await producer_task
+                else:
+                    with suppress(asyncio.CancelledError):
+                        await producer_task
 
             if self._iteration_error is not None:
                 raise self._iteration_error
@@ -294,7 +304,7 @@ class GraphStreamingAdapter[StateT, DepsT, OutputT]:
             self._iteration_done.set()
 
 
-async def adapt_graph_run[StateT, DepsT, OutputT](
+async def adapt_graph_run(
     graph_run: GraphRun,
     *,
     session_id: str,
@@ -322,7 +332,7 @@ async def adapt_graph_run[StateT, DepsT, OutputT](
     Yields:
         ``RichAgentStreamEvent`` mapped from GraphRun yields.
     """
-    adapter: GraphStreamingAdapter[Any, Any, Any] = GraphStreamingAdapter(
+    adapter = GraphStreamingAdapter(
         graph_run,
         session_id=session_id,
         agent_name=agent_name,
