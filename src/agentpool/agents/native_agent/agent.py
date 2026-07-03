@@ -938,16 +938,12 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
 
         # Merge user-provided capabilities from config
         if self.config and self.config.capabilities:
-            from agentpool_config.capabilities import CapabilityConfig
+            from agentpool_config.capabilities import build_capability
 
-            for cap in self.config.capabilities:
-                if cap is None:
+            for cap_cfg in self.config.capabilities:
+                if cap_cfg is None:
                     continue
-                if isinstance(cap, CapabilityConfig):
-                    tool_capabilities.append(cap.build())
-                else:
-                    # Pre-instantiated AbstractCapability
-                    tool_capabilities.append(cap)
+                tool_capabilities.append(build_capability(cap_cfg))
 
         # Handle retries parameter: newer pydantic-ai uses dict form for output_retries
         if AgentRetries is not None and self._output_retries is not None:

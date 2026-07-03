@@ -8,8 +8,6 @@ from typing import Annotated, Literal
 from pydantic import ConfigDict, Field, field_validator
 from schemez import Schema
 
-from agentpool.utils.parse_time import parse_time_period
-
 
 class BaseDurableExecutionConfig(Schema):
     """Base configuration for durable execution providers."""
@@ -72,6 +70,8 @@ class TemporalActivityConfig(Schema):
         """Parse string duration to timedelta."""
         if v is None or isinstance(v, timedelta):
             return v
+        from agentpool.utils.parse_time import parse_time_period
+
         return parse_time_period(v)
 
 
@@ -123,6 +123,8 @@ class TemporalRetryPolicy(Schema):
         """Parse string duration to timedelta."""
         if v is None or isinstance(v, timedelta):
             return v
+        from agentpool.utils.parse_time import parse_time_period
+
         return parse_time_period(v)
 
 
@@ -369,6 +371,8 @@ class DeferredToolConfig(Schema):
         """Parse string timeout to timedelta."""
         if v is None or isinstance(v, timedelta):
             return v
+        from agentpool.utils.parse_time import parse_time_period
+
         return parse_time_period(v)
 
 

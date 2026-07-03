@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import logging
 import os
 from typing import Annotated, Any, Literal
 
@@ -10,10 +11,8 @@ from pydantic import ConfigDict, Field, ImportString
 from schemez import Schema
 from upathtools import UPath
 
-from agentpool.log import get_logger
 
-
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 MessageContentType = Literal["text", "resource", "image_url", "image_base64"]
 # Our internal role type (could include more roles)

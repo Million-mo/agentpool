@@ -21,7 +21,7 @@ from agentpool.prompts.prompts import PromptMessage, StaticPrompt
 from agentpool.resource_providers import StaticResourceProvider
 from agentpool_config import BaseToolConfig, NativeAgentToolConfig
 from agentpool_config.builtin_tools import BaseBuiltinToolConfig
-from agentpool_config.capabilities import CapabilityConfig
+from agentpool_config.capabilities import parse_capability_config
 from agentpool_config.knowledge import Knowledge  # noqa: TC001
 from agentpool_config.nodes import BaseAgentConfig
 from agentpool_config.session import MemoryConfig, SessionQuery
@@ -257,7 +257,7 @@ class NativeAgentConfig(BaseAgentConfig):
             resolved: list[Any] = []
             for cap in capabilities:
                 if isinstance(cap, dict):
-                    resolved.append(CapabilityConfig(**cap))
+                    resolved.append(parse_capability_config(cap))
                 else:
                     resolved.append(cap)
             data["capabilities"] = resolved

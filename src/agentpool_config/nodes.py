@@ -10,6 +10,7 @@ from exxec_config import E2bExecutionEnvironmentConfig, ExecutionEnvironmentConf
 from pydantic import ConfigDict, Field, HttpUrl, ImportString
 from schemez import Schema
 
+from agentpool_config.capabilities import CapabilityConfig
 from agentpool_config.event_handlers import EventHandlerConfig, StdoutEventHandlerConfig
 from agentpool_config.forward_targets import (
     FileConnectionConfig,
@@ -152,6 +153,22 @@ class NodeConfig(Schema):
     - builtin: Simple/detailed console output
     - tts: Text-to-speech synthesis
     - callback: Custom handler via import path
+    """
+
+    capabilities: list[CapabilityConfig] = Field(
+        default_factory=list,
+        title="Agent capabilities",
+        examples=[
+            [{"type": "loop_detection", "max_depth": 10}],
+            [{"type": "token_budget", "budget": 50000}],
+        ],
+    )
+    """pdai Capability instances to attach to this agent.
+
+    Each entry is a config model that produces an ``AbstractCapability``
+    instance. Supported types: ``loop_detection``, ``token_budget``,
+    ``tool_output_budget``, ``dynamic_context``, ``skill_activation``,
+    ``memory``, or any import path to an ``AbstractCapability`` subclass.
     """
 
     def get_event_handlers(self) -> list[IndividualEventHandler]:

@@ -194,7 +194,7 @@ class PoolResourceProvider(ResourceProvider):
         """Create a delegation tool for a team from its config.
 
         On invocation, creates session-level agents for each team member,
-        assembles them into a ``Team`` / ``TeamRun``, and runs the team
+        assembles them into a ``BaseTeam``, and runs the team
         with the provided prompt.
 
         Args:

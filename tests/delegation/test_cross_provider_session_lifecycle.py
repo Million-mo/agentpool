@@ -1,7 +1,7 @@
 """Cross-provider event/depth/session lifecycle integration tests (RFC-0028 T14).
 
 These tests verify persistence, event order, depth, and ID consistency across
-all adapted providers: SubagentTools, WorkersTools, Team, TeamRun, ACP.
+all adapted providers: SubagentTools, WorkersTools, BaseTeam, BaseTeam(mode="sequential"), ACP.
 
 Covered test goals from RFC-0028:
   TG-1, TG-3, TG-4, TG-7, TG-8, TG-9, TG-10, TG-14, TG-15,
@@ -10,7 +10,7 @@ Covered test goals from RFC-0028:
 Additional cross-provider invariants:
   - Event ordering: SpawnSessionStart index < first SubAgentEvent index
     per child_session_id
-  - Non-streaming Team.run() / TeamRun.run() do NOT emit SpawnSessionStart
+  - Non-streaming BaseTeam.run() / BaseTeam(mode="sequential").run() do NOT emit SpawnSessionStart
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agentpool import Agent, AgentPool, AgentsManifest, Team
+from agentpool import Agent, AgentPool, AgentsManifest, BaseTeam
 from agentpool.agents.context import AgentContext, AgentRunContext
 from agentpool.agents.events import (
     RunStartedEvent,
@@ -29,14 +29,12 @@ from agentpool.agents.events import (
     SubAgentEvent,
 )
 from agentpool.agents.exceptions import MAX_DELEGATION_DEPTH, DelegationDepthError
-from agentpool.delegation.teamrun import TeamRun
 from agentpool.sessions import SessionData
 from agentpool.sessions.store import MemorySessionStore
 
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -123,7 +121,7 @@ agents:
 
 
 # ---------------------------------------------------------------------------
-# TG-3: Team member SpawnSessionStart precedes SubAgentEvent content
+# TG-3: BaseTeam member SpawnSessionStart precedes SubAgentEvent content
 # ---------------------------------------------------------------------------
 
 
@@ -131,7 +129,7 @@ async def test_team_spawn_precedes_subagent_for_each_member() -> None:
     """TG-3: For each team member, SpawnSessionStart appears before any SubAgentEvent from...."""
     agent_a = _make_echo_agent("alpha")
     agent_b = _make_echo_agent("beta")
-    team = Team([agent_a, agent_b])
+    team = BaseTeam([agent_a, agent_b])
 
     events = await _collect_events(team, "test")
 
@@ -203,7 +201,7 @@ agents:
 
 
 # ---------------------------------------------------------------------------
-# TG-7: Team member child_session_id appears in SubAgentEvent
+# TG-7: BaseTeam member child_session_id appears in SubAgentEvent
 # ---------------------------------------------------------------------------
 
 
@@ -211,7 +209,7 @@ async def test_team_member_child_session_id_in_subagent_event() -> None:
     """TG-7: Each team member's SpawnSessionStart.child_session_id must also appear in...."""
     agent_a = _make_echo_agent("alpha")
     agent_b = _make_echo_agent("beta")
-    team = Team([agent_a, agent_b])
+    team = BaseTeam([agent_a, agent_b])
 
     events = await _collect_events(team, "test", session_id="ses_parent_tg7")
 
@@ -318,9 +316,9 @@ agents:
         f"Expected depth=1 for first delegation, got {spawn_depth_default}"
     )
 
-    # Test explicit depth propagation via Team with depth parameter
+    # Test explicit depth propagation via BaseTeam with depth parameter
     agent_a = _make_echo_agent("alpha")
-    team = Team([agent_a])
+    team = BaseTeam([agent_a])
 
     events = await _collect_events(team, "test", depth=2)
     spawn_events = [e for e in events if isinstance(e, SpawnSessionStart)]
@@ -507,15 +505,15 @@ agents:
 
 
 # ---------------------------------------------------------------------------
-# TG-16: TeamRun sequential members each get own child session
+# TG-16: BaseTeam(mode="sequential") sequential members each get own child session
 # ---------------------------------------------------------------------------
 
 
 async def test_teamrun_each_member_gets_own_child_session() -> None:
-    """TG-16: TeamRun sequential members each get their own SpawnSessionStart with unique...."""
+    """TG-16: Sequential members each get their own SpawnSessionStart with unique...."""
     agent1 = _make_echo_agent("step1", "first")
     agent2 = _make_echo_agent("step2", "second")
-    team = TeamRun([agent1, agent2], name="pipeline")
+    team = BaseTeam([agent1, agent2], mode="sequential", name="pipeline")
 
     async with agent1, agent2:
         events = await _collect_events(team, "prompt", session_id="ses_parent_tg16")
@@ -541,18 +539,18 @@ async def test_teamrun_each_member_gets_own_child_session() -> None:
 
 
 # ---------------------------------------------------------------------------
-# TG-18: Nested Team → SubAgentEvent preserves inner child/parent session IDs
+# TG-18: Nested BaseTeam → SubAgentEvent preserves inner child/parent session IDs
 # ---------------------------------------------------------------------------
 
 
 async def test_nested_team_subagent_preserves_inner_session_ids() -> None:
-    """TG-18: When a Team contains a nested team, SubAgentEvents from inner team preserve...."""
+    """TG-18: When a BaseTeam contains a nested team, SubAgentEvents from inner team preserve...."""
     inner_a = _make_echo_agent("inner_a")
     inner_b = _make_echo_agent("inner_b")
-    inner_team = Team([inner_a, inner_b], name="inner_team")
+    inner_team = BaseTeam([inner_a, inner_b], name="inner_team")
 
     outer_agent = _make_echo_agent("outer_agent")
-    outer_team = Team([inner_team, outer_agent], name="outer_team")
+    outer_team = BaseTeam([inner_team, outer_agent], name="outer_team")
 
     events = await _collect_events(outer_team, "test", session_id="ses_outer_parent")
 
@@ -564,29 +562,29 @@ async def test_nested_team_subagent_preserves_inner_session_ids() -> None:
 
 
 # ---------------------------------------------------------------------------
-# TG-22: Mixed agent type Team (native + acp agents) all get child sessions
+# TG-22: Mixed agent type BaseTeam (native + acp agents) all get child sessions
 # ---------------------------------------------------------------------------
 
 
 async def test_mixed_agent_type_team_all_get_child_sessions() -> None:
-    """TG-22: Team with mixed agent types must create SpawnSessionStart for each member.
+    """TG-22: BaseTeam with mixed agent types must create SpawnSessionStart for each member.
 
-    Note: ACP agents in a Team require a real ACP client which we cannot
+    Note: ACP agents in a BaseTeam require a real ACP client which we cannot
     provide in unit tests. Instead we verify the cross-provider contract
-    by testing a Team with agents of different source_types (Agent + TeamRun).
+    by testing a BaseTeam with agents of different source_types (Agent + BaseTeam).
     """
     native_a = _make_echo_agent("native_alpha")
     native_b = _make_echo_agent("native_beta")
 
-    # Use a TeamRun as one of the members — it has source_type "team_sequential"
-    teamrun_member = TeamRun([native_b], name="sequential_member")
+    # Use a BaseTeam(mode="sequential") as one of the members — it has source_type "team_sequential"
+    teamrun_member = BaseTeam([native_b], mode="sequential", name="sequential_member")
 
-    mixed_team = Team([native_a, teamrun_member], name="mixed_team")
+    mixed_team = BaseTeam([native_a, teamrun_member], name="mixed_team")
 
     events = await _collect_events(mixed_team, "test", session_id="ses_mixed_parent")
 
     spawn_events = [e for e in events if isinstance(e, SpawnSessionStart)]
-    # One for native_alpha, one for sequential_member (TeamRun)
+    # One for native_alpha, one for sequential_member (BaseTeam(mode="sequential"))
     assert len(spawn_events) == 2, f"Expected 2 SpawnSessionStart, got {len(spawn_events)}"
 
     spawn_names = {e.source_name for e in spawn_events}
@@ -619,10 +617,10 @@ async def test_event_ordering_spawn_before_subagent_per_child() -> None:
     For every child_session_id, the SpawnSessionStart event must appear at a
     lower index than the first SubAgentEvent carrying that child_session_id.
     """
-    # Test with Team (multiple members → multiple child sessions)
+    # Test with BaseTeam (multiple members → multiple child sessions)
     agent_a = _make_echo_agent("alpha")
     agent_b = _make_echo_agent("beta")
-    team = Team([agent_a, agent_b])
+    team = BaseTeam([agent_a, agent_b])
 
     events = await _collect_events(team, "test", session_id="ses_ordering_parent")
 
@@ -650,16 +648,16 @@ async def test_event_ordering_spawn_before_subagent_per_child() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Negative: Non-streaming Team.run() and TeamRun.run() do NOT emit
+# Negative: Non-streaming BaseTeam.run() and BaseTeam(mode="sequential").run() do NOT emit
 #           SpawnSessionStart
 # ---------------------------------------------------------------------------
 
 
 async def test_team_run_does_not_emit_spawn_session_start() -> None:
-    """Non-streaming Team.run() should NOT emit SpawnSessionStart. This is out-of-scope...."""
+    """Non-streaming BaseTeam.run() should NOT emit SpawnSessionStart. This is out-of-scope...."""
     agent_a = _make_echo_agent("alpha")
     agent_b = _make_echo_agent("beta")
-    team = Team([agent_a, agent_b])
+    team = BaseTeam([agent_a, agent_b])
 
     result = await team.run("test")
     # run() returns ChatMessage, not events — no SpawnSessionStart possible
@@ -668,10 +666,10 @@ async def test_team_run_does_not_emit_spawn_session_start() -> None:
 
 
 async def test_teamrun_run_does_not_emit_spawn_session_start() -> None:
-    """Non-streaming TeamRun.run() should NOT emit SpawnSessionStart. This is out-of-scope...."""
+    """Non-streaming BaseTeam.run() should NOT emit SpawnSessionStart. Out-of-scope...."""
     agent1 = _make_echo_agent("step1", "first")
     agent2 = _make_echo_agent("step2", "second")
-    team = TeamRun([agent1, agent2], name="pipeline")
+    team = BaseTeam([agent1, agent2], mode="sequential", name="pipeline")
 
     async with agent1, agent2:
         result = await team.run("prompt")
@@ -688,7 +686,7 @@ async def test_teamrun_run_does_not_emit_spawn_session_start() -> None:
 async def test_spawn_and_subagent_depth_consistency() -> None:
     """SpawnSessionStart.depth must equal SubAgentEvent.depth for the same child delegation...."""
     agent_a = _make_echo_agent("alpha")
-    team = Team([agent_a])
+    team = BaseTeam([agent_a])
 
     events = await _collect_events(team, "test", depth=3, session_id="ses_depth_parent")
 
@@ -710,18 +708,18 @@ async def test_spawn_and_subagent_depth_consistency() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Cross-provider: Pool-backed Team and TeamRun both use
+# Cross-provider: Pool-backed BaseTeam and BaseTeam(mode="sequential") both use
 # pool.sessions.create_child_session()
 # ---------------------------------------------------------------------------
 
 
 async def test_pool_backed_team_and_teamrun_create_child_sessions() -> None:
-    """Both Team and TeamRun with pool.session_pool should call create_child_session for...."""
+    """Both BaseTeam and BaseTeam with pool.session_pool should call create_child_session for...."""
     agent_a = _make_echo_agent("alpha")
     agent_b = _make_echo_agent("beta")
 
-    team = Team([agent_a], name="parallel_team")
-    teamrun = TeamRun([agent_b], name="sequential_team")
+    team = BaseTeam([agent_a], name="parallel_team")
+    teamrun = BaseTeam([agent_b], mode="sequential", name="sequential_team")
 
     mock_pool = AsyncMock()
     mock_session_pool = AsyncMock()
@@ -750,7 +748,7 @@ async def test_pool_backed_team_and_teamrun_create_child_sessions() -> None:
     teamrun.agent_pool = mock_pool
     agent_b.agent_pool = mock_pool
 
-    # Team
+    # BaseTeam
     events = await _collect_events(team, "test", session_id="ses_parent_both")
     spawn_events = [e for e in events if isinstance(e, SpawnSessionStart)]
     assert len(spawn_events) == 1
@@ -760,7 +758,7 @@ async def test_pool_backed_team_and_teamrun_create_child_sessions() -> None:
     assert isinstance(spawn_events[0].child_session_id, str)
     assert spawn_events[0].child_session_id.startswith("ses_")
 
-    # TeamRun
+    # BaseTeam(mode="sequential")
     events = await _collect_events(teamrun, "test", session_id="ses_parent_both")
     spawn_events = [e for e in events if isinstance(e, SpawnSessionStart)]
     assert len(spawn_events) == 1
@@ -768,7 +766,8 @@ async def test_pool_backed_team_and_teamrun_create_child_sessions() -> None:
     assert isinstance(spawn_events[0].child_session_id, str)
     assert spawn_events[0].child_session_id.startswith("ses_")
 
-    # Both Team and TeamRun should have called create_session for each member.
+    # Both BaseTeam and BaseTeam(mode="sequential") should have called
+    # create_session for each member.
     # Agent run_stream also calls create_session to ensure the session exists.
     assert mock_session_pool.create_session.call_count >= 2
 
@@ -779,10 +778,10 @@ async def test_pool_backed_team_and_teamrun_create_child_sessions() -> None:
 
 
 async def test_child_session_ids_unique_across_providers() -> None:
-    """When SubagentTools delegates to a Team, the SubagentTools child session and the Team...."""
+    """When SubagentTools delegates, the child session and team..."""
     agent_a = _make_echo_agent("alpha")
     agent_b = _make_echo_agent("beta")
-    inner_team = Team([agent_a, agent_b], name="work_team")
+    inner_team = BaseTeam([agent_a, agent_b], name="work_team")
 
     manifest = AgentsManifest.from_yaml("""
 agents:

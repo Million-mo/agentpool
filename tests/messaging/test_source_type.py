@@ -40,27 +40,27 @@ def test_get_source_type_native_agent() -> None:
 
 
 @pytest.mark.requires_openai_key
-def test_get_source_type_team() -> None:
-    """Team (parallel) instances should return 'team_parallel'."""
+def test_get_source_type_team_parallel() -> None:
+    """BaseTeam (parallel) instances should return 'team_parallel'."""
     from agentpool.agents import Agent
-    from agentpool.delegation.team import Team
+    from agentpool.delegation.base_team import BaseTeam
 
     agent_a = Agent(name="a", model="openai:gpt-4o-mini")
     agent_b = Agent(name="b", model="openai:gpt-4o-mini")
-    team = Team([agent_a, agent_b], name="par")
+    team = BaseTeam([agent_a, agent_b], mode="parallel", name="par")
     assert get_source_type(team) == "team_parallel"
 
 
 @pytest.mark.requires_openai_key
-def test_get_source_type_teamrun() -> None:
-    """TeamRun (sequential) instances should return 'team_sequential'."""
+def test_get_source_type_team_sequential() -> None:
+    """BaseTeam (sequential) instances should return 'team_sequential'."""
     from agentpool.agents import Agent
-    from agentpool.delegation.teamrun import TeamRun
+    from agentpool.delegation.base_team import BaseTeam
 
     agent_a = Agent(name="a", model="openai:gpt-4o-mini")
     agent_b = Agent(name="b", model="openai:gpt-4o-mini")
-    team_run = TeamRun([agent_a, agent_b], name="seq")
-    assert get_source_type(team_run) == "team_sequential"
+    team_seq = BaseTeam([agent_a, agent_b], mode="sequential", name="seq")
+    assert get_source_type(team_seq) == "team_sequential"
 
 
 def test_get_source_type_unknown_subclass_defaults_to_agent() -> None:
@@ -69,7 +69,7 @@ def test_get_source_type_unknown_subclass_defaults_to_agent() -> None:
     with patch("agentpool.messaging.messagenode.logger"):
         result = get_source_type(stub)
     assert result == "agent"
-    # No warning for valid MessageNode subclass — it's just not Team/BaseTeam
+    # No warning for valid MessageNode subclass — it's just not BaseTeam/BaseTeam
     # The warning only fires for non-MessageNode objects
 
 
@@ -84,25 +84,25 @@ def test_agent_type_property_on_agent() -> None:
 
 @pytest.mark.requires_openai_key
 def test_agent_type_property_on_team() -> None:
-    """MessageNode.agent_type on a Team returns the source_type value."""
+    """MessageNode.agent_type on a BaseTeam returns the source_type value."""
     from agentpool.agents import Agent
-    from agentpool.delegation.team import Team
+    from agentpool.delegation.base_team import BaseTeam
 
     agent_a = Agent(name="a", model="openai:gpt-4o-mini")
     agent_b = Agent(name="b", model="openai:gpt-4o-mini")
-    team = Team([agent_a, agent_b], name="par")
+    team = BaseTeam([agent_a, agent_b], name="par")
     assert team.agent_type == "team_parallel"
 
 
 @pytest.mark.requires_openai_key
 def test_agent_type_property_on_teamrun() -> None:
-    """MessageNode.agent_type on a TeamRun returns the source_type value."""
+    """MessageNode.agent_type on a BaseTeam(mode="sequential") returns the source_type value."""
     from agentpool.agents import Agent
-    from agentpool.delegation.teamrun import TeamRun
+    from agentpool.delegation.base_team import BaseTeam
 
     agent_a = Agent(name="a", model="openai:gpt-4o-mini")
     agent_b = Agent(name="b", model="openai:gpt-4o-mini")
-    team_run = TeamRun([agent_a, agent_b], name="seq")
+    team_run = BaseTeam([agent_a, agent_b], mode="sequential", name="seq")
     assert team_run.agent_type == "team_sequential"
 
 
@@ -119,5 +119,5 @@ def test_circular_import_safety() -> None:
     assert hasattr(mod, "get_source_type")
 
     # Also verify team.py and teamrun.py can be imported after
-    importlib.import_module("agentpool.delegation.team")
-    importlib.import_module("agentpool.delegation.teamrun")
+    importlib.import_module("agentpool.delegation.base_team")
+    importlib.import_module("agentpool.delegation.graph_sequential")

@@ -18,8 +18,6 @@ if TYPE_CHECKING:
 
     from agentpool_storage.base import StorageProvider
 
-from agentpool.sessions.store import MemorySessionStore
-
 
 FilterMode = Literal["and", "override"]
 
@@ -350,4 +348,6 @@ class StorageConfig(Schema):
             if hasattr(provider, "get_session_store"):
                 return provider.get_session_store()
         # Fallback to MemorySessionStore for compatibility
+        from agentpool.sessions.store import MemorySessionStore
+
         return MemorySessionStore()

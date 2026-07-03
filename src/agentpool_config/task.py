@@ -9,7 +9,6 @@ import webbrowser
 from pydantic import ConfigDict, Field, ImportString
 from schemez import Schema
 
-from agentpool.tools.base import Tool
 from agentpool_config.knowledge import Knowledge
 from agentpool_config.tools import ImportToolConfig
 
@@ -17,6 +16,7 @@ from agentpool_config.tools import ImportToolConfig
 if TYPE_CHECKING:
     from agentpool.agents import Agent
     from agentpool.prompts.prompts import BasePrompt  # noqa: TC004
+    from agentpool.tools.base import Tool
 
 
 class Job[TDeps, TResult = str](Schema):
@@ -138,6 +138,8 @@ class Job[TDeps, TResult = str](Schema):
 
     def get_tools(self) -> list[Tool]:
         """Get all tools as Tool instances."""
+        from agentpool.tools.base import Tool
+
         tools: list[Tool] = []
         for tool in self.tools:
             match tool:

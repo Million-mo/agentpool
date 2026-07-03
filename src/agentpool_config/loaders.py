@@ -4,15 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Sequence as TypingSequence
 import inspect
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 import warnings
 
 from pydantic import ConfigDict, Field, SecretStr, model_validator
 from schemez import Schema
 from upathtools import to_upath
-
-from agentpool.common_types import JsonObject
-from agentpool.utils.importing import import_callable
 
 
 class BaseResourceLoaderConfig(Schema):
@@ -296,7 +293,7 @@ class CallableResourceLoaderConfig(BaseResourceLoaderConfig):
     )
     """Dotted import path to the callable to execute."""
 
-    keyword_args: JsonObject = Field(default_factory=dict, title="Keyword arguments")
+    keyword_args: dict[str, Any] = Field(default_factory=dict, title="Keyword arguments")
     """Keyword arguments to pass to the callable."""
 
     @model_validator(mode="after")
@@ -308,6 +305,8 @@ class CallableResourceLoaderConfig(BaseResourceLoaderConfig):
 
     def is_templated(self) -> bool:
         """Callable resources are templated if they take parameters."""
+        from agentpool.utils.importing import import_callable
+
         fn = import_callable(self.import_path)
         sig = inspect.signature(fn)
         return bool(sig.parameters)

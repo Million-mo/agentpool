@@ -1,10 +1,10 @@
-"""Tests for Team execution."""
+"""Tests for BaseTeam execution."""
 
 from __future__ import annotations
 
 import pytest
 
-from agentpool import Agent, ChatMessage, Team, TeamRun
+from agentpool import Agent, BaseTeam, ChatMessage
 
 
 async def test_team_parallel_execution():
@@ -14,7 +14,7 @@ async def test_team_parallel_execution():
     a2 = Agent("a2", system_prompt="Append 'a2'", model="test")
     a3 = Agent("a3", system_prompt="Append 'a3'", model="test")
 
-    team = Team([a1, a2, a3])
+    team = BaseTeam([a1, a2, a3])
     result = await team.execute("test")
 
     # Check that we got responses from all agents
@@ -38,7 +38,7 @@ async def test_team_shared_prompt():
     a2 = Agent.from_callback(echo, name="a2")
 
     # Create team with shared prompt
-    team = Team([a1, a2], shared_prompt="Common instruction: ")
+    team = BaseTeam([a1, a2], shared_prompt="Common instruction: ")
     result = await team.execute("specific task")
 
     # Each agent should get both prompts
@@ -50,44 +50,50 @@ async def test_team_shared_prompt():
 
 
 async def test_nested_teams():
-    """Test nesting Teams and TeamRuns inside each other."""
+    """Test nesting Teams and BaseTeam(mode="sequential")s inside each other."""
     # Create basic agents
     a1 = Agent("a1", model="test")
     a2 = Agent("a2", model="test")
     a3 = Agent("a3", model="test")
 
-    # Case 1: Team inside TeamRun
-    team = a1 & a2  # Team of two agents
-    execution = team | a3  # TeamRun with Team + Agent
+    # Case 1: BaseTeam inside BaseTeam(mode="sequential")
+    team = a1 & a2  # BaseTeam of two agents
+    execution = team | a3  # BaseTeam(mode="sequential") with BaseTeam + Agent
     result = await execution.run("test message")
     assert isinstance(result, ChatMessage)
-    # Team's messages should be in the chain
-    assert len(execution.execution_stats.messages) == 2  # Team(a1+a2) + a3
+    # BaseTeam's messages should be in the chain
+    assert len(execution.execution_stats.messages) == 2  # BaseTeam(a1+a2) + a3
 
 
 async def test_nested_team_run():
-    """Test nesting Teams and TeamRuns inside each other."""
+    """Test nesting Teams and BaseTeam(mode="sequential")s inside each other."""
     # Create basic agents
     a1 = Agent("a1", model="test")
     a2 = Agent("a2", model="test")
     a3 = Agent("a3", model="test")
     a4 = Agent("a4", model="test")
 
-    # Case 2: TeamRun inside Team
-    sequential = a1 | a2  # TeamRun
-    parallel_team = Team([sequential, a3, a4])  # Team containing TeamRun + Agents
+    # Case 2: BaseTeam(mode="sequential") inside BaseTeam
+    sequential = a1 | a2  # BaseTeam(mode="sequential")
+    parallel_team = BaseTeam([
+        sequential,
+        a3,
+        a4,
+    ])  # BaseTeam containing BaseTeam(mode="sequential") + Agents
 
     result = await parallel_team.run("test message")
     assert isinstance(result, ChatMessage)
     # Should have all messages
-    assert len(parallel_team.execution_stats.messages) == 3  # TeamRun(a1+a2) + a3 + a4
+    assert (
+        len(parallel_team.execution_stats.messages) == 3
+    )  # BaseTeam(mode="sequential", a1+a2) + a3 + a4
 
-    # # Test streaming with nested Team
+    # # Test streaming with nested BaseTeam
     # async with execution.run_stream("test message") as stream:
     #     chunks = [chunk async for chunk in stream.stream_output()]
     #     assert chunks  # Should get chunks from all agents
 
-    # Test iteration with nested TeamRun
+    # Test iteration with nested BaseTeam(mode="sequential")
     messages = [msg async for msg in parallel_team.run_iter("test message")]
     assert len(messages) == 3  # Should get all messages
 
@@ -99,7 +105,7 @@ async def test_simple_team_run_iter():
     a2 = Agent("a2", model="test")
 
     # Simple parallel team
-    team = Team([a1, a2])
+    team = BaseTeam([a1, a2])
 
     # Test iteration
     messages = [msg async for msg in team.run_iter("test message")]
@@ -108,7 +114,7 @@ async def test_simple_team_run_iter():
 
 
 async def test_sequential_run_iter():
-    """Test run_iter with a sequential execution (TeamRun)."""
+    """Test run_iter with a sequential execution (BaseTeam(mode="sequential"))."""
     a1 = Agent("a1", model="test")
     a2 = Agent("a2", model="test")
 
@@ -122,26 +128,26 @@ async def test_sequential_run_iter():
 
 
 async def test_simple_team_with_teamrun_iter():
-    """Test run_iter with a team containing a simple TeamRun."""
+    """Test run_iter with a team containing a simple BaseTeam(mode="sequential")."""
     a1 = Agent("a1", model="test")
     a2 = Agent("a2", model="test")
     a3 = Agent("a3", model="test")
 
     # Sequential execution as team member
     sequential = a1 | a2  # This is one unit
-    # Team with two members: sequential and a3
-    team = Team([sequential, a3])
+    # BaseTeam with two members: sequential and a3
+    team = BaseTeam([sequential, a3])
 
     messages = [msg async for msg in team.run_iter("test message")]
 
-    # Should get TWO messages: one from TeamRun, one from a3
+    # Should get TWO messages: one from BaseTeam(mode="sequential"), one from a3
     assert len(messages) == 2
 
     # Verify senders
     senders = {msg.name for msg in messages}
     assert senders == {sequential.name, "a3"}
 
-    # Verify TeamRun message has metadata about its internal execution
+    # Verify BaseTeam(mode="sequential") message has metadata about its internal execution
     teamrun_msg = next(msg for msg in messages if msg.name == sequential.name)
     assert "execution_order" in teamrun_msg.metadata
 
@@ -153,9 +159,9 @@ async def test_team_run_iter_execution_order():
     a3 = Agent("a3", model="test")
 
     # Sequential execution
-    sequential: TeamRun[None, str] = TeamRun([a1, a2], name="sequential")
-    # Team with sequential + single agent
-    team = Team([sequential, a3], name="parallel")
+    sequential: BaseTeam[None, str] = BaseTeam([a1, a2], mode="sequential", name="sequential")
+    # BaseTeam with sequential + single agent
+    team = BaseTeam([sequential, a3], name="parallel")
 
     messages = [msg async for msg in team.run_iter("test message")]
     # Find sequential messages
@@ -165,7 +171,7 @@ async def test_team_run_iter_execution_order():
     assert [msg.name for msg in seq_msg.associated_messages] == ["a1", "a2"]
 
 
-async def test_team_operators():
+async def test_team_operators():  # noqa: PLR0915
     """Test team combination operators (& and |)."""
     # Create basic agents
     a1 = Agent("a1", model="test")
@@ -176,33 +182,37 @@ async def test_team_operators():
     # Test parallel combinations (&)
     # Simple agent combinations
     team1 = a1 & a2
-    assert isinstance(team1, Team)
+    assert isinstance(team1, BaseTeam)
+    assert team1.mode == "parallel"
     assert len(team1.nodes) == 2
     assert list(team1.nodes) == [a1, a2]
 
     # Adding agent to team
     team2 = team1 & a3
-    assert isinstance(team2, Team)
+    assert isinstance(team2, BaseTeam)
+    assert team2.mode == "parallel"
     assert len(team2.nodes) == 3
     assert list(team2.nodes) == [a1, a2, a3]
 
     # Combining teams - should flatten
     other_team = a3 & a4
     combined = team1 & other_team
-    assert isinstance(combined, Team)
+    assert isinstance(combined, BaseTeam)
+    assert combined.mode == "parallel"
     assert len(combined.nodes) == 4
     assert list(combined.nodes) == [a1, a2, a3, a4]
 
     # Test sequential combinations (|)
     # Simple agent combinations
     seq1 = a1 | a2
-    assert isinstance(seq1, TeamRun)
+    assert isinstance(seq1, BaseTeam)
+    assert seq1.mode == "sequential"
     assert len(seq1.nodes) == 2
     assert list(seq1.nodes) == [a1, a2]
 
-    # Adding to TeamRun - should extend
+    # Adding to BaseTeam(mode="sequential") - should extend
     seq2 = seq1 | a3
-    assert seq2 is seq1  # Same TeamRun instance
+    assert seq2 is seq1  # Same BaseTeam(mode="sequential") instance
     assert len(seq1.nodes) == 3
     assert list(seq1.nodes) == [a1, a2, a3]
 
@@ -210,19 +220,23 @@ async def test_team_operators():
     team3 = a1 & a2  # parallel
     seq3 = a3 | a4  # sequential
 
-    # TeamRun with Team member
+    # BaseTeam(mode="sequential") with BaseTeam member
     combined_1 = team3 | seq3
-    assert isinstance(combined_1, TeamRun)
+    assert isinstance(combined_1, BaseTeam)
+    assert combined_1.mode == "sequential"
     assert len(combined_1.nodes) == 2
     assert combined_1.nodes[0] is team3
-    assert isinstance(combined_1.nodes[1], TeamRun)
+    assert isinstance(combined_1.nodes[1], BaseTeam)
+    assert combined_1.nodes[1].mode == "sequential"
 
-    # Team with TeamRun member
-    combined_2 = Team([team3, seq3])
-    assert isinstance(combined_2, Team)
+    # BaseTeam with BaseTeam(mode="sequential") member
+    combined_2 = BaseTeam([team3, seq3])
+    assert isinstance(combined_2, BaseTeam)
+    assert combined_2.mode == "parallel"
     assert len(combined_2.nodes) == 2
     assert combined_2.nodes[0] is team3
-    assert isinstance(combined_2.nodes[1], TeamRun)
+    assert isinstance(combined_2.nodes[1], BaseTeam)
+    assert combined_2.nodes[1].mode == "sequential"
 
     # Test actual execution
     result = await combined_1.run("test")

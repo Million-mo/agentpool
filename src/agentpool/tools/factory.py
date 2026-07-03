@@ -101,3 +101,93 @@ class AdapterToolsetFactory:
     @property
     def provider(self) -> Any:
         return self._provider
+
+
+class MCPToolsetFactory:
+    """Factory wrapping an MCP server, producing a pdai Toolset.
+
+    Replaces ``MCPResourceProvider`` for the common case where only tools
+    are needed (no skill URI resolution, no resource browsing).
+
+    Reconciliation with ``migrate-to-mcptoolset``: if that change completes
+    first, this class becomes a thin re-export.
+    """
+
+    def __init__(
+        self,
+        server_config: Any,
+        *,
+        name: str = "mcp",
+        owner: str | None = None,
+        source: str = "node",
+    ) -> None:
+        self._server_config = server_config
+        self._name = name
+        self._owner = owner
+        self._source = source
+
+    async def create_capability(self) -> AbstractToolset[Any] | None:
+        from agentpool.resource_providers.mcp_provider import MCPResourceProvider
+
+        provider = MCPResourceProvider(
+            self._server_config,
+            name=self._name,
+            owner=self._owner,
+            source=self._source,  # type: ignore[arg-type]
+        )
+        return await AdapterToolsetFactory(provider).create_capability()
+
+
+class LocalSkillToolsetFactory:
+    """Factory discovering filesystem skills, producing a pdai Toolset.
+
+    Replaces ``LocalResourceProvider`` for the tool-discovery use case.
+    Skill instruction injection is handled by ``SkillActivationCapability``
+    (Phase 6), not this factory.
+
+    Reconciliation with ``refactor-skills-as-capabilities``: if that change
+    completes first, this class may be superseded by ``SkillCapability``.
+    """
+
+    def __init__(
+        self,
+        skills_dirs: list[Any],
+        *,
+        name: str = "local",
+        owner: str | None = None,
+        cache_ttl: float = 60.0,
+    ) -> None:
+        self._skills_dirs = skills_dirs
+        self._name = name
+        self._owner = owner
+        self._cache_ttl = cache_ttl
+
+    async def create_capability(self) -> AbstractToolset[Any] | None:
+        from agentpool.resource_providers.local import LocalResourceProvider
+
+        provider = LocalResourceProvider(
+            name=self._name,
+            skills_dirs=self._skills_dirs,
+            owner=self._owner,
+            cache_ttl=self._cache_ttl,
+        )
+        return await AdapterToolsetFactory(provider).create_capability()
+
+
+class PoolToolsetFactory:
+    """Factory exposing agent/team delegation as subagent tools.
+
+    Replaces ``PoolResourceProvider`` for the delegation use case.
+    Produces a Toolset containing a ``subagent`` tool for each
+    registered agent.
+    """
+
+    def __init__(self, pool: Any, *, name: str = "pool") -> None:
+        self._pool = pool
+        self._name = name
+
+    async def create_capability(self) -> AbstractToolset[Any] | None:
+        from agentpool.resource_providers.pool import PoolResourceProvider
+
+        provider = PoolResourceProvider(self._pool, name=self._name)
+        return await AdapterToolsetFactory(provider).create_capability()

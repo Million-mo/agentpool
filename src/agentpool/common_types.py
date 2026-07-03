@@ -136,7 +136,7 @@ QueueStrategy = Literal["concat", "latest", "buffer"]
 class SupportsRunStream[TResult](Protocol):
     """Protocol for nodes that support streaming via run_stream().
 
-    Used by Team and TeamRun to check if a node can be streamed.
+    Used by BaseTeam to check if a node can be streamed.
     All streaming nodes return RichAgentStreamEvent, with subagent/team
     activity wrapped in SubAgentEvent.
     """

@@ -22,9 +22,9 @@ from acp.schema import (
     ToolCallStart,
     UserMessageChunk,
 )
+from agentpool.commands.base import NodeCommand
 from agentpool.log import get_logger
 from agentpool.messaging.context import NodeContext  # noqa: TC001
-from agentpool_commands.base import NodeCommand
 from agentpool_server.acp_server.session import ACPSession  # noqa: TC001
 
 
@@ -367,17 +367,14 @@ class DebugSetPoolCommand(NodeCommand):
     clear the client UI, so there will be a mismatch between what the
     client displays and the actual server state.
 
-    The configuration can be specified as:
-    - A stored config name (from `agentpool add`)
-    - A direct path to a configuration file
+    The configuration can be specified as a direct path to a configuration file.
 
     Options:
       --agent <name>   Specify which agent to use as default
 
     Examples:
-      /debug-set-pool prod
       /debug-set-pool /path/to/agents.yml
-      /debug-set-pool dev --agent=coder
+      /debug-set-pool /path/to/config.yml --agent=coder
     """
 
     name = "debug-set-pool"
@@ -394,12 +391,10 @@ class DebugSetPoolCommand(NodeCommand):
 
         Args:
             ctx: Command context with ACP session
-            config: Config name (from store) or path to config file
+            config: Path to a configuration file
             agent: Optional specific agent to use as default
         """
         from pathlib import Path as FilePath
-
-        from agentpool_cli import agent_store
 
         session = ctx.context.data
         if not session:
@@ -411,28 +406,16 @@ class DebugSetPoolCommand(NodeCommand):
 
         try:
             # Resolve config path
-            config_path: str | None = None
-            config_name: str | None = None
-
-            # First try as stored config name
-            try:
-                config_path = agent_store.get_config(config)
-                config_name = config
-            except KeyError:
-                # Not a stored config, try as direct path
-                path = FilePath(config)
-                if path.exists() and path.is_file():
-                    config_path = str(path.resolve())
-                else:
-                    await ctx.output.print(f"❌ **Config not found:** `{config}`")
-                    await ctx.output.print("Provide a stored config name or a valid file path.")
-                    return
+            path = FilePath(config)
+            if path.exists() and path.is_file():
+                config_path: str | None = str(path.resolve())
+            else:
+                await ctx.output.print(f"❌ **Config not found:** `{config}`")
+                await ctx.output.print("Provide a valid file path.")
+                return
 
             # Show what we're doing
-            if config_name:
-                await ctx.output.print(f"🔄 **Switching pool to `{config_name}`...**")
-            else:
-                await ctx.output.print(f"🔄 **Switching pool to `{config_path}`...**")
+            await ctx.output.print(f"🔄 **Switching pool to `{config_path}`...**")
 
             # Perform the swap
             agent_names = await session.acp_agent.swap_pool(config_path, agent)

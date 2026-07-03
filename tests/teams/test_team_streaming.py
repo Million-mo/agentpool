@@ -1,8 +1,8 @@
-"""Tests for Team/TeamRun.run_stream() session hierarchy and depth adaptation.
+"""Tests for BaseTeam run_stream() session hierarchy and depth adaptation.
 
 Consolidated from:
-- test_team_run_stream_session.py (Team.run_stream session/depth tests)
-- test_team_run_stream_depth.py (TeamRun.run_stream depth/session tests)
+- test_team_run_stream_session.py (BaseTeam.run_stream session/depth tests)
+- test_team_run_stream_depth.py (BaseTeam(mode="sequential").run_stream depth/session tests)
 """
 
 from __future__ import annotations
@@ -13,19 +13,17 @@ from unittest.mock import ANY, AsyncMock, MagicMock
 
 import pytest
 
-from agentpool import Agent, Team
+from agentpool import Agent, BaseTeam
 from agentpool.agents.events import (
     SpawnSessionStart,
     StreamCompleteEvent,
     SubAgentEvent,
 )
 from agentpool.agents.exceptions import MAX_DELEGATION_DEPTH, DelegationDepthError
-from agentpool.delegation.teamrun import TeamRun
 from agentpool.messaging import ChatMessage
 
 
 pytestmark = pytest.mark.filterwarnings("ignore::DeprecationWarning:agentpool.agents.base_agent")
-
 
 # ============================================================================
 # Helpers
@@ -45,28 +43,28 @@ def _make_echo_agent(name: str, response: str = "hello") -> Agent[Any, str]:
     return Agent(name=name, model=model)
 
 
-async def _collect_events(team_run: TeamRun[Any, Any], *args: Any, **kwargs: Any) -> list[Any]:
+async def _collect_events(team_run: BaseTeam[Any, Any], *args: Any, **kwargs: Any) -> list[Any]:
     """Collect all events from run_stream into a list."""
     return [event async for event in team_run.run_stream(*args, **kwargs)]
 
 
 # ============================================================================
-# Team.run_stream signature / depth guard
+# BaseTeam.run_stream signature / depth guard
 # ============================================================================
 
 
 def test_team_run_stream_accepts_depth_param() -> None:
-    """Team.run_stream() should accept depth parameter with default 0."""
-    sig = inspect.signature(Team.run_stream)
+    """BaseTeam.run_stream() should accept depth parameter with default 0."""
+    sig = inspect.signature(BaseTeam.run_stream)
     assert "depth" in sig.parameters
     assert sig.parameters["depth"].default == 0
 
 
 async def test_team_run_stream_depth_guard() -> None:
-    """Team.run_stream() should raise DelegationDepthError when depth exceeds maximum."""
+    """BaseTeam.run_stream() should raise DelegationDepthError when depth exceeds maximum."""
     agent_a = Agent(name="a", model="test")
     agent_b = Agent(name="b", model="test")
-    team = Team([agent_a, agent_b])
+    team = BaseTeam([agent_a, agent_b])
 
     with pytest.raises(DelegationDepthError) as exc_info:
         async for _ in team.run_stream("prompt", depth=MAX_DELEGATION_DEPTH):
@@ -76,7 +74,7 @@ async def test_team_run_stream_depth_guard() -> None:
 
 
 async def test_team_run_stream_depth_at_limit_ok() -> None:
-    """Team.run_stream() should NOT raise at depth = MAX - 1."""
+    """BaseTeam.run_stream() should NOT raise at depth = MAX - 1."""
     from llmling_models import function_to_model
 
     async def echo(msg: str) -> str:
@@ -84,14 +82,14 @@ async def test_team_run_stream_depth_at_limit_ok() -> None:
 
     model = function_to_model(echo)
     agent_a = Agent(name="a", model=model)
-    team = Team([agent_a])
+    team = BaseTeam([agent_a])
 
     events = [event async for event in team.run_stream("hi", depth=MAX_DELEGATION_DEPTH - 1)]
     assert len(events) > 0
 
 
 # ============================================================================
-# Team.run_stream: SpawnSessionStart emission
+# BaseTeam.run_stream: SpawnSessionStart emission
 # ============================================================================
 
 
@@ -105,7 +103,7 @@ async def test_team_run_stream_emits_spawn_session_start() -> None:
     model = function_to_model(echo)
     agent_a = Agent(name="alpha", model=model)
     agent_b = Agent(name="beta", model=model)
-    team = Team([agent_a, agent_b])
+    team = BaseTeam([agent_a, agent_b])
 
     events = [event async for event in team.run_stream("test")]
 
@@ -133,7 +131,7 @@ async def test_spawn_session_start_precedes_subagent_for_member() -> None:
 
     model = function_to_model(echo)
     agent_a = Agent(name="alpha", model=model)
-    team = Team([agent_a])
+    team = BaseTeam([agent_a])
 
     events = [event async for event in team.run_stream("test")]
 
@@ -151,7 +149,7 @@ async def test_spawn_session_start_precedes_subagent_for_member() -> None:
 
 
 # ============================================================================
-# Team.run_stream: child session IDs
+# BaseTeam.run_stream: child session IDs
 # ============================================================================
 
 
@@ -164,7 +162,7 @@ async def test_subagent_event_preserves_session_ids() -> None:
 
     model = function_to_model(echo)
     agent_a = Agent(name="alpha", model=model)
-    team = Team([agent_a])
+    team = BaseTeam([agent_a])
 
     events = [
         event async for event in team.run_stream("test", session_id="parent_ses_123", depth=2)
@@ -189,7 +187,7 @@ async def test_spawn_session_start_carries_session_ids() -> None:
 
     model = function_to_model(echo)
     agent_a = Agent(name="alpha", model=model)
-    team = Team([agent_a])
+    team = BaseTeam([agent_a])
 
     events = [event async for event in team.run_stream("test", session_id="ses_parent_abc")]
 
@@ -201,7 +199,7 @@ async def test_spawn_session_start_carries_session_ids() -> None:
 
 
 async def test_out_of_pool_team_generates_session_ids() -> None:
-    """Team without pool should generate session IDs and not crash."""
+    """BaseTeam without pool should generate session IDs and not crash."""
     from llmling_models import function_to_model
 
     async def echo(msg: str) -> str:
@@ -210,7 +208,7 @@ async def test_out_of_pool_team_generates_session_ids() -> None:
     model = function_to_model(echo)
     agent_a = Agent(name="alpha", model=model)
     agent_b = Agent(name="beta", model=model)
-    team = Team([agent_a, agent_b])
+    team = BaseTeam([agent_a, agent_b])
 
     events = [event async for event in team.run_stream("hello")]
 
@@ -230,7 +228,7 @@ async def test_out_of_pool_team_generates_session_ids() -> None:
 
 
 async def test_pool_backed_team_creates_child_sessions() -> None:
-    """Team with pool.sessions should call create_child_session for each member."""
+    """BaseTeam with pool.sessions should call create_child_session for each member."""
     from llmling_models import function_to_model
 
     async def echo(msg: str) -> str:
@@ -239,7 +237,7 @@ async def test_pool_backed_team_creates_child_sessions() -> None:
     model = function_to_model(echo)
     agent_a = Agent(name="alpha", model=model)
     agent_b = Agent(name="beta", model=model)
-    team = Team([agent_a, agent_b])
+    team = BaseTeam([agent_a, agent_b])
 
     mock_pool = AsyncMock()
     mock_sessions = AsyncMock()
@@ -287,7 +285,7 @@ async def test_team_kwargs_session_id_depth_popped() -> None:
 
     model = function_to_model(echo)
     agent_a = Agent(name="alpha", model=model)
-    team = Team([agent_a])
+    team = BaseTeam([agent_a])
 
     events = [
         event
@@ -305,7 +303,7 @@ async def test_team_kwargs_session_id_depth_popped() -> None:
 
 
 async def test_team_run_unchanged() -> None:
-    """Team.run() should not be affected by run_stream() changes."""
+    """BaseTeam.run() should not be affected by run_stream() changes."""
     from llmling_models import function_to_model
 
     async def echo(msg: str) -> str:
@@ -314,7 +312,7 @@ async def test_team_run_unchanged() -> None:
     model = function_to_model(echo)
     agent_a = Agent(name="alpha", model=model)
     agent_b = Agent(name="beta", model=model)
-    team = Team([agent_a, agent_b])
+    team = BaseTeam([agent_a, agent_b])
 
     result = await team.run("test")
     assert result is not None
@@ -322,7 +320,7 @@ async def test_team_run_unchanged() -> None:
 
 
 async def test_nested_subagent_event_session_ids_preserved() -> None:
-    """Nested SubAgentEvent IDs should be preserved when a member is itself a Team."""
+    """Nested SubAgentEvent IDs should be preserved when a member is itself a BaseTeam."""
     from llmling_models import function_to_model
 
     async def echo(msg: str) -> str:
@@ -331,10 +329,10 @@ async def test_nested_subagent_event_session_ids_preserved() -> None:
     model = function_to_model(echo)
     inner_a = Agent(name="inner_a", model=model)
     inner_b = Agent(name="inner_b", model=model)
-    inner_team = Team([inner_a, inner_b], name="inner_team")
+    inner_team = BaseTeam([inner_a, inner_b], name="inner_team")
 
     outer_agent = Agent(name="outer_agent", model=model)
-    outer_team = Team([inner_team, outer_agent], name="outer_team")
+    outer_team = BaseTeam([inner_team, outer_agent], name="outer_team")
 
     events = [event async for event in outer_team.run_stream("test")]
 
@@ -345,15 +343,15 @@ async def test_nested_subagent_event_session_ids_preserved() -> None:
 
 
 # ============================================================================
-# TeamRun.run_stream: depth parameter
+# BaseTeam(mode="sequential").run_stream: depth parameter
 # ============================================================================
 
 
 async def test_teamrun_run_stream_accepts_depth_without_type_error() -> None:
-    """TeamRun.run_stream(..., depth=1, require_all=False) must not raise TypeError."""
+    """BaseTeam.run_stream with depth=1 must not raise TypeError."""
     agent1 = _make_echo_agent("a1", "first")
     agent2 = _make_echo_agent("a2", "second")
-    team = TeamRun([agent1, agent2], name="seq")
+    team = BaseTeam([agent1, agent2], mode="sequential", name="seq")
 
     async with agent1, agent2:
         events = await _collect_events(team, "prompt", depth=1, require_all=False)
@@ -363,7 +361,7 @@ async def test_teamrun_run_stream_accepts_depth_without_type_error() -> None:
 async def test_teamrun_run_stream_default_depth_is_zero() -> None:
     """Without explicit depth, default is 0 and child_depth should be 1."""
     agent1 = _make_echo_agent("a1", "first")
-    team = TeamRun([agent1], name="seq")
+    team = BaseTeam([agent1], mode="sequential", name="seq")
 
     async with agent1:
         events = await _collect_events(team, "prompt")
@@ -375,7 +373,7 @@ async def test_teamrun_run_stream_default_depth_is_zero() -> None:
 async def test_teamrun_run_stream_depth_propagates_to_sub_events() -> None:
     """Explicit depth=2 should produce SubAgentEvent with depth=3."""
     agent1 = _make_echo_agent("a1", "result")
-    team = TeamRun([agent1], name="seq")
+    team = BaseTeam([agent1], mode="sequential", name="seq")
 
     async with agent1:
         events = await _collect_events(team, "prompt", depth=2)
@@ -385,7 +383,7 @@ async def test_teamrun_run_stream_depth_propagates_to_sub_events() -> None:
 
 
 # ============================================================================
-# TeamRun.run_stream: child sessions
+# BaseTeam(mode="sequential").run_stream: child sessions
 # ============================================================================
 
 
@@ -393,7 +391,7 @@ async def test_teamrun_each_member_gets_own_child_session() -> None:
     """Each team member should get its own SpawnSessionStart + SubAgentEvent."""
     agent1 = _make_echo_agent("a1", "first")
     agent2 = _make_echo_agent("a2", "second")
-    team = TeamRun([agent1, agent2], name="seq")
+    team = BaseTeam([agent1, agent2], mode="sequential", name="seq")
 
     async with agent1, agent2:
         events = await _collect_events(team, "prompt", session_id="parent-123")
@@ -412,7 +410,7 @@ async def test_teamrun_each_member_gets_own_child_session() -> None:
 async def test_teamrun_sub_events_carry_child_session_ids() -> None:
     """SubAgentEvent wrappers should carry child_session_id and parent_session_id."""
     agent1 = _make_echo_agent("a1", "first")
-    team = TeamRun([agent1], name="seq")
+    team = BaseTeam([agent1], mode="sequential", name="seq")
 
     async with agent1:
         events = await _collect_events(team, "prompt", session_id="parent-456")
@@ -427,7 +425,7 @@ async def test_teamrun_sub_events_carry_child_session_ids() -> None:
 async def test_teamrun_spawn_session_start_fields() -> None:
     """SpawnSessionStart events should have correct fields."""
     agent1 = _make_echo_agent("a1", "result")
-    team = TeamRun([agent1], name="seq")
+    team = BaseTeam([agent1], mode="sequential", name="seq")
 
     async with agent1:
         events = await _collect_events(team, "prompt", session_id="parent-789")
@@ -445,7 +443,7 @@ async def test_teamrun_spawn_session_start_fields() -> None:
 async def test_teamrun_child_session_fallback_without_pool() -> None:
     """Without a pool, child sessions should use generate_session_id() as fallback."""
     agent1 = _make_echo_agent("a1", "result")
-    team = TeamRun([agent1], name="seq")
+    team = BaseTeam([agent1], mode="sequential", name="seq")
 
     async with agent1:
         events = await _collect_events(team, "prompt", session_id="parent-abc")
@@ -457,7 +455,7 @@ async def test_teamrun_child_session_fallback_without_pool() -> None:
 async def test_teamrun_child_session_uses_pool_sessions() -> None:
     """With a pool, child sessions should be created via pool.sessions.create_child_session()."""
     agent1 = _make_echo_agent("a1", "result")
-    team = TeamRun([agent1], name="seq")
+    team = BaseTeam([agent1], mode="sequential", name="seq")
 
     mock_pool = MagicMock()
     mock_sessions = AsyncMock()
@@ -493,7 +491,7 @@ async def test_teamrun_child_session_uses_pool_sessions() -> None:
 
 
 # ============================================================================
-# TeamRun.run_stream: sequential handoff
+# BaseTeam(mode="sequential").run_stream: sequential handoff
 # ============================================================================
 
 
@@ -501,7 +499,7 @@ async def test_teamrun_sequential_handoff_uses_stream_complete_content() -> None
     """The second agent should receive the first agent's StreamComplete content."""
     agent1 = _make_echo_agent("a1", "first output")
     agent2 = _make_echo_agent("a2", "second output")
-    team = TeamRun([agent1, agent2], name="seq")
+    team = BaseTeam([agent1, agent2], mode="sequential", name="seq")
 
     received_prompts: list[tuple[str, ...]] = []
     original_run_stream = agent2.run_stream
@@ -521,14 +519,14 @@ async def test_teamrun_sequential_handoff_uses_stream_complete_content() -> None
 
 
 # ============================================================================
-# TeamRun.run_stream: depth guard
+# BaseTeam(mode="sequential").run_stream: depth guard
 # ============================================================================
 
 
 async def test_teamrun_depth_guard_raises() -> None:
     """Exceeding MAX_DELEGATION_DEPTH should raise DelegationDepthError."""
     agent1 = _make_echo_agent("a1", "result")
-    team = TeamRun([agent1], name="seq")
+    team = BaseTeam([agent1], mode="sequential", name="seq")
 
     async with agent1:
         with pytest.raises(DelegationDepthError):
@@ -539,7 +537,7 @@ async def test_teamrun_depth_guard_raises() -> None:
 async def test_teamrun_depth_guard_at_boundary() -> None:
     """Depth = MAX - 1 should still work."""
     agent1 = _make_echo_agent("a1", "result")
-    team = TeamRun([agent1], name="seq")
+    team = BaseTeam([agent1], mode="sequential", name="seq")
 
     async with agent1:
         events = await _collect_events(team, "prompt", depth=MAX_DELEGATION_DEPTH - 1)
@@ -549,7 +547,7 @@ async def test_teamrun_depth_guard_at_boundary() -> None:
 
 
 # ============================================================================
-# TeamRun.run_stream: nested SubAgentEvent depth
+# BaseTeam(mode="sequential").run_stream: nested SubAgentEvent depth
 # ============================================================================
 
 
@@ -577,7 +575,7 @@ async def test_teamrun_nested_subagent_depth_incremented() -> None:
 
     agent1.run_stream = _nested_run_stream  # type: ignore[assignment]
 
-    team = TeamRun([agent1], name="seq")
+    team = BaseTeam([agent1], mode="sequential", name="seq")
     async with agent1:
         events = await _collect_events(team, "prompt", depth=1, session_id="parent-nested")
 
@@ -589,14 +587,14 @@ async def test_teamrun_nested_subagent_depth_incremented() -> None:
 
 
 # ============================================================================
-# TeamRun.run_stream: kwargs pop semantics
+# BaseTeam(mode="sequential").run_stream: kwargs pop semantics
 # ============================================================================
 
 
 async def test_teamrun_session_id_popped_from_kwargs() -> None:
     """session_id in kwargs should be popped and not forwarded as duplicate."""
     agent1 = _make_echo_agent("a1", "result")
-    team = TeamRun([agent1], name="seq")
+    team = BaseTeam([agent1], mode="sequential", name="seq")
 
     async with agent1:
         events = await _collect_events(team, "prompt", session_id="ses-123")
@@ -606,7 +604,7 @@ async def test_teamrun_session_id_popped_from_kwargs() -> None:
 async def test_teamrun_depth_popped_from_kwargs() -> None:
     """Depth in kwargs should be popped; explicit parameter takes precedence."""
     agent1 = _make_echo_agent("a1", "result")
-    team = TeamRun([agent1], name="seq")
+    team = BaseTeam([agent1], mode="sequential", name="seq")
 
     async with agent1:
         events = await _collect_events(team, "prompt", depth=5, session_id="ses-depth")
@@ -616,7 +614,7 @@ async def test_teamrun_depth_popped_from_kwargs() -> None:
 
 
 # ============================================================================
-# TeamRun.run_stream: require_all preserved
+# BaseTeam(mode="sequential").run_stream: require_all preserved
 # ============================================================================
 
 
@@ -630,7 +628,7 @@ async def test_teamrun_require_all_still_propagates_errors() -> None:
 
     failing_agent.run_stream = _failing_stream  # type: ignore[assignment]
 
-    team = TeamRun([failing_agent], name="seq")
+    team = BaseTeam([failing_agent], mode="sequential", name="seq")
     async with failing_agent:
         with pytest.raises(ValueError, match="Chain broken"):
             await _collect_events(team, "prompt", require_all=True)
@@ -647,7 +645,7 @@ async def test_teamrun_require_all_false_continues_on_error() -> None:
     failing_agent.run_stream = _failing_stream  # type: ignore[assignment]
 
     good_agent = _make_echo_agent("good", "I survived")
-    team = TeamRun([failing_agent, good_agent], name="seq")
+    team = BaseTeam([failing_agent, good_agent], mode="sequential", name="seq")
 
     async with failing_agent, good_agent:
         events = await _collect_events(team, "prompt", require_all=False)

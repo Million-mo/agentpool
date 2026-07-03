@@ -37,8 +37,7 @@ if TYPE_CHECKING:
     from agentpool.agents.native_agent import Agent
     from agentpool.agents.native_agent.checkpoint import CheckpointData
     from agentpool.delegation import AgentPool
-    from agentpool.delegation.team import Team
-    from agentpool.delegation.teamrun import TeamRun
+    from agentpool.delegation.base_team import BaseTeam
     from agentpool.messaging import ChatMessage
     from agentpool.messaging.messagenode import MessageNode
     from agentpool.sessions.models import SessionData
@@ -155,30 +154,30 @@ class SessionPool:
         self,
         team_name: str,
         team_config: TeamConfig,
-    ) -> Team[Any] | TeamRun[Any, Any]:
+    ) -> BaseTeam[Any, Any]:
         """Create a team from config using session-level agent resolution.
 
         For each member in the team config, resolves the agent via
         :meth:`SessionController.get_or_create_session_agent`, then
-        constructs a :class:`Team` (parallel) or :class:`TeamRun`
-        (sequential) using :meth:`TeamConfig.get_team`.
+        constructs a :class:`BaseTeam` with the appropriate mode
+        (parallel or sequential) based on ``team_config.mode``.
 
         Member names are stored on the resulting team nodes; actual
         session agents are created per-execution by
-        :meth:`Team._resolve_scoped_team_nodes`.
+        :meth:`BaseTeam._resolve_scoped_team_nodes`.
 
         Args:
             team_name: Name for the created team.
             team_config: Team configuration from the manifest.
 
         Returns:
-            A ``Team`` (parallel) or ``TeamRun`` (sequential) instance.
+            A ``BaseTeam`` instance with mode set from the config.
 
         Raises:
             ValueError: If a member name is not found in the manifest
                 agents or teams sections.
         """
-        from agentpool_config.context import ConfigContextManager
+        from agentpool.delegation.base_team import BaseTeam
 
         member_names = [team_config.get_member_name(m) for m in team_config.members]
 
@@ -189,9 +188,11 @@ class SessionPool:
                 # Create a stateless agent without entering its async context.
                 # This avoids spawning MCP subprocesses for temporary template
                 # agents — actual per-session agents are created later by
-                # Team._resolve_scoped_team_nodes() during execution.
+                # BaseTeam._resolve_scoped_team_nodes() during execution.
                 if cfg.name is None:
                     cfg = cfg.model_copy(update={"name": member_name})
+                from agentpool_config.context import ConfigContextManager
+
                 with ConfigContextManager(self.pool._config_file_path):
                     agent: MessageNode[Any, Any] = cfg.get_agent(pool=self.pool)
                 nodes.append(agent)
@@ -203,7 +204,17 @@ class SessionPool:
                 msg = f"Team member {member_name!r} not found in manifest agents or teams"
                 raise ValueError(msg)
 
-        return team_config.get_team(nodes, team_name)
+        member_configs = team_config.get_member_configs()
+        return BaseTeam(
+            nodes,
+            mode=team_config.mode,
+            name=team_name,
+            display_name=team_config.display_name,
+            shared_prompt=team_config.shared_prompt,
+            mcp_servers=team_config.get_mcp_servers(),
+            member_prompt_templates=member_configs or None,
+            member_timeout=team_config.member_timeout,
+        )
 
     async def _get_resume_lock(self, session_id: str) -> asyncio.Lock:
         """Get or create per-session lock for resume serialization.

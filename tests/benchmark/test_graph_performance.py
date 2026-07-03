@@ -5,7 +5,7 @@ direct asyncio execution to verify the graph abstraction
 introduces minimal overhead (< 10%).
 
 Scenarios:
-- Single-agent pipeline (TeamRun with 1 agent)
+- Single-agent pipeline (BaseTeam(mode="sequential") with 1 agent)
 - Parallel team (3 agents)
 - Streaming latency (time to first event)
 - Graph construction time (build_team_graph)
@@ -21,15 +21,13 @@ from typing import TYPE_CHECKING, Any
 from pydantic_ai.models.test import TestModel
 import pytest
 
-from agentpool import Agent, Team
+from agentpool import Agent, BaseTeam
 from agentpool.agents.events import RunStartedEvent
 from agentpool.delegation.graph_team import build_team_graph
-from agentpool.delegation.teamrun import TeamRun
 
 
 if TYPE_CHECKING:
     from agentpool.messaging import ChatMessage
-
 
 # Threshold: graph-based must be within 40% of direct execution.
 # (Target: ~20% overhead + 20% measurement variance buffer for ms-scale ops.
@@ -84,15 +82,15 @@ async def _median_time(
 
 
 # ============================================================================
-# 1. Single-agent pipeline (TeamRun with 1 agent)
+# 1. Single-agent pipeline (BaseTeam(mode="sequential") with 1 agent)
 # ============================================================================
 
 
 @pytest.mark.anyio
 async def test_single_agent_pipeline_overhead() -> None:
-    """TeamRun with 1 agent: graph overhead vs direct agent.run()."""
+    """BaseTeam(mode="sequential") with 1 agent: graph overhead vs direct agent.run()."""
     agent = _make_echo_agent("solo", "only")
-    teamrun = TeamRun([agent], name="single_seq")
+    teamrun = BaseTeam([agent], mode="sequential", name="single_seq")
 
     async with agent:
         direct_time = await _median_time(agent.run, "test", warmup=5, runs=15)
@@ -101,7 +99,7 @@ async def test_single_agent_pipeline_overhead() -> None:
     overhead = graph_time / direct_time if direct_time > 0 else 0
 
     assert overhead < OVERHEAD_THRESHOLD, (
-        f"Single-agent TeamRun graph overhead too high: "
+        f"Single-agent BaseTeam(mode='sequential') graph overhead too high: "
         f"{overhead:.2f}x (direct={direct_time * 1000:.3f}ms, "
         f"graph={graph_time * 1000:.3f}ms, threshold={OVERHEAD_THRESHOLD:.2f}x)"
     )
@@ -123,12 +121,12 @@ async def _run_parallel_direct(
 @pytest.mark.anyio
 @pytest.mark.slow
 async def test_parallel_team_overhead() -> None:
-    """Team with 3 agents: graph Fork+Join overhead vs direct asyncio.gather."""
+    """BaseTeam with 3 agents: graph Fork+Join overhead vs direct asyncio.gather."""
     agent_a = _make_echo_agent("a", "A")
     agent_b = _make_echo_agent("b", "B")
     agent_c = _make_echo_agent("c", "C")
     agents = [agent_a, agent_b, agent_c]
-    team = Team(agents, name="parallel_three")
+    team = BaseTeam(agents, name="parallel_three")
 
     async with agent_a, agent_b, agent_c:
         # Use more warmup runs for parallel to stabilise timing
@@ -138,7 +136,7 @@ async def test_parallel_team_overhead() -> None:
     overhead = graph_time / direct_time if direct_time > 0 else 0
 
     assert overhead < OVERHEAD_THRESHOLD, (
-        f"Parallel Team graph overhead too high: "
+        f"Parallel BaseTeam graph overhead too high: "
         f"{overhead:.2f}x (direct={direct_time * 1000:.3f}ms, "
         f"graph={graph_time * 1000:.3f}ms, threshold={OVERHEAD_THRESHOLD:.2f}x)"
     )
@@ -194,13 +192,13 @@ async def _median_first_event_latency(
 
 @pytest.mark.anyio
 async def test_streaming_latency_overhead() -> None:
-    """TeamRun streaming latency vs direct agent streaming.
+    """BaseTeam(mode="sequential") streaming latency vs direct agent streaming.
 
-    Measures time to first content event. TeamRun introduces
+    Measures time to first content event. BaseTeam(mode="sequential") introduces
     spawn/session overhead; assert it is within 10% of direct.
     """
     agent = _make_echo_agent("stream_agent", "streamed")
-    teamrun = TeamRun([agent], name="stream_seq")
+    teamrun = BaseTeam([agent], mode="sequential", name="stream_seq")
 
     async with agent:
         direct_latency = await _median_first_event_latency(agent, "test", session_id="ses_direct")
@@ -272,7 +270,7 @@ async def test_graph_construction_time() -> None:
 
 
 # ============================================================================
-# 5. Sequential team with 3 agents (TeamRun graph vs direct)
+# 5. Sequential team with 3 agents (BaseTeam(mode="sequential") graph vs direct)
 # ============================================================================
 
 
@@ -293,7 +291,7 @@ async def _run_sequential_direct(
 @pytest.mark.anyio
 @pytest.mark.slow
 async def test_sequential_team_overhead() -> None:
-    """TeamRun with 3 agents: graph overhead vs direct sequential run.
+    """BaseTeam(mode="sequential") with 3 agents: graph overhead vs direct sequential run.
 
     Verifies that pydantic-graph sequential chaining does not
     add more than 10% overhead compared to manual sequential calls.
@@ -302,7 +300,7 @@ async def test_sequential_team_overhead() -> None:
     agent_2 = _make_echo_agent("s2", "second")
     agent_3 = _make_echo_agent("s3", "third")
     agents = [agent_1, agent_2, agent_3]
-    teamrun = TeamRun(agents, name="sequential_three")
+    teamrun = BaseTeam(agents, mode="sequential", name="sequential_three")
 
     async with agent_1, agent_2, agent_3:
         direct_time = await _median_time(_run_sequential_direct, agents, "test")
@@ -311,7 +309,7 @@ async def test_sequential_team_overhead() -> None:
     overhead = graph_time / direct_time if direct_time > 0 else 0
 
     assert overhead < OVERHEAD_THRESHOLD, (
-        f"Sequential TeamRun graph overhead too high: "
+        f"Sequential BaseTeam(mode='sequential') graph overhead too high: "
         f"{overhead:.2f}x (direct={direct_time * 1000:.3f}ms, "
         f"graph={graph_time * 1000:.3f}ms, threshold={OVERHEAD_THRESHOLD:.2f}x)"
     )

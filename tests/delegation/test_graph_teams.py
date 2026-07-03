@@ -2,7 +2,7 @@
 
 Tests cover parallel teams (Fork+Join), sequential teams (chained Steps),
 mixed teams, error handling, streaming, signal emission, and backward
-compatibility with legacy Team/TeamRun APIs.
+compatibility with legacy BaseTeam/BaseTeam(mode="sequential") APIs.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from typing import Any, cast
 import anyio
 import pytest
 
-from agentpool import Agent, Team
+from agentpool import Agent, BaseTeam
 from agentpool.agents.base_agent import _current_run_ctx_var
 from agentpool.agents.context import AgentRunContext
 from agentpool.agents.events import (
@@ -27,7 +27,6 @@ from agentpool.delegation.graph_team import (
     build_team_graph,
     run_team_graph,
 )
-from agentpool.delegation.teamrun import TeamRun
 from agentpool.messaging import AgentResponse, ChatMessage, TeamResponse
 from agentpool.messaging.messagenode import MessageNode
 from agentpool.talk import Talk
@@ -94,7 +93,7 @@ class _FakeSessionAgents:
 
 
 class _FakeSessionPool:
-    """Minimal SessionPool facade used by `Team.execute` scoped mode."""
+    """Minimal SessionPool facade used by `BaseTeam.execute` scoped mode."""
 
     def __init__(self) -> None:
         self.sessions = _FakeSessionAgents()
@@ -270,12 +269,12 @@ async def _collect_events(source: Any, *args: Any, **kwargs: Any) -> list[Any]:
 
 @pytest.mark.anyio
 async def test_parallel_team_with_three_agents() -> None:
-    """Parallel Team runs 3 agents via Fork+Join and collects all responses."""
+    """Parallel BaseTeam runs 3 agents via Fork+Join and collects all responses."""
     agent_a = _make_echo_agent("alpha", "response_a")
     agent_b = _make_echo_agent("beta", "response_b")
     agent_c = _make_echo_agent("gamma", "response_c")
 
-    team = Team([agent_a, agent_b, agent_c], name="parallel_three")
+    team = BaseTeam([agent_a, agent_b, agent_c], name="parallel_three")
 
     result = await team.run("test prompt")
 
@@ -297,11 +296,11 @@ async def test_parallel_team_with_three_agents() -> None:
 
 @pytest.mark.anyio
 async def test_parallel_team_execute_returns_team_response() -> None:
-    """Team.execute() returns a TeamResponse with timing and responses."""
+    """BaseTeam.execute() returns a TeamResponse with timing and responses."""
     agent_a = _make_echo_agent("alpha", "A")
     agent_b = _make_echo_agent("beta", "B")
 
-    team = Team([agent_a, agent_b], name="parallel_two")
+    team = BaseTeam([agent_a, agent_b], name="parallel_two")
     response = await team.execute("prompt")
 
     assert isinstance(response, TeamResponse)
@@ -318,12 +317,12 @@ async def test_parallel_team_execute_returns_team_response() -> None:
 
 @pytest.mark.anyio
 async def test_parallel_team_execute_uses_scoped_child_sessions_by_default() -> None:
-    """Team.execute creates child-session member agents inside SessionPool turns."""
+    """BaseTeam.execute creates child-session member agents inside SessionPool turns."""
     agent_a = _make_echo_agent("alpha", "shared_a")
     agent_b = _make_echo_agent("beta", "shared_b")
     pool = _FakeAgentPool([agent_a, agent_b])
     pool.session_pool.sessions.add_state("parent-session", agent_name="rebuttal_agent")
-    team = Team([agent_a, agent_b], name="parallel_scoped", agent_pool=pool)  # type: ignore[arg-type]
+    team = BaseTeam([agent_a, agent_b], name="parallel_scoped", agent_pool=pool)  # type: ignore[arg-type]
     run_ctx = AgentRunContext(session_id="parent-session")
 
     token = _current_run_ctx_var.set(run_ctx)
@@ -354,11 +353,13 @@ async def test_parallel_team_execute_uses_scoped_child_sessions_by_default() -> 
 
 @pytest.mark.anyio
 async def test_teamrun_stream_uses_scoped_child_sessions_without_titles() -> None:
-    """TeamRun streaming child sessions should not request generated titles."""
+    """BaseTeam(mode="sequential") streaming child sessions should not request generated titles."""
     agent_a = _make_echo_agent("alpha", "A")
     agent_b = _make_echo_agent("beta", "B")
     pool = _FakeAgentPool([agent_a, agent_b])
-    team = TeamRun([agent_a, agent_b], name="sequential_scoped", agent_pool=pool)  # type: ignore[arg-type]
+    team = BaseTeam(
+        [agent_a, agent_b], mode="sequential", name="sequential_scoped", agent_pool=pool
+    )  # type: ignore[arg-type]
 
     events = [
         event
@@ -383,19 +384,19 @@ async def test_teamrun_stream_uses_scoped_child_sessions_without_titles() -> Non
 
 @pytest.mark.anyio
 async def test_sequential_team_with_three_agents() -> None:
-    """TeamRun chains 3 agents sequentially, passing output through pipeline."""
+    """BaseTeam(mode="sequential") chains 3 agents sequentially, passing output through pipeline."""
     agent_1 = _make_echo_agent("step1", "first")
     agent_2 = _make_echo_agent("step2", "second")
     agent_3 = _make_echo_agent("step3", "third")
 
-    pipeline = TeamRun([agent_1, agent_2, agent_3], name="sequential_three")
+    pipeline = BaseTeam([agent_1, agent_2, agent_3], mode="sequential", name="sequential_three")
 
     async with agent_1, agent_2, agent_3:
         result = await pipeline.run("start")
 
     assert result is not None
     assert result.role == "assistant"
-    # TeamRun with result_mode="last" returns last agent's output
+    # BaseTeam(mode="sequential") with result_mode="last" returns last agent's output
     assert result.content == "third"
 
     # Metadata should track execution order
@@ -406,11 +407,11 @@ async def test_sequential_team_with_three_agents() -> None:
 
 @pytest.mark.anyio
 async def test_sequential_team_execute_iter_yields_in_order() -> None:
-    """TeamRun.execute_iter yields AgentResponse and Talk in correct order."""
+    """BaseTeam(mode="sequential").execute_iter yields AgentResponse and Talk in correct order."""
     agent_1 = _make_echo_agent("s1", "out1")
     agent_2 = _make_echo_agent("s2", "out2")
 
-    pipeline = TeamRun([agent_1, agent_2], name="seq_two")
+    pipeline = BaseTeam([agent_1, agent_2], mode="sequential", name="seq_two")
 
     async with agent_1, agent_2:
         items = [i async for i in pipeline.execute_iter("prompt")]
@@ -439,13 +440,13 @@ async def test_sequential_team_execute_iter_yields_in_order() -> None:
 
 @pytest.mark.anyio
 async def test_mixed_team_sequential_contains_parallel() -> None:
-    """TeamRun containing a Team executes parallel sub-team then next agent."""
+    """Sequential team containing parallel team executes sub-team then next agent."""
     agent_a = _make_echo_agent("a", "A")
     agent_b = _make_echo_agent("b", "B")
     agent_c = _make_echo_agent("c", "C")
 
-    parallel_sub = Team([agent_a, agent_b], name="parallel_sub")
-    mixed = TeamRun([parallel_sub, agent_c], name="mixed_seq_par")
+    parallel_sub = BaseTeam([agent_a, agent_b], name="parallel_sub")
+    mixed = BaseTeam([parallel_sub, agent_c], mode="sequential", name="mixed_seq_par")
 
     async with agent_a, agent_b, agent_c:
         result = await mixed.run("start")
@@ -467,8 +468,8 @@ async def test_mixed_team_streaming() -> None:
     agent_b = _make_echo_agent("b", "B")
     agent_c = _make_echo_agent("c", "C")
 
-    parallel_sub = Team([agent_a, agent_b], name="parallel_sub")
-    mixed = TeamRun([parallel_sub, agent_c], name="mixed_stream")
+    parallel_sub = BaseTeam([agent_a, agent_b], name="parallel_sub")
+    mixed = BaseTeam([parallel_sub, agent_c], mode="sequential", name="mixed_stream")
 
     async with agent_a, agent_b, agent_c:
         events = await _collect_events(mixed, "start", session_id="ses_mixed")
@@ -493,7 +494,7 @@ async def test_parallel_team_one_agent_fails() -> None:
     agent_ok = _make_echo_agent("ok_agent", "success")
     agent_fail = FailingAgent("fail_agent", "boom")
 
-    team = Team([agent_ok, agent_fail], name="partial_fail")
+    team = BaseTeam([agent_ok, agent_fail], name="partial_fail")
     result = await team.run("test")
 
     # Should still return a result (partial success)
@@ -513,12 +514,12 @@ async def test_parallel_team_one_agent_fails() -> None:
 
 @pytest.mark.anyio
 async def test_parallel_team_execute_with_error_mode() -> None:
-    """Team.execute() handles fail_all vs collect_exceptions modes."""
+    """BaseTeam.execute() handles fail_all vs collect_exceptions modes."""
     agent_ok = _make_echo_agent("ok", "fine")
     agent_fail = FailingAgent("fail", "explosion")
 
     # Default: collect_exceptions
-    team = Team([agent_ok, agent_fail], name="collect")
+    team = BaseTeam([agent_ok, agent_fail], name="collect")
     response = await team.execute("prompt")
 
     # Should have one success and one error
@@ -529,11 +530,11 @@ async def test_parallel_team_execute_with_error_mode() -> None:
 
 @pytest.mark.anyio
 async def test_parallel_team_execute_applies_member_timeout() -> None:
-    """Team.execute() should collect timed-out graph members as errors."""
+    """BaseTeam.execute() should collect timed-out graph members as errors."""
     agent_ok = SlowAgent("ok", delay=0)
     agent_slow = SlowAgent("slow", delay=0.2)
 
-    team = Team([agent_ok, agent_slow], name="timeout_team", member_timeout=0.01)
+    team = BaseTeam([agent_ok, agent_slow], name="timeout_team", member_timeout=0.01)
     response = await team.execute("prompt")
 
     assert len(response) == 1
@@ -544,9 +545,9 @@ async def test_parallel_team_execute_applies_member_timeout() -> None:
 
 @pytest.mark.anyio
 async def test_parallel_team_execute_retries_transient_member_failure() -> None:
-    """Team.execute() retries runtime member failures when requested."""
+    """BaseTeam.execute() retries runtime member failures when requested."""
     agent = FlakyAgent("flaky")
-    team = Team([agent], name="retry_team")
+    team = BaseTeam([agent], name="retry_team")
 
     response = await team.execute("prompt", member_retry_attempts=1)
 
@@ -559,9 +560,9 @@ async def test_parallel_team_execute_retries_transient_member_failure() -> None:
 
 @pytest.mark.anyio
 async def test_parallel_team_execute_does_not_retry_non_runtime_failure() -> None:
-    """Team.execute() does not retry non-runtime member failures."""
+    """BaseTeam.execute() does not retry non-runtime member failures."""
     agent = InvalidAgent("invalid")
-    team = Team([agent], name="retry_team")
+    team = BaseTeam([agent], name="retry_team")
 
     response = await team.execute("prompt", member_retry_attempts=1)
 
@@ -576,11 +577,11 @@ async def test_parallel_team_execute_does_not_retry_non_runtime_failure() -> Non
 
 @pytest.mark.anyio
 async def test_parallel_team_streaming_events() -> None:
-    """Parallel Team streaming yields SubAgentEvents from each member."""
+    """Parallel BaseTeam streaming yields SubAgentEvents from each member."""
     agent_a = _make_echo_agent("alpha", "A")
     agent_b = _make_echo_agent("beta", "B")
 
-    team = Team([agent_a, agent_b], name="parallel_stream")
+    team = BaseTeam([agent_a, agent_b], name="parallel_stream")
 
     events = await _collect_events(team, "test", session_id="ses_stream")
 
@@ -599,11 +600,11 @@ async def test_parallel_team_streaming_events() -> None:
 
 @pytest.mark.anyio
 async def test_sequential_team_streaming_events() -> None:
-    """TeamRun streaming yields nested SubAgentEvents for each sequential member."""
+    """Sequential team streaming yields nested SubAgentEvents for each member."""
     agent_1 = _make_echo_agent("step1", "first")
     agent_2 = _make_echo_agent("step2", "second")
 
-    pipeline = TeamRun([agent_1, agent_2], name="seq_stream")
+    pipeline = BaseTeam([agent_1, agent_2], mode="sequential", name="seq_stream")
 
     async with agent_1, agent_2:
         events = await _collect_events(pipeline, "start", session_id="ses_seq")
@@ -642,7 +643,7 @@ async def test_parallel_team_signals_emitted() -> None:
     agent_b.message_received.connect(received_b.append)
     agent_b.message_sent.connect(sent_b.append)
 
-    team = Team([agent_a, agent_b], name="signal_test")
+    team = BaseTeam([agent_a, agent_b], name="signal_test")
     await team.run("prompt")
 
     # Each agent should have received and sent signals
@@ -658,7 +659,7 @@ async def test_parallel_team_signals_emitted() -> None:
 
 @pytest.mark.anyio
 async def test_sequential_team_signals_emitted() -> None:
-    """TeamRun emits message_received and message_sent for each step in chain."""
+    """BaseTeam emits message_received and message_sent for each step in chain."""
     agent_1 = _make_echo_agent("s1", "out1")
     agent_2 = _make_echo_agent("s2", "out2")
 
@@ -670,7 +671,7 @@ async def test_sequential_team_signals_emitted() -> None:
     agent_2.message_received.connect(received["s2"].append)
     agent_2.message_sent.connect(sent["s2"].append)
 
-    pipeline = TeamRun([agent_1, agent_2], name="seq_signals")
+    pipeline = BaseTeam([agent_1, agent_2], mode="sequential", name="seq_signals")
 
     async with agent_1, agent_2:
         await pipeline.run("prompt")
@@ -683,19 +684,20 @@ async def test_sequential_team_signals_emitted() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 7. Backward compat: old Team/TeamRun APIs unchanged
+# 7. Backward compat: old BaseTeam/BaseTeam(mode="sequential") APIs unchanged
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.anyio
 async def test_team_or_operator_creates_teamrun() -> None:
-    """Team | Agent still creates a sequential TeamRun (backward compat)."""
+    """BaseTeam | Agent still creates a sequential BaseTeam(mode="sequential") (backward compat)."""
     agent_a = _make_echo_agent("a", "A")
     agent_b = _make_echo_agent("b", "B")
 
     # Using | operator
     pipeline = agent_a | agent_b
-    assert isinstance(pipeline, TeamRun)
+    assert isinstance(pipeline, BaseTeam)
+    assert pipeline.mode == "sequential"
 
     async with agent_a, agent_b:
         result = await pipeline.run("start")
@@ -704,13 +706,14 @@ async def test_team_or_operator_creates_teamrun() -> None:
 
 @pytest.mark.anyio
 async def test_team_and_operator_creates_team() -> None:
-    """Agent & Agent still creates a parallel Team (backward compat)."""
+    """Agent & Agent still creates a parallel BaseTeam (backward compat)."""
     agent_a = _make_echo_agent("a", "A")
     agent_b = _make_echo_agent("b", "B")
 
     # Using & operator
     team = agent_a & agent_b
-    assert isinstance(team, Team)
+    assert isinstance(team, BaseTeam)
+    assert team.mode == "parallel"
 
     result = await team.run("start")
     contents = result.content
@@ -721,11 +724,11 @@ async def test_team_and_operator_creates_team() -> None:
 
 @pytest.mark.anyio
 async def test_teamrun_run_iter_backward_compat() -> None:
-    """TeamRun.run_iter still yields ChatMessage per member (backward compat)."""
+    """BaseTeam.run_iter still yields ChatMessage per member (backward compat)."""
     agent_1 = _make_echo_agent("s1", "out1")
     agent_2 = _make_echo_agent("s2", "out2")
 
-    pipeline = TeamRun([agent_1, agent_2], name="compat_iter")
+    pipeline = BaseTeam([agent_1, agent_2], mode="sequential", name="compat_iter")
 
     async with agent_1, agent_2:
         messages = [m async for m in pipeline.run_iter("prompt")]
@@ -737,11 +740,11 @@ async def test_teamrun_run_iter_backward_compat() -> None:
 
 @pytest.mark.anyio
 async def test_team_run_iter_backward_compat() -> None:
-    """Team.run_iter still yields ChatMessage as they arrive (backward compat)."""
+    """BaseTeam.run_iter still yields ChatMessage as they arrive (backward compat)."""
     agent_a = _make_echo_agent("a", "A")
     agent_b = _make_echo_agent("b", "B")
 
-    team = Team([agent_a, agent_b], name="compat_run_iter")
+    team = BaseTeam([agent_a, agent_b], name="compat_run_iter")
 
     messages = [m async for m in team.run_iter("prompt")]
 
@@ -752,11 +755,11 @@ async def test_team_run_iter_backward_compat() -> None:
 
 @pytest.mark.anyio
 async def test_team_talk_stats_populated() -> None:
-    """Team execution populates team_talk stats for monitoring."""
+    """BaseTeam execution populates team_talk stats for monitoring."""
     agent_a = _make_echo_agent("a", "A")
     agent_b = _make_echo_agent("b", "B")
 
-    team = Team([agent_a, agent_b], name="stats_test")
+    team = BaseTeam([agent_a, agent_b], name="stats_test")
     await team.execute("prompt")
 
     stats = team.execution_stats
@@ -766,11 +769,11 @@ async def test_team_talk_stats_populated() -> None:
 
 @pytest.mark.anyio
 async def test_teamrun_talk_stats_populated() -> None:
-    """TeamRun execution populates team_talk stats for monitoring."""
+    """BaseTeam(mode="sequential") execution populates team_talk stats for monitoring."""
     agent_1 = _make_echo_agent("s1", "out1")
     agent_2 = _make_echo_agent("s2", "out2")
 
-    pipeline = TeamRun([agent_1, agent_2], name="stats_seq")
+    pipeline = BaseTeam([agent_1, agent_2], mode="sequential", name="stats_seq")
 
     async with agent_1, agent_2:
         await pipeline.execute("prompt")
@@ -859,10 +862,10 @@ async def test_graph_state_shared_prompt_prepended() -> None:
 
 @pytest.mark.anyio
 async def test_single_agent_parallel_team() -> None:
-    """Team with a single member is effectively a passthrough."""
+    """BaseTeam with a single member is effectively a passthrough."""
     agent = _make_echo_agent("solo", "only")
 
-    team = Team([agent], name="single")
+    team = BaseTeam([agent], name="single")
     result = await team.run("test")
 
     contents = result.content
@@ -873,10 +876,10 @@ async def test_single_agent_parallel_team() -> None:
 
 @pytest.mark.anyio
 async def test_single_agent_sequential_team() -> None:
-    """TeamRun with a single member is effectively a passthrough."""
+    """BaseTeam(mode="sequential") with a single member is effectively a passthrough."""
     agent = _make_echo_agent("solo", "only")
 
-    pipeline = TeamRun([agent], name="single_seq")
+    pipeline = BaseTeam([agent], mode="sequential", name="single_seq")
     async with agent:
         result = await pipeline.run("test")
 
@@ -885,11 +888,11 @@ async def test_single_agent_sequential_team() -> None:
 
 @pytest.mark.anyio
 async def test_team_structure_diagram() -> None:
-    """Team.get_structure_diagram generates a mermaid flowchart."""
+    """BaseTeam.get_structure_diagram generates a mermaid flowchart."""
     agent_a = _make_echo_agent("a", "A")
     agent_b = _make_echo_agent("b", "B")
 
-    team = Team([agent_a, agent_b], name="diagram_test")
+    team = BaseTeam([agent_a, agent_b], name="diagram_test")
     diagram = team.get_structure_diagram()
 
     assert "flowchart TD" in diagram

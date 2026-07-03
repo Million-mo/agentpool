@@ -46,6 +46,13 @@ class CodeModeResourceProvider(AggregatingResourceProvider):
             include_docstrings: Include function docstrings in documentation
             usage_notes: Usage notes for the codemode tool
         """
+        import warnings
+
+        warnings.warn(
+            "CodeModeResourceProvider is deprecated. Use ToolsetFactory implementations instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         super().__init__(providers=providers, name=name)
         self.include_docstrings = include_docstrings
         self._cached_tool: Tool | None = None

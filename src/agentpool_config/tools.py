@@ -9,8 +9,6 @@ from typing import TYPE_CHECKING, Any, Literal
 from pydantic import ConfigDict, Field, ImportString, field_validator
 from schemez import Schema
 
-from agentpool.utils.parse_time import parse_time_period
-
 
 if TYPE_CHECKING:
     from agentpool.tools.base import Tool
@@ -124,6 +122,8 @@ class BaseToolConfig(Schema):
         """Parse string timeout to timedelta."""
         if v is None or isinstance(v, timedelta):
             return v
+        from agentpool.utils.parse_time import parse_time_period
+
         return parse_time_period(v)
 
     model_config = ConfigDict(frozen=True)

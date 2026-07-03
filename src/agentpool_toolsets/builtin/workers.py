@@ -221,19 +221,17 @@ async def _create_child_session(
     is_team_node: bool,
 ) -> str:
     """Create child session for worker execution."""
-    from agentpool import Team, TeamRun
     from agentpool.agents.base_agent import BaseAgent
     from agentpool.common_types import SupportsRunStream
+    from agentpool.delegation.base_team import BaseTeam
 
     parent_session_id = getattr(ctx.node, "session_id", None) or (
         ctx.run_ctx.session_id if ctx.run_ctx else ""
     )
 
     source_type: Literal["agent", "team_parallel", "team_sequential"] = "agent"
-    if isinstance(worker, Team):
-        source_type = "team_parallel"
-    elif isinstance(worker, TeamRun):
-        source_type = "team_sequential"
+    if isinstance(worker, BaseTeam):
+        source_type = worker.source_type
     elif isinstance(worker, BaseAgent):
         source_type = "agent"
 
