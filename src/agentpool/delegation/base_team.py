@@ -30,7 +30,7 @@ from agentpool.delegation.graph_team import _TeamGraphState, run_team_graph
 from agentpool.log import get_logger
 from agentpool.messaging import ChatMessage, MessageNode, TeamResponse
 from agentpool.messaging.context import NodeContext
-from agentpool.messaging.messagenode import get_source_type
+from agentpool.messaging.messagenode import SourceType, get_source_type
 from agentpool.messaging.processing import finalize_message, prepare_prompts
 from agentpool.talk.stats import AggregatedMessageStats
 from agentpool.talk.talk import Talk, TeamTalk
@@ -198,7 +198,7 @@ class BaseTeam[TDeps, TResult](MessageNode[TDeps, TResult]):
         return self._nodes
 
     @property
-    def source_type(self) -> str:
+    def source_type(self) -> SourceType:
         """Return the source-type tag for event streaming."""
         return "team_parallel" if self.mode == "parallel" else "team_sequential"
 
@@ -264,24 +264,24 @@ class BaseTeam[TDeps, TResult](MessageNode[TDeps, TResult]):
         return BaseTeam([self, other], mode="sequential")
 
     @overload
-    def __and__(self, other: BaseTeam[None]) -> BaseTeam[None]: ...
+    def __and__(self, other: BaseTeam[None, None]) -> BaseTeam[None, None]: ...
 
     @overload
-    def __and__(self, other: BaseTeam[TDeps]) -> BaseTeam[TDeps]: ...
+    def __and__(self, other: BaseTeam[TDeps, Any]) -> BaseTeam[TDeps, Any]: ...
 
     @overload
-    def __and__(self, other: BaseTeam[Any]) -> BaseTeam[Any]: ...
+    def __and__(self, other: BaseTeam[Any, Any]) -> BaseTeam[Any, Any]: ...
 
     @overload
-    def __and__(self, other: Agent[TDeps, Any]) -> BaseTeam[TDeps]: ...
+    def __and__(self, other: Agent[TDeps, Any]) -> BaseTeam[TDeps, Any]: ...
 
     @overload
-    def __and__(self, other: Agent[Any, Any]) -> BaseTeam[Any]: ...
+    def __and__(self, other: Agent[Any, Any]) -> BaseTeam[Any, Any]: ...
 
     def __and__(
         self,
-        other: BaseTeam[Any] | Agent[Any, Any] | ProcessorCallback[Any],
-    ) -> BaseTeam[Any]:
+        other: BaseTeam[Any, Any] | Agent[Any, Any] | ProcessorCallback[Any],
+    ) -> BaseTeam[Any, Any]:
         """Combine teams in parallel, preserving type safety for same types."""
         from agentpool.agents import Agent
 
@@ -1011,7 +1011,7 @@ class BaseTeam[TDeps, TResult](MessageNode[TDeps, TResult]):
         steps: list[Any] = []
         for i, node in enumerate(all_nodes):
 
-            async def _step(ctx: Any, _node=node, _i=i) -> Any:
+            async def _step(ctx: Any, _node: MessageNode[Any, Any] = node, _i: int = i) -> Any:
                 state = cast(_SequentialGraphState, ctx.state)
                 start = perf_counter()
                 if _i == 0:

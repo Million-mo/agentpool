@@ -408,17 +408,17 @@ class DebugSetPoolCommand(NodeCommand):
             # Resolve config path
             path = FilePath(config)
             if path.exists() and path.is_file():
-                config_path: str | None = str(path.resolve())
+                resolved_config: str = str(path.resolve())
             else:
                 await ctx.output.print(f"❌ **Config not found:** `{config}`")
                 await ctx.output.print("Provide a valid file path.")
                 return
 
             # Show what we're doing
-            await ctx.output.print(f"🔄 **Switching pool to `{config_path}`...**")
+            await ctx.output.print(f"🔄 **Switching pool to `{resolved_config}`...**")
 
             # Perform the swap
-            agent_names = await session.acp_agent.swap_pool(config_path, agent)
+            agent_names = await session.acp_agent.swap_pool(resolved_config, agent)
 
             # Report success
             await ctx.output.print("✅ **Pool switched successfully**")

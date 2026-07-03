@@ -231,7 +231,14 @@ class PoolResourceProvider(ResourceProvider):
                 member_nodes.append(member_agent)
 
             # Build and run the team
-            team = team_config.get_team(member_nodes, team_name)
+            from agentpool.delegation.base_team import BaseTeam
+
+            team = BaseTeam(
+                member_nodes,
+                name=team_name,
+                display_name=team_config.display_name,
+                mode=team_config.mode,
+            )
             result = await team.run(prompt)
             return result.content
 

@@ -12,15 +12,15 @@
 
 ## 2. Phase 2: Remove inject_cancelled_tool_results
 
-- [ ] 2.1 Write test: cancelled turn → next turn — verify PydanticAI 1.102.0 handles unprocessed tool calls without `inject_cancelled_tool_results`
-- [ ] 2.2 Remove `inject_cancelled_tool_results()` call from `NativeTurn.execute()` (first call site, line ~1087)
-- [ ] 2.3 Remove `inject_cancelled_tool_results()` call from `NativeTurn.execute()` (second call site, line ~1154, in `create_turn()`)
-- [ ] 2.4 Remove `inject_cancelled_tool_results()` call from `SessionController` (line ~1078)
-- [ ] 2.5 Run cancelled-turn test — verify no "unprocessed tool calls" error
-- [ ] 2.6 If any call site triggers the error, restore that specific call site and document why
-- [ ] 2.7 Delete `inject_cancelled_tool_results()` function from `orchestrator/run.py`
-- [ ] 2.8 Run `uv run pytest tests/agents/native_agent/test_interrupt.py` — interrupt tests passing
-- [ ] 2.9 Run `uv run pytest tests/orchestrator/` — orchestrator tests passing
+- [x] 2.1 Write test: cancelled turn → next turn — verify PydanticAI 1.102.0 handles unprocessed tool calls without `inject_cancelled_tool_results`
+- [x] 2.2 Remove `inject_cancelled_tool_results()` call from `NativeTurn.execute()` (first call site, line ~1087)
+- [x] 2.3 Remove `inject_cancelled_tool_results()` call from `NativeTurn.execute()` (second call site, line ~1154, in `create_turn()`)
+- [x] 2.4 Remove `inject_cancelled_tool_results()` call from `SessionController` (line ~1078)
+- [x] 2.5 Run cancelled-turn test — verify no "unprocessed tool calls" error
+- [x] 2.6 If any call site triggers the error, restore that specific call site and document why
+- [x] 2.7 Delete `inject_cancelled_tool_results()` function from `orchestrator/run.py`
+- [x] 2.8 Run `uv run pytest tests/agents/native_agent/test_interrupt.py` — interrupt tests passing
+- [x] 2.9 Run `uv run pytest tests/orchestrator/` — orchestrator tests passing
 
 ## 3. Phase 3: Replace ToolManager with ToolCollection
 

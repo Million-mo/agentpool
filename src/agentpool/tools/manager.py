@@ -65,7 +65,11 @@ class ToolManager:
         self.worker_provider = StaticResourceProvider(name="workers")
         self.builtin_provider = StaticResourceProvider(name="builtin")
         self.tool_mode = tool_mode
-        self._codemode_provider: CodeModeResourceProvider = CodeModeResourceProvider([])
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            self._codemode_provider: CodeModeResourceProvider = CodeModeResourceProvider([])
         # Forward to provider methods
         self.tool = self.builtin_provider.tool
         self.register_tool = self.builtin_provider.register_tool

@@ -320,15 +320,15 @@ class BaseAgent[TDeps = None, TResult = str](MessageNode[TDeps, TResult]):
 
     @overload
     def __and__(  # if other doesnt define deps, we take the agents one
-        self, other: ProcessorCallback[Any] | BaseTeam[TDeps] | Agent[TDeps, Any]
-    ) -> BaseTeam[TDeps]: ...
+        self, other: ProcessorCallback[Any] | BaseTeam[TDeps, Any] | Agent[TDeps, Any]
+    ) -> BaseTeam[TDeps, Any]: ...
 
     @overload
     def __and__(  # otherwise, we dont know and deps is Any
-        self, other: ProcessorCallback[Any] | BaseTeam[Any] | Agent[Any, Any]
-    ) -> BaseTeam[Any]: ...
+        self, other: ProcessorCallback[Any] | BaseTeam[Any, Any] | Agent[Any, Any]
+    ) -> BaseTeam[Any, Any]: ...
 
-    def __and__(self, other: MessageNode[Any, Any] | ProcessorCallback[Any]) -> BaseTeam[Any]:
+    def __and__(self, other: MessageNode[Any, Any] | ProcessorCallback[Any]) -> BaseTeam[Any, Any]:
         """Create sequential team using & operator.
 
         Example:
