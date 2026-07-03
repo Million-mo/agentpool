@@ -228,43 +228,6 @@ async def test_subsequent_run_after_break(break_test_agent: Agent[None]):
         await session_pool.shutdown()
 
 
-@pytest.mark.skip(
-    reason="Async generator cleanup deadlock in session_pool.run_stream() — "
-    "agent.interrupt() triggers aclose() on a running generator, causing "
-    "'asynchronous generator is already running'. Tracked as architecture issue. "
-    "Use consume-until-StreamCompleteEvent pattern instead."
-)
-async def test_interrupt_vs_break(break_test_agent: Agent[None]):
-    """Test 5: Compare interrupt() vs break behavior.
-
-    Shows that interrupt() is the recommended approach instead of break.
-    """
-    session_pool, session_id = await _setup_session_pool(break_test_agent)
-    try:
-        # Test interrupt() method
-        events = []
-
-        # Start streaming in background task so we can interrupt it
-        async def stream_task():
-            events.extend([event async for event in session_pool.run_stream(session_id, "Test")])
-
-        task = asyncio.create_task(stream_task())
-        await asyncio.sleep(0.1)  # Let it start
-
-        # Interrupt
-        await break_test_agent.interrupt()
-
-        # Wait for task to finish
-        with suppress(asyncio.CancelledError):
-            await task
-
-        # Check interrupt worked
-        assert break_test_agent._cancelled is True, "_cancelled should be True after interrupt"
-        print(f"[INFO] Events collected before interrupt: {len(events)}")
-    finally:
-        await session_pool.shutdown()
-
-
 async def test_safe_pattern_complete_consumption(break_test_agent: Agent[None]):
     """Test 6: Safe pattern - consume until StreamCompleteEvent.
 
@@ -388,7 +351,6 @@ async def main():
         ("Test 2: Exception handling", test_break_with_exception_handling),
         ("Test 3: Conversation history after break", test_conversation_history_after_break),
         ("Test 4: Subsequent run after break", test_subsequent_run_after_break),
-        ("Test 5: Interrupt vs break", test_interrupt_vs_break),
         ("Test 6: Safe pattern - complete consumption", test_safe_pattern_complete_consumption),
         ("Test 7: Tool detection without break", test_tool_call_detection_without_break),
         ("Test 8: Partial text collection", test_partial_text_collection),

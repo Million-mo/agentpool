@@ -62,67 +62,6 @@ async def _collect_events(source: Any, *args: Any, **kwargs: Any) -> list[Any]:
 
 
 # ---------------------------------------------------------------------------
-# TG-1: SubagentTools child session has correct parent_id in SessionData
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.skip(
-    reason="Rich cell_len O(n) hang on long debug output from skill tools — "
-    "instance divergence causes worker agent to produce extremely long output "
-    "that hangs Rich's character-by-character cell width measurement. Tracked "
-    "as instance divergence architecture issue."
-)
-async def test_subagent_child_session_parent_id_in_session_data() -> None:
-    """TG-1: SubagentTools child session persisted with correct parent_id.
-
-    This is a cross-provider variant: verifies the child SessionData created
-    by SubagentTools has parent_id pointing to the orchestrator's session.
-    """
-    store = MemorySessionStore()
-    manifest = AgentsManifest.from_yaml("""
-agents:
-  worker:
-    model:
-      type: test
-      custom_output_text: "Done"
-    system_prompt: Worker.
-
-  orchestrator:
-    model:
-      type: test
-      call_tools: ["task"]
-      tool_args:
-        task:
-          agent_or_team: worker
-          prompt: "Work"
-          description: "TG-1 persist test"
-    tools:
-      - type: subagent
-""")
-
-    async with AgentPool(manifest) as pool:
-        if pool.sessions is None:
-            pytest.skip("Pool has no SessionManager")
-        pool.session_pool.sessions.store = store  # type: ignore[union-attr]
-
-        orch = pool.manifest.agents["orchestrator"].get_agent(pool=pool)
-        child_session_id_from_spawn: str | None = None
-
-        async for event in orch.run_stream("Delegate", session_id="ses_test"):
-            if isinstance(event, SpawnSessionStart):
-                child_session_id_from_spawn = event.child_session_id
-
-        assert child_session_id_from_spawn is not None
-        parent_session_id = "ses_test"
-        assert parent_session_id is not None
-
-        child_data = await store.load(child_session_id_from_spawn)
-        assert child_data is not None
-        assert child_data.parent_id == parent_session_id
-        assert child_data.agent_name == "worker"
-
-
-# ---------------------------------------------------------------------------
 # TG-3: Team member SpawnSessionStart precedes SubAgentEvent content
 # ---------------------------------------------------------------------------
 

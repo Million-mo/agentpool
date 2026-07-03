@@ -114,24 +114,6 @@ async def test_multiple_processes_management(process_manifest):
         assert len(processes) == 0
 
 
-@pytest.mark.skip(reason="Output limit test needs refinement")
-async def test_process_output_limit(process_manifest):
-    """Test process output limiting functionality."""
-    async with AgentPool(process_manifest) as pool:
-        pm = pool.process_manager
-        # Start process with small output limit
-        # Use a command that generates more output than the limit (platform-aware)
-        python_cmd = get_python_command()
-        process_id = await pm.start_process(python_cmd, ["-c", "print('x' * 500)"], output_limit=50)
-        exit_code = await pm.wait_for_exit(process_id)
-        assert exit_code == 0
-        # Check that output was truncated
-        output = await pm.get_output(process_id)
-        assert output.truncated
-        assert len(output.combined.encode()) < 500
-        await pm.release_process(process_id)
-
-
 async def test_error_handling_invalid_command(process_manifest, caplog: pytest.LogCaptureFixture):
     """Test error handling for invalid commands."""
     caplog.set_level("CRITICAL")
