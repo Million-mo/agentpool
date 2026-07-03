@@ -41,7 +41,7 @@ events rather than breaking the iteration.
 from __future__ import annotations
 
 import asyncio
-from contextlib import redirect_stderr, suppress
+from contextlib import redirect_stderr
 from io import StringIO
 from typing import Any
 from unittest.mock import MagicMock

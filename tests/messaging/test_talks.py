@@ -4,7 +4,6 @@ from pydantic_ai.models.test import TestModel
 import pytest
 
 from agentpool import Agent
-from agentpool.talk.talk import Talk, TeamTalk
 
 
 async def test_basic_single_connection():
