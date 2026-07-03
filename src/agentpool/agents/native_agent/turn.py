@@ -106,7 +106,7 @@ def _wrap_passthrough_event(event: Any) -> RichAgentStreamEvent[Any] | None:
     if dataclasses.is_dataclass(event) and any(
         f.name == "event_kind" for f in dataclasses.fields(event)
     ):
-        return event
+        return cast(RichAgentStreamEvent[Any], event)
     return None
 
 
