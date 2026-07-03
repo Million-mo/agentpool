@@ -5,7 +5,7 @@ produces pydantic-ai capabilities (Toolset, Hooks, MCP) without the
 heavyweight ResourceProvider base class.
 
 Each factory is a lightweight callable that returns a pydantic-ai
-``AbstractCapability`` or ``None`` (if no tools are available).
+``AbstractToolset`` or ``None`` (if no tools are available).
 """
 
 from __future__ import annotations
@@ -14,23 +14,23 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 
 if TYPE_CHECKING:
-    from pydantic_ai.capabilities import AbstractCapability
+    from pydantic_ai.toolsets import AbstractToolset
 
 
 @runtime_checkable
 class ToolsetFactory(Protocol):
-    """Produce a pydantic-ai capability from configured tools.
+    """Produce a pydantic-ai toolset from configured tools.
 
     Implementations wrap tool sources (MCP servers, local skills,
     subagent delegation, static tool lists) and return a single
-    ``AbstractCapability`` that pydantic-ai injects at agent run time.
+    ``AbstractToolset`` that pydantic-ai injects at agent run time.
 
     The factory is called once per agent run. Returning ``None`` means
     the factory has no tools to contribute for this run.
     """
 
-    async def create_capability(self) -> AbstractCapability | None:
-        """Build and return a pydantic-ai capability, or ``None``."""
+    async def create_capability(self) -> AbstractToolset[Any] | None:
+        """Build and return a pydantic-ai toolset, or ``None``."""
         ...
 
 
@@ -45,14 +45,14 @@ class StaticToolsetFactory:
         self._tools = tools or []
         self._name = name
 
-    async def create_capability(self) -> AbstractCapability | None:
+    async def create_capability(self) -> AbstractToolset[Any] | None:
         from pydantic_ai.toolsets import (
             ApprovalRequiredToolset,
             CombinedToolset,
             FunctionToolset,
         )
 
-        from agentpool.resource_providers.base import ResourceProvider
+        from agentpool.tools.tool_wrapping import wrap_tool_for_pydantic_ai
 
         if not self._tools:
             return None
@@ -60,16 +60,14 @@ class StaticToolsetFactory:
         normal_tools = [t for t in self._tools if not t.requires_confirmation]
         confirm_tools = [t for t in self._tools if t.requires_confirmation]
 
-        toolsets: list[Any] = []
+        toolsets: list[AbstractToolset[Any]] = []
         if normal_tools:
-            pa_tools = [ResourceProvider._wrap_for_pydantic_ai(tool) for tool in normal_tools]
+            pa_tools = [wrap_tool_for_pydantic_ai(tool) for tool in normal_tools]
             toolsets.append(FunctionToolset(pa_tools, id=self._name))
         if confirm_tools:
-            pa_tools = [ResourceProvider._wrap_for_pydantic_ai(tool) for tool in confirm_tools]
+            pa_tools = [wrap_tool_for_pydantic_ai(tool) for tool in confirm_tools]
             toolsets.append(ApprovalRequiredToolset(FunctionToolset(pa_tools, id=self._name)))
 
-        if not toolsets:
-            return None
         if len(toolsets) == 1:
             return toolsets[0]
         return CombinedToolset(toolsets)
@@ -90,11 +88,15 @@ class AdapterToolsetFactory:
     def __init__(self, provider: Any) -> None:
         self._provider = provider
 
-    async def create_capability(self) -> AbstractCapability | None:
+    async def create_capability(self) -> AbstractToolset[Any] | None:
+        from pydantic_ai.toolsets import AbstractToolset
+
         cap = self._provider.as_capability()
         if cap is None:
             return None
-        return cap
+        if isinstance(cap, AbstractToolset):
+            return cap
+        return None
 
     @property
     def provider(self) -> Any:
