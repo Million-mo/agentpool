@@ -12,10 +12,15 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic_ai.capabilities import AbstractCapability
 
+from agentpool.log import get_logger
+
 
 if TYPE_CHECKING:
     from pydantic_ai import RunContext
     from pydantic_ai.messages import ModelMessage, ModelRequestContext
+
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -28,14 +33,15 @@ class DynamicContextCapability(AbstractCapability[Any]):
 
     The actual compaction strategy is delegated to a callable so different
     summarization approaches (LLM-based, truncation, sliding window) can
-    be plugged in.
+    be plugged in. If no compaction function is configured, a warning is
+    logged so users know the capability is not actively compacting.
     """
 
     max_messages: int = 50
     compaction_threshold: float = 0.8
     _compaction_fn: Any = field(default=None, repr=False)
 
-    _MIN_MESSAGES = 2
+    _MIN_MESSAGES: int = 2
 
     def __post_init__(self) -> None:
         if self.max_messages < self._MIN_MESSAGES:
@@ -61,12 +67,19 @@ class DynamicContextCapability(AbstractCapability[Any]):
         if self._compaction_fn is not None:
             compacted = await self._compaction_fn(messages, threshold_count)
             request_context.messages = compacted
+        else:
+            logger.warning(
+                "DynamicContextCapability: message count (%d) exceeded threshold (%d), "
+                "but no compaction function is configured.",
+                len(messages),
+                threshold_count,
+            )
         return request_context
 
     def set_compaction_fn(self, fn: Any) -> None:
         self._compaction_fn = fn
 
-    def for_run(self, ctx: RunContext[Any]) -> DynamicContextCapability:
+    async def for_run(self, ctx: RunContext[Any]) -> DynamicContextCapability:
         cap = DynamicContextCapability(
             max_messages=self.max_messages,
             compaction_threshold=self.compaction_threshold,

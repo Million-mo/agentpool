@@ -14,9 +14,9 @@ from pydantic_ai.capabilities import AbstractCapability
 
 if TYPE_CHECKING:
     from pydantic_ai import RunContext
-    from pydantic_ai.agent import WrapToolExecuteHandler
+    from pydantic_ai.capabilities import WrapToolExecuteHandler
     from pydantic_ai.messages import ToolCallPart
-    from pydantic_ai.toolsets import ToolDefinition
+    from pydantic_ai.tools import ToolDefinition
 
 
 _TRUNCATION_NOTICE = "\n[Tool output truncated by ToolOutputBudgetCapability]"
@@ -38,8 +38,7 @@ class ToolOutputBudgetCapability(AbstractCapability[Any]):
     def __post_init__(self) -> None:
         if self.max_output_chars < self._MIN_OUTPUT_CHARS:
             msg = (
-                f"max_output_chars must be >= {self._MIN_OUTPUT_CHARS}, "
-                f"got {self.max_output_chars}"
+                f"max_output_chars must be >= {self._MIN_OUTPUT_CHARS}, got {self.max_output_chars}"
             )
             raise ValueError(msg)
 
@@ -56,16 +55,12 @@ class ToolOutputBudgetCapability(AbstractCapability[Any]):
         args: Any,
         handler: WrapToolExecuteHandler,
     ) -> Any:
-        result = await handler(ctx, call=call, tool_def=tool_def, args=args)
+        result = await handler(args)
         match result:
             case str():
-                if len(result) > self.max_output_chars:
-                    return result[: self.max_output_chars] + _TRUNCATION_NOTICE
+                return self._truncate(result)
             case list():
-                return [
-                    self._truncate(item) if isinstance(item, str) else item
-                    for item in result
-                ]
+                return [self._truncate(item) if isinstance(item, str) else item for item in result]
             case _:
                 pass
         return result
@@ -75,5 +70,5 @@ class ToolOutputBudgetCapability(AbstractCapability[Any]):
             return text[: self.max_output_chars] + _TRUNCATION_NOTICE
         return text
 
-    def for_run(self, ctx: RunContext[Any]) -> ToolOutputBudgetCapability:
+    async def for_run(self, ctx: RunContext[Any]) -> ToolOutputBudgetCapability:
         return ToolOutputBudgetCapability(max_output_chars=self.max_output_chars)

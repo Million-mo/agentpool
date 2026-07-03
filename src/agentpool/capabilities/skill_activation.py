@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic_ai.capabilities import AbstractCapability
 
+from agentpool.capabilities.memory import _inject_into_system_prompt
+
 
 if TYPE_CHECKING:
     from pydantic_ai import RunContext
@@ -29,6 +31,10 @@ class SkillActivationCapability(AbstractCapability[Any]):
 
     Skill matching is delegated to a callable that receives the
     conversation messages and returns a list of skill names to activate.
+
+    System prompt injection targets ``SystemPromptPart`` objects inside
+    ``ModelRequest.parts`` (the pydantic-ai v2 structure), not a
+    non-existent ``system_prompt`` attribute on the message.
     """
 
     _skills: dict[str, str] = field(default_factory=dict, repr=False)
@@ -52,25 +58,18 @@ class SkillActivationCapability(AbstractCapability[Any]):
         if not self._skills or self._matcher_fn is None:
             return request_context
         messages = request_context.messages
-        active_names: list[str] = []
-        if self._matcher_fn is not None:
-            result = await self._matcher_fn(messages, list(self._skills.keys()))
-            active_names = [n for n in result if n in self._skills]
+        result = await self._matcher_fn(messages, list(self._skills.keys()))
+        active_names: list[str] = [n for n in result if n in self._skills]
         if not active_names:
             return request_context
         injected = "\n\n".join(
-            f'<skill name="{name}">\n{self._skills[name]}\n</skill>'
-            for name in active_names
+            f'<skill name="{name}">\n{self._skills[name]}\n</skill>' for name in active_names
         )
-        for msg in messages:
-            system_prompt = getattr(msg, "system_prompt", None)
-            if system_prompt is not None and injected not in system_prompt:
-                msg.system_prompt = f"{system_prompt}\n\n{injected}"
-                break
+        _inject_into_system_prompt(messages, injected)
         return request_context
 
-    def for_run(self, ctx: RunContext[Any]) -> SkillActivationCapability:
+    async def for_run(self, ctx: RunContext[Any]) -> SkillActivationCapability:
         cap = SkillActivationCapability()
-        cap._skills = dict(self._skills)
+        cap._skills = self._skills
         cap._matcher_fn = self._matcher_fn
         return cap

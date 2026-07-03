@@ -1,6 +1,6 @@
 """Token budget capability — enforces token budget per agent run.
 
-Tracks cumulative token usage via ``after_model_request`` and raises
+Tracks cumulative token usage via ``wrap_model_request`` and raises
 ``TokenBudgetExceededError`` when the budget is exceeded.
 """
 
@@ -14,7 +14,7 @@ from pydantic_ai.capabilities import AbstractCapability
 
 if TYPE_CHECKING:
     from pydantic_ai import RunContext
-    from pydantic_ai.agent import WrapModelRequestHandler
+    from pydantic_ai.capabilities import WrapModelRequestHandler
     from pydantic_ai.messages import ModelRequestContext, ModelResponse
     from pydantic_ai.usage import RunUsage
 
@@ -25,9 +25,7 @@ class TokenBudgetExceededError(Exception):
     def __init__(self, used: int, budget: int) -> None:
         self.used = used
         self.budget = budget
-        super().__init__(
-            f"Token budget exceeded: {used} tokens used, budget is {budget}."
-        )
+        super().__init__(f"Token budget exceeded: {used} tokens used, budget is {budget}.")
 
 
 @dataclass
@@ -58,7 +56,7 @@ class TokenBudgetCapability(AbstractCapability[Any]):
         request_context: ModelRequestContext,
         handler: WrapModelRequestHandler,
     ) -> ModelResponse:
-        response = await handler(ctx, request_context=request_context)
+        response: ModelResponse = await handler(request_context)
         usage: RunUsage | None = getattr(response, "usage", None)
         if usage is not None:
             self._used_tokens += usage.total_tokens
@@ -66,5 +64,5 @@ class TokenBudgetCapability(AbstractCapability[Any]):
                 raise TokenBudgetExceededError(self._used_tokens, self.max_tokens)
         return response
 
-    def for_run(self, ctx: RunContext[Any]) -> TokenBudgetCapability:
+    async def for_run(self, ctx: RunContext[Any]) -> TokenBudgetCapability:
         return TokenBudgetCapability(max_tokens=self.max_tokens)

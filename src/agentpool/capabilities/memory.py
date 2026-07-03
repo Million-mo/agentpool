@@ -10,12 +10,13 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.messages import ModelMessage, ModelRequest
 
 
 if TYPE_CHECKING:
     from pydantic_ai import RunContext
-    from pydantic_ai.agent import AgentNode, NodeResult
-    from pydantic_ai.messages import ModelMessage, ModelRequestContext
+    from pydantic_ai.capabilities import AgentNode, NodeResult
+    from pydantic_ai.messages import ModelRequestContext
 
 
 @dataclass
@@ -29,6 +30,10 @@ class MemoryCapability(AbstractCapability[Any]):
     Memory extraction and injection are delegated to callables so
     different strategies (LLM-based extraction, keyword matching,
     vector search) can be plugged in.
+
+    The store is **shared** across all per-run copies (``for_run()`` does
+    not copy the dict) so that memories extracted during a run persist
+    into subsequent runs.
     """
 
     _store: dict[str, str] = field(default_factory=dict, repr=False)
@@ -70,16 +75,39 @@ class MemoryCapability(AbstractCapability[Any]):
         if not injected:
             return request_context
         messages: list[ModelMessage] = request_context.messages
-        for msg in messages:
-            system_prompt = getattr(msg, "system_prompt", None)
-            if system_prompt is not None and injected not in system_prompt:
-                msg.system_prompt = f"{system_prompt}\n\n{injected}"
-                break
+        _inject_into_system_prompt(messages, injected)
         return request_context
 
-    def for_run(self, ctx: RunContext[Any]) -> MemoryCapability:
+    async def for_run(self, ctx: RunContext[Any]) -> MemoryCapability:
         cap = MemoryCapability()
-        cap._store = dict(self._store)
+        # Share the same dict reference so memories persist across runs.
+        cap._store = self._store
         cap._extract_fn = self._extract_fn
         cap._inject_fn = self._inject_fn
         return cap
+
+
+def _inject_into_system_prompt(messages: list[ModelMessage], injected: str) -> bool:
+    """Append ``injected`` text to the first ``SystemPromptPart`` found.
+
+    Pydantic AI stores system prompts as ``SystemPromptPart`` objects
+    inside ``ModelRequest.parts``, not as a ``system_prompt`` attribute
+    on the message itself. This helper iterates parts to find and update
+    the correct one.
+
+    Returns ``True`` if injection was applied, ``False`` otherwise.
+    """
+    for msg in messages:
+        if not _is_model_request(msg):
+            continue
+        for part in msg.parts:
+            if part.part_kind == "system-prompt":
+                if injected not in part.content:
+                    part.content = f"{part.content}\n\n{injected}"
+                return True
+    return False
+
+
+def _is_model_request(msg: ModelMessage) -> bool:
+    """Type-narrow ``ModelMessage`` to ``ModelRequest`` with kind check."""
+    return msg.kind == "request" and isinstance(msg, ModelRequest)
