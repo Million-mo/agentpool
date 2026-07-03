@@ -240,6 +240,16 @@ class ChatMessage[TContent]:
 
     __repr__ = dataclasses_no_defaults_repr
 
+    def __post_init__(self) -> None:
+        """Ensure messages and content are synchronized.
+
+        If messages is empty but content is a string, construct a
+        ModelResponse with a TextPart so ``messages`` always carries
+        the canonical representation.
+        """
+        if not self.messages and isinstance(self.content, str) and self.role == "assistant":
+            self.messages = [ModelResponse(parts=[TextPart(content=self.content)])]
+
     @property
     def last_message(self) -> ModelMessage | None:
         """Return the last message from the message history."""

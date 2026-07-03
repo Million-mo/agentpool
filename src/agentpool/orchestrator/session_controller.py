@@ -23,7 +23,7 @@ from agentpool.agents.events import (
     StreamCompleteEvent,
 )
 from agentpool.log import get_logger
-from agentpool.orchestrator.run import RunHandle, RunStatus, inject_cancelled_tool_results
+from agentpool.orchestrator.run import RunHandle, RunStatus
 from agentpool.orchestrator.runtime_registry import RuntimeAgentRegistry
 from agentpool.sessions.models import PendingDeferredCall, SessionData, SessionInfo
 
@@ -1071,10 +1071,6 @@ class SessionController:
         if conversation is not None:
             for chat_msg in conversation.get_history():
                 model_messages.extend(chat_msg.messages)
-        # Inject RetryPromptPart for any trailing unprocessed tool calls
-        # (e.g. from a cancelled turn). Without this, PydanticAI rejects
-        # the next user prompt with "unprocessed tool calls" error.
-        model_messages = inject_cancelled_tool_results(model_messages)
         run_handle = RunHandle(
             run_id=uuid.uuid4().hex,
             session_id=session_id,

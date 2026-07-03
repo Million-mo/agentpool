@@ -1074,15 +1074,9 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
             event_bus = EventBus()
             run_ctx.event_bus = event_bus
 
-        # Convert MessageHistory to list[ModelMessage] for pydantic-ai
         model_messages: list[ModelMessage] = []
         for chat_msg in message_history.get_history():
             model_messages.extend(chat_msg.messages)
-        # Inject RetryPromptPart for any trailing unprocessed tool calls
-        # (e.g. from a cancelled turn).
-        from agentpool.orchestrator.run import inject_cancelled_tool_results
-
-        model_messages = inject_cancelled_tool_results(model_messages)
 
         turn = NativeTurn(
             agent=self,
@@ -1147,9 +1141,6 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
         Returns:
             A NativeTurn instance for single-cycle execution.
         """
-        from agentpool.orchestrator.run import inject_cancelled_tool_results
-
-        message_history = inject_cancelled_tool_results(message_history)
         return NativeTurn(
             agent=self,
             prompts=prompts,  # type: ignore[arg-type]

@@ -1,35 +1,51 @@
 """NativeTurn wraps pydantic-ai iter/next cycle into a single reactive Turn.
 
 Provides a :class:`Turn` subclass that drives ``agentlet.iter()`` +
-``agent_run.next()`` and yields :class:`RichAgentStreamEvent` via
-:class:`EventMapper`.
+``agent_run.next()`` and yields :class:`RichAgentStreamEvent` by wrapping
+native PydanticAI events to AgentPool subclasses for EventBus compatibility.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
-from pydantic_ai import CallToolsNode, ModelRequestNode
+from pydantic_ai import (
+    BaseToolCallPart,
+    BaseToolReturnPart,
+    CallToolsNode,
+    FunctionToolCallEvent,
+    FunctionToolResultEvent,
+    ModelRequestNode,
+    PartDeltaEvent as PyAIPartDeltaEvent,
+    PartStartEvent as PyAIPartStartEvent,
+    RetryPromptPart,
+)
 from pydantic_ai.exceptions import UndrainedPendingMessagesError
 from pydantic_graph import End
 
 from agentpool.agents.events.events import (
+    PartDeltaEvent,
+    PartStartEvent,
+    RichAgentStreamEvent,
     RunErrorEvent,
     StreamCompleteEvent,
     ToolCallCompleteEvent,
+    ToolCallProgressEvent,
+    ToolCallStartEvent,
 )
 from agentpool.agents.native_agent.helpers import extract_text_from_messages
 from agentpool.log import get_logger
 from agentpool.messaging import ChatMessage
 from agentpool.messaging.messages import TokenCost
-from agentpool.orchestrator.event_mapper import EventMapper
 from agentpool.orchestrator.turn import Turn
 from agentpool.tasks.exceptions import RunAbortedError
-from agentpool.tools.base import is_terminal_tool
+from agentpool.tools.base import ToolKind, is_terminal_tool
+from agentpool.utils.pydantic_ai_helpers import safe_args_as_dict
 
 
 if TYPE_CHECKING:
@@ -39,19 +55,124 @@ if TYPE_CHECKING:
     from pydantic_ai.messages import ModelMessage
 
     from agentpool.agents.context import AgentRunContext
-    from agentpool.agents.events.events import RichAgentStreamEvent
     from agentpool.agents.native_agent.agent import Agent
 
 
 logger = get_logger(__name__)
 
 
+def _wrap_event(
+    event: Any,
+    agent_name: str,
+    message_id: str,
+    pending_tool_calls: dict[str, str],
+    pending_tool_inputs: dict[str, dict[str, Any]],
+    tool_kind_map: dict[str, str],
+) -> RichAgentStreamEvent[Any] | None:
+    """Wrap a PydanticAI stream event to an AgentPool RichAgentStreamEvent."""
+    match event:
+        case FunctionToolCallEvent(part=tool_part) if isinstance(tool_part, BaseToolCallPart):
+            return _emit_tool_call_start(
+                tool_part,
+                pending_tool_calls,
+                pending_tool_inputs,
+                tool_kind_map,
+            )
+        case FunctionToolResultEvent(part=tool_return):
+            return _emit_tool_call_complete(
+                tool_return,
+                agent_name,
+                message_id,
+                pending_tool_calls,
+                pending_tool_inputs,
+            )
+        case PyAIPartStartEvent(part=tool_part) if isinstance(tool_part, BaseToolCallPart):
+            return _emit_tool_call_start(
+                tool_part,
+                pending_tool_calls,
+                pending_tool_inputs,
+                tool_kind_map,
+            )
+        case _:
+            return _wrap_passthrough_event(event)
+
+
+def _wrap_passthrough_event(event: Any) -> RichAgentStreamEvent[Any] | None:
+    """Wrap or pass through an event that doesn't match tool-call patterns."""
+    if isinstance(event, PyAIPartDeltaEvent) and not isinstance(event, PartDeltaEvent):
+        return PartDeltaEvent(index=event.index, delta=event.delta)
+    if isinstance(event, PyAIPartStartEvent) and not isinstance(event, PartStartEvent):
+        return PartStartEvent(index=event.index, part=event.part)
+    if dataclasses.is_dataclass(event) and any(
+        f.name == "event_kind" for f in dataclasses.fields(event)
+    ):
+        return event
+    return None
+
+
+def _emit_tool_call_start(
+    tool_part: BaseToolCallPart,
+    pending_tool_calls: dict[str, str],
+    pending_tool_inputs: dict[str, dict[str, Any]],
+    tool_kind_map: dict[str, str],
+) -> ToolCallStartEvent | ToolCallProgressEvent | None:
+    call_id = tool_part.tool_call_id
+    if call_id in pending_tool_calls:
+        new_input = safe_args_as_dict(tool_part, default={})
+        stored_input = pending_tool_inputs.get(call_id, {})
+        if new_input == stored_input:
+            return None
+        pending_tool_inputs[call_id] = new_input
+        return ToolCallProgressEvent(
+            tool_call_id=call_id,
+            status="in_progress",
+            tool_name=tool_part.tool_name,
+            tool_input=new_input,
+        )
+    tool_name = tool_part.tool_name
+    tool_input = safe_args_as_dict(tool_part, default={})
+    pending_tool_calls[call_id] = tool_name
+    pending_tool_inputs[call_id] = tool_input
+    kind = cast(ToolKind, tool_kind_map.get(tool_name, "other"))
+    return ToolCallStartEvent(
+        tool_call_id=call_id,
+        tool_name=tool_name,
+        title=f"Executing: {tool_name}",
+        kind=kind,
+        raw_input=tool_input,
+    )
+
+
+def _emit_tool_call_complete(
+    tool_return: BaseToolReturnPart | RetryPromptPart,
+    agent_name: str,
+    message_id: str,
+    pending_tool_calls: dict[str, str],
+    pending_tool_inputs: dict[str, dict[str, Any]],
+) -> ToolCallCompleteEvent | None:
+    call_id = tool_return.tool_call_id
+    tool_name = pending_tool_calls.pop(call_id, None)
+    if tool_name is None:
+        return None
+    tool_input = pending_tool_inputs.pop(call_id, {})
+    is_error = isinstance(tool_return, RetryPromptPart)
+    return ToolCallCompleteEvent(
+        tool_name=tool_name,
+        tool_call_id=call_id,
+        tool_input=tool_input,
+        tool_result=tool_return.content,
+        agent_name=agent_name,
+        message_id=message_id,
+        metadata={"is_error": True} if is_error else None,
+    )
+
+
 class NativeTurn(Turn):
     """Wraps pydantic-ai iter/next cycle into a single reactive Turn.
 
     Drives the pydantic-ai ``agent.iter()`` + ``agent_run.next()`` loop,
-    mapping stream events to :class:`RichAgentStreamEvent` via
-    :class:`EventMapper`.  After execution, :attr:`message_history`
+    wrapping native stream events to AgentPool subclasses for EventBus
+    coalescing compatibility.  After execution, :attr:`message_history`
     and :attr:`final_message` become available.
 
     Attributes:
@@ -106,24 +227,16 @@ class NativeTurn(Turn):
             run_ctx=self._run_ctx,
         )
 
-        mapper = EventMapper(
-            agent_name=self._agent.name,
-            message_id=self._message_id,
-        )
-
         terminal_tool_names: set[str] = set()
+        tool_kind_map: dict[str, str] = {}
         try:
-            # Use timeout to prevent hang when MCP providers are still
-            # connecting (e.g. ACP session/load hasn't arrived yet).
-            # MCP tools are handled via snapshot/as_capability path,
-            # so get_tools() here is only for building tool kind map.
             all_tools = await asyncio.wait_for(
                 self._agent.tools.get_tools(),
                 timeout=5.0,
             )
             for tool in all_tools:
                 if tool.category:
-                    mapper.tool_kind_map[tool.name] = tool.category
+                    tool_kind_map[tool.name] = tool.category
                 if is_terminal_tool(tool):
                     terminal_tool_names.add(tool.name)
         except TimeoutError:
@@ -141,10 +254,6 @@ class NativeTurn(Turn):
         if self._run_ctx.deps is not None:
             agent_deps.data = self._run_ctx.deps
 
-        # Consume staged_content (e.g. skill instructions injected by
-        # skill_bridge) and prepend to prompts. This mirrors the old
-        # run_stream() path which did the same before calling agentlet.iter().
-        # Without this, skill instructions are silently discarded.
         staged_text = await self._agent.staged_content.consume_as_text()
         if staged_text is not None:
             user_request = "\n\n".join(self._prompts)
@@ -153,6 +262,9 @@ class NativeTurn(Turn):
             )
         else:
             effective_prompts = self._prompts
+
+        pending_tool_calls: dict[str, str] = {}
+        pending_tool_inputs: dict[str, dict[str, Any]] = {}
 
         agent_run: Any = None
         try:
@@ -173,15 +285,20 @@ class NativeTurn(Turn):
 
                     if isinstance(node, ModelRequestNode | CallToolsNode):
                         terminal_tool_completed = False
-                        # Cooperative cancellation is handled via run_ctx.cancelled
-                        # checked on every streaming chunk below.
                         try:
                             async with node.stream(agent_run.ctx) as stream:
                                 async for event in stream:
                                     if self._run_ctx.cancelled:
                                         break
 
-                                    mapped = mapper.map_event(event)
+                                    mapped = _wrap_event(
+                                        event,
+                                        agent_name=self._agent.name,
+                                        message_id=self._message_id,
+                                        pending_tool_calls=pending_tool_calls,
+                                        pending_tool_inputs=pending_tool_inputs,
+                                        tool_kind_map=tool_kind_map,
+                                    )
                                     if mapped is not None:
                                         yield mapped
 
@@ -232,11 +349,6 @@ class NativeTurn(Turn):
 
         except asyncio.CancelledError:
             if self._run_ctx.cancelled:
-                # Cancellation came from cancel() — exit gracefully
-                # without yielding StreamCompleteEvent. Set _final_message
-                # so turn.final_message doesn't raise for callers.
-                # Capture _message_history from agent_run so the cancelled
-                # turn's partial messages are preserved for the next turn.
                 if agent_run is not None:
                     with contextlib.suppress(Exception):
                         self._message_history = agent_run.all_messages()
@@ -264,18 +376,7 @@ class NativeTurn(Turn):
             if self._run_ctx._run_handle is not None:
                 self._run_ctx._run_handle.active_agent_run = None
 
-        # Build final message always (even when cancelled) so that
-        # turn.final_message is accessible to callers after execute()
-        # returns. When cancelled via cancel(), we skip yielding
-        # StreamCompleteEvent to avoid double turn_complete (end_turn
-        # + cancelled).
         if self._message_history is not None:
-            # Only extract text from messages generated in THIS turn,
-            # not from the input history (which may contain previous
-            # assistant responses that would pollute the content).
-            # Use agent_run.new_messages() which returns only messages
-            # generated during this run, avoiding issues with shared
-            # state in concurrent runs.
             if agent_run is not None:
                 new_messages = agent_run.new_messages()
             else:
@@ -296,8 +397,6 @@ class NativeTurn(Turn):
         else:
             content = ""
 
-        # Extract cost_info from agent_run usage so downstream consumers
-        # (Talk stats, storage) can track token usage.
         cost_info: TokenCost | None = None
         if agent_run is not None:
             try:
@@ -321,9 +420,6 @@ class NativeTurn(Turn):
             messages=new_messages if agent_run is not None else [],
         )
 
-        # Belt-and-suspenders: if cancelled during execution (e.g.
-        # CancelledError swallowed by pydantic-ai inside agent_run.next()),
-        # exit without yielding StreamCompleteEvent.
         if self._run_ctx.cancelled:
             return
 
