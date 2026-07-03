@@ -12,7 +12,6 @@ def test_runusage_imports():
     files_to_check = [
         "src/agentpool_storage/sql_provider/sql_provider.py",
         "src/agentpool_storage/file_provider/provider.py",
-        "tests/test_history.py",
         "tests/mcp_client/test_client_conversion.py",
         "src/agentpool_storage/sql_provider/utils.py",
         "src/agentpool_storage/claude_provider/converters.py",
