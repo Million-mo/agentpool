@@ -16,7 +16,6 @@ import sys
 import tempfile
 from typing import TYPE_CHECKING, Any
 
-from exxec.models import ExecutionResult
 from exxec_config import MockExecutionEnvironmentConfig
 import pytest
 from syrupy.extensions.json import JSONSnapshotExtension
@@ -24,7 +23,6 @@ import yaml
 
 from agentpool.delegation import AgentPool
 from agentpool.models import ACPAgentConfig
-from agentpool_config.agentpool_tools import BashToolConfig
 
 
 if TYPE_CHECKING:
@@ -176,45 +174,6 @@ class ACPViaACPHarness:
 def harness(temp_dir: Path) -> ACPViaACPHarness:
     """Create test harness."""
     return ACPViaACPHarness(temp_dir=temp_dir)
-
-
-class TestExecuteCommandViaACP:
-    """Test execute_command tool through ACP subprocess."""
-
-    @pytest.mark.skip(
-        reason="Subprocess ACP bridge broken after SessionPool refactoring — "
-        "ASGI callable returned without completing response. "
-        "Equivalent coverage exists in test_tool_call_snapshots.py."
-    )
-    async def test_execute_command_simple(
-        self,
-        harness: ACPViaACPHarness,
-        json_snapshot: SnapshotAssertion,
-    ):
-        """Test simple command execution via ACP with mock environment."""
-        exec_result = ExecutionResult(
-            result=None,
-            stdout="hello\n",
-            stderr="",
-            success=True,
-            exit_code=0,
-            duration=0.01,
-        )
-        results = {"echo hello": asdict(exec_result)}
-        mock_env = MockExecutionEnvironmentConfig(deterministic_ids=True, command_results=results)
-        events = await harness.execute_tool(
-            tool_name="bash",
-            tool_args={"command": "echo hello"},
-            tools=[BashToolConfig(environment=mock_env)],
-        )
-        # Filter to tool call messages for stable comparison
-        tool_events = [
-            e
-            for e in events
-            if e["type"] in ("ToolCallStartEvent", "ToolCallProgressEvent", "ToolCallCompleteEvent")
-        ]
-
-        assert tool_events == json_snapshot
 
 
 # class TestExecuteCodeViaACP:

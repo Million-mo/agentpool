@@ -1,9 +1,7 @@
 """Integration tests for OpenCode session pool integration.
 
 These tests verify the integration layer between OpenCode server routes
-and the SessionPool orchestration layer. The integration class under test
-(OpenCodeSessionPoolIntegration) does not yet exist — these are TDD RED
-phase tests.
+and the SessionPool orchestration layer via OpenCodeSessionPoolIntegration.
 
 Coverage:
 - Session creation via SessionPool.create_session()

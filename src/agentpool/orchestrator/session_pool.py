@@ -178,6 +178,7 @@ class SessionPool:
                 agents or teams sections.
         """
         from agentpool.delegation.base_team import BaseTeam
+        from agentpool_config.context import ConfigContextManager
 
         member_names = [team_config.get_member_name(m) for m in team_config.members]
 

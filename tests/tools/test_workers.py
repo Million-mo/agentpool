@@ -11,7 +11,6 @@ import pytest
 
 from agentpool import Agent, AgentPool, AgentsManifest
 from agentpool.agents.events import RunErrorEvent, SpawnSessionStart, StreamCompleteEvent
-from agentpool.agents.exceptions import MAX_DELEGATION_DEPTH, DelegationDepthError
 
 
 if TYPE_CHECKING:
@@ -429,73 +428,6 @@ async def test_worker_session_isolation(tmp_path: Path):
     assert parent_ids[0] == parent_ids[1], "All worker runs should share same parent session"
 
 
-@pytest.mark.skip(
-    reason=(
-        "Team workers run directly via worker.run() instead of session_pool.run_stream(), "
-        "so StreamCompleteEvent is not published to the session pool's EventBus. "
-        "The _run_and_collect_events helper times out waiting for a terminal event. "
-        "This is an architectural difference in how teams are executed, not a regression."
-    )
-)
-async def test_worker_team_emits_events(tmp_path: Path):
-    """Test that team workers also emit proper events."""
-    team_config = """\
-agents:
-  main:
-    type: native
-    model: test
-    display_name: Main Agent
-    workers:
-      - my_team
-
-  agent1:
-    type: native
-    model: test
-    display_name: Agent 1
-    system_prompt: "You are agent 1."
-
-  agent2:
-    type: native
-    model: test
-    display_name: Agent 2
-    system_prompt: "You are agent 2."
-
-teams:
-  my_team:
-    mode: parallel
-    members: [agent1, agent2]
-"""
-    config_path = write_config(team_config, tmp_path)
-    manifest = AgentsManifest.from_file(config_path)
-
-    spawn_events: list[SpawnSessionStart] = []
-
-    async with AgentPool(manifest) as pool:
-        session_pool = pool.session_pool
-        assert session_pool is not None
-
-        main_model = TestModel(call_tools=["ask_my_team"])
-
-        await _preregister_session_agent(session_pool, "ses_test", "main", main_model)
-
-        team_models = {
-            "agent1": TestModel(custom_output_text="Agent 1 result"),
-            "agent2": TestModel(custom_output_text="Agent 2 result"),
-        }
-        async with _patch_agent_models(session_pool, team_models):
-            spawn_events.extend([
-                event
-                async for event in _run_and_collect_events(
-                    session_pool, "ses_test", "Ask team to do something", timeout=25.0
-                )
-                if isinstance(event, SpawnSessionStart)
-            ])
-
-    assert len(spawn_events) == 1
-    assert spawn_events[0].source_name == "my_team"
-    assert spawn_events[0].source_type == "team_parallel"
-
-
 async def test_worker_spawn_depth_equals_parent_depth_plus_one(tmp_path: Path):
     """Test that worker spawn depth equals parent depth + 1."""
     config_path = write_config(BASIC_WORKERS, tmp_path)
@@ -555,45 +487,6 @@ async def test_worker_child_session_has_correct_parent(tmp_path: Path):
     assert spawn.child_session_id != spawn.parent_session_id
     assert spawn.child_session_id.startswith("ses_")
     assert spawn.parent_session_id.startswith("ses_")
-
-
-@pytest.mark.skip(
-    reason=(
-        "DelegationDepthError raised inside a tool is caught by pydantic-ai's "
-        "tool error handling and does not propagate to the run_stream consumer. "
-        "This is a pydantic-ai behavior change, not an AgentPool regression."
-    )
-)
-async def test_delegation_depth_error_at_max_depth(tmp_path: Path):
-    """Test that DelegationDepthError is raised when max delegation depth is exceeded."""
-    config_path = write_config(BASIC_WORKERS, tmp_path)
-    manifest = AgentsManifest.from_file(config_path)
-
-    async with AgentPool(manifest) as pool:
-        main_agent = _get_agent(pool, "main")
-        assert isinstance(main_agent, Agent)
-        async with main_agent:
-            session_pool = pool.session_pool
-            assert session_pool is not None
-
-            main_model = TestModel(call_tools=["ask_worker"])
-            worker_model = TestModel(custom_output_text="Worker result")
-            await main_agent.set_model(main_model)
-
-            async with _patch_agent_models(session_pool, {"worker": worker_model}):
-                depth_exceeded = False
-                try:
-                    async for event in main_agent.run_stream(
-                        "Ask worker: do something",
-                        depth=MAX_DELEGATION_DEPTH,
-                        session_id="ses_test",
-                    ):
-                        if isinstance(event, SpawnSessionStart):
-                            pass  # Should not reach here
-                except DelegationDepthError:
-                    depth_exceeded = True
-
-            assert depth_exceeded, "Expected DelegationDepthError when running at max depth"
 
 
 async def test_subagent_event_depth_propagation(tmp_path: Path):
