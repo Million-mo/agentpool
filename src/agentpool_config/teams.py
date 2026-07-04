@@ -12,7 +12,7 @@ from agentpool_config.nodes import NodeConfig
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from agentpool import Team, TeamRun
+    from agentpool import BaseTeam
     from agentpool.messaging import MessageNode
 
 
@@ -108,42 +108,23 @@ class TeamConfig(NodeConfig):
         self,
         nodes: Sequence[MessageNode[Any, Any]],
         name: str,
-    ) -> Team | TeamRun[Any, Any]:
+    ) -> BaseTeam[Any, Any]:
         """Create a team based on config.
 
-        !!! warning "Deprecated"
-            Use `agentpool_config.graph_translation.translate_team_to_graph()`
-            instead. This method will be removed when Team/TeamRun classes
-            are removed in a future phase.
+        Returns a :class:`BaseTeam` with ``mode`` set to the configured
+        execution mode.
         """
-        import warnings
-
-        from agentpool import Team, TeamRun
-
-        warnings.warn(
-            "TeamConfig.get_team() is deprecated. "
-            "Use translate_team_to_graph() from agentpool_config.graph_translation "
-            "to convert team config to GraphConfig instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
+        from agentpool.delegation.base_team import BaseTeam
 
         member_configs = self.get_member_configs()
 
-        if self.mode == "parallel":
-            return Team(
-                nodes,
-                name=name,
-                display_name=self.display_name,
-                shared_prompt=self.shared_prompt,
-                mcp_servers=self.get_mcp_servers(),
-                member_prompt_templates=member_configs or None,
-                member_timeout=self.member_timeout,
-            )
-        return TeamRun(
+        return BaseTeam(
             nodes,
+            mode=self.mode,
             name=name,
             display_name=self.display_name,
             shared_prompt=self.shared_prompt,
             mcp_servers=self.get_mcp_servers(),
+            member_prompt_templates=member_configs or None,
+            member_timeout=self.member_timeout,
         )

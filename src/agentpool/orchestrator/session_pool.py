@@ -37,8 +37,7 @@ if TYPE_CHECKING:
     from agentpool.agents.native_agent import Agent
     from agentpool.agents.native_agent.checkpoint import CheckpointData
     from agentpool.delegation import AgentPool
-    from agentpool.delegation.team import Team
-    from agentpool.delegation.teamrun import TeamRun
+    from agentpool.delegation.base_team import BaseTeam
     from agentpool.messaging import ChatMessage
     from agentpool.messaging.messagenode import MessageNode
     from agentpool.sessions.models import SessionData
@@ -155,7 +154,7 @@ class SessionPool:
         self,
         team_name: str,
         team_config: TeamConfig,
-    ) -> Team[Any] | TeamRun[Any, Any]:
+    ) -> BaseTeam[Any, Any]:
         """Create a team from config using session-level agent resolution.
 
         For each member in the team config, resolves the agent via

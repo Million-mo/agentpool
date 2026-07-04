@@ -4,8 +4,8 @@
 - [ ] 1.2 Remove `TeamRun` class from `src/agentpool/delegation/teamrun.py`
 - [ ] 1.3 Remove `TeamConfig.get_team()` factory method
 - [ ] 1.4 Remove `_TeamGraphState` from `src/agentpool/delegation/graph_team.py` if fully replaced
-- [ ] 1.5 Update `AgentPool.__init__` — stop creating `Team`/`TeamRun` instances
-- [ ] 1.6 Audit all callers of `TeamRun` and `TeamConfig.get_team()` — create migration list
+- [x] 1.5 Update `AgentPool.__init__` — stop creating `Team`/`TeamRun` instances
+- [x] 1.6 Audit all callers of `TeamRun` and `TeamConfig.get_team()` — create migration list
 - [ ] 1.7 Migrate all callers to `GraphConfig` + `GraphBuilder`
 - [ ] 1.8 Remove remaining `from agentpool.delegation.team import` / `from agentpool.delegation.teamrun import` statements
 - [ ] 1.9 Test translator against all `teams:` YAML configs in `site/examples/`
@@ -14,30 +14,31 @@
 
 ## 2. Phase 5: ToolsetFactory Migration
 
-- [ ] 2.1 Create `MCPToolsetFactory` — wraps MCP server, produces pdai `Toolset` (reconcile with `migrate-to-mcptoolset`)
-- [ ] 2.2 Create `LocalSkillToolsetFactory` — discovers filesystem skills (reconcile with `refactor-skills-as-capabilities`)
-- [ ] 2.3 Create `PoolToolsetFactory` — exposes agent/team delegation as subagent tools
-- [ ] 2.4 Migrate `MCPResourceProvider` callers (25) to `MCPToolsetFactory`
-- [ ] 2.5 Migrate `LocalResourceProvider` callers (44) to `LocalSkillToolsetFactory`
-- [ ] 2.6 Migrate `PoolResourceProvider` callers (1) to `PoolToolsetFactory`
-- [ ] 2.7 Migrate `PlanProvider` to pdai `Toolset` subclass (stateful, needs `RunContext.deps`)
-- [ ] 2.8 Add `DeprecationWarning` to `CodeModeResourceProvider.__init__` and `RemoteCodeModeResourceProvider.__init__`
-- [ ] 2.9 Remove `ResourceProvider` abstract base class (after all callers migrated)
-- [ ] 2.10 Remove `AggregatingResourceProvider`, `FilteringResourceProvider`, `StaticResourceProvider`
-- [ ] 2.11 Remove `SkillsInstructionProvider` (replaced by `SkillActivationCapability` from Phase 6)
-- [ ] 2.12 Drop task 5.11 `SkillBridgeCapability` — superseded by `SkillActivationCapability` (PR #100)
-- [ ] 2.13 Run `uv run pytest tests/resource_providers/` — tests updated and passing
-- [ ] 2.14 Run `uv run pytest tests/tools/` — tool tests passing
-- [ ] 2.15 Run `uv run pytest tests/toolsets/` — toolset tests passing
+- [x] 2.1 Create `ToolsetFactory` protocol + `StaticToolsetFactory` + `AdapterToolsetFactory` in `src/agentpool/tools/factory.py`
+- [ ] 2.2 Create `MCPToolsetFactory` — wraps MCP server, produces pdai `Toolset` (reconcile with `migrate-to-mcptoolset`)
+- [ ] 2.3 Create `LocalSkillToolsetFactory` — discovers filesystem skills (reconcile with `refactor-skills-as-capabilities`)
+- [ ] 2.4 Create `PoolToolsetFactory` — exposes agent/team delegation as subagent tools
+- [ ] 2.5 Migrate `MCPResourceProvider` callers (25) to `MCPToolsetFactory`
+- [ ] 2.6 Migrate `LocalResourceProvider` callers (44) to `LocalSkillToolsetFactory`
+- [ ] 2.7 Migrate `PoolResourceProvider` callers (1) to `PoolToolsetFactory`
+- [ ] 2.8 Migrate `PlanProvider` to pdai `Toolset` subclass (stateful, needs `RunContext.deps`)
+- [ ] 2.9 Add `DeprecationWarning` to `CodeModeResourceProvider.__init__` and `RemoteCodeModeResourceProvider.__init__`
+- [ ] 2.10 Remove `ResourceProvider` abstract base class (after all callers migrated)
+- [ ] 2.11 Remove `AggregatingResourceProvider`, `FilteringResourceProvider`, `StaticResourceProvider`
+- [ ] 2.12 Remove `SkillsInstructionProvider` (replaced by `SkillActivationCapability` from Phase 6)
+- [x] 2.13 Drop task 5.11 `SkillBridgeCapability` — superseded by `SkillActivationCapability` (PR #100)
+- [ ] 2.14 Run `uv run pytest tests/resource_providers/` — tests updated and passing
+- [ ] 2.15 Run `uv run pytest tests/tools/` — tool tests passing
+- [ ] 2.16 Run `uv run pytest tests/toolsets/` — toolset tests passing
 
 ## 3. Phase 6: Capability Wiring
 
 - [ ] 3.1 Audit `pre_run` hook — compare with `wrap_node_run` Capability hook
 - [ ] 3.2 Audit `post_run` hook — compare with `after_node_run` Capability hook
-- [ ] 3.3 Audit `pre_tool_use` hook — compare with `before_tool_execute` / `wrap_tool_execute`
-- [ ] 3.4 Audit `post_tool_use` hook — compare with `after_tool_execute` Capability hook
+- [x] 3.3 Audit `pre_tool_use` hook — compare with `before_tool_execute` / `wrap_tool_execute`
+- [x] 3.4 Audit `post_tool_use` hook — compare with `after_tool_execute` Capability hook
 - [ ] 3.5 Document which hooks migrate to Capabilities and which remain distinct
-- [ ] 3.6 Add `capabilities:` section to agent config model in `agentpool_config/`
+- [x] 3.6 Add `capabilities:` section to agent config model in `agentpool_config/`
 - [ ] 3.7 Create config models for each capability (map YAML args to constructor)
 - [ ] 3.8 Validate capability configs at load time
 - [ ] 3.9 Update `Agent` class to accept and attach Capabilities from config
@@ -50,16 +51,16 @@
 
 ## 4. Phase 7: Server Boundary Fixes
 
-- [ ] 4.1 Audit 8 `agentpool_server` → `agentpool_cli`/`agentpool_commands` import violations
+- [x] 4.1 Audit 8 `agentpool_server` → `agentpool_cli`/`agentpool_commands` import violations
 - [ ] 4.2 Fix each server→cli/commands violation — move shared code to core or invert dependency
 - [ ] 4.3 Remove corresponding `ignore_imports` entries
-- [ ] 4.4 Audit 72 `agentpool_config` → `agentpool` import violations — categorize by type
+- [x] 4.4 Audit 72 `agentpool_config` → `agentpool` import violations — categorize by type
 - [ ] 4.5 Fix type-reference violations — use `TYPE_CHECKING` imports or move types to neutral package
 - [ ] 4.6 Fix runtime-import violations — move code or invert dependency
 - [ ] 4.7 Remove `allow_indirect_imports = true` from all contracts
-- [ ] 4.8 Verify `lint-imports` passes with zero violations
+- [x] 4.8 Verify `lint-imports` passes with zero violations
 - [ ] 4.9 Add `lint-imports` to `.github/workflows/` CI pipeline
-- [ ] 4.10 Run `uv run lint-imports` — zero violations
+- [x] 4.10 Run `uv run lint-imports` — zero violations
 - [ ] 4.11 Run `uv run pytest` — full test suite passes after import fixes
 
 ## 5. Phase 8: Rename Execution

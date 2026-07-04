@@ -1,12 +1,28 @@
 ## Context
 
-AgentPool's MCP integration currently uses pydantic-ai's deprecated `MCPServer` class hierarchy (`MCPServerStdio`, `MCPServerSSE`, `MCPServerStreamableHTTP`). These classes are marked deprecated and will be removed in pydantic-ai v2. The replacement is `MCPToolset`, built on the FastMCP client, which supports the full MCP protocol including OAuth, elicitation, and sampling.
+> **Note**: This change was largely superseded by `fix-subagent-mcp-inheritance`, which independently implemented most of the migration as part of its pipeline unification. The tasks and design below have been updated to reflect the current state of the codebase.
 
-The codebase has two distinct MCP client paths:
-1. **`MCPManager.as_capability()` path** (manager.py): Used by native agents. Calls `config.to_pydantic_ai()` to get an `MCPServer` instance, wraps it in `MCP(local=...)` capability. **No caching currently exists** — each `as_capability()` call creates a fresh instance.
-2. **`MCPClient._get_client()` path** (client.py): Used by `MCPResourceProvider` and skill MCP manager. Already uses FastMCP `Client` with `StdioTransport`/`SSETransport`/`StreamableHttpTransport` internally, with its own transport creation match/case logic.
+AgentPool's MCP integration previously used pydantic-ai's deprecated `MCPServer` class hierarchy (`MCPServerStdio`, `MCPServerSSE`, `MCPServerStreamableHTTP`). These classes were marked deprecated and would be removed in pydantic-ai v2. The replacement is `MCPToolset`, built on the FastMCP client, which supports the full MCP protocol including OAuth, elicitation, and sampling.
 
-Both paths have their own transport creation logic. This migration unifies them via a shared `to_transport()` method on config classes and eliminates the deprecated `to_pydantic_ai()` method entirely.
+The codebase had two distinct MCP client paths:
+1. **`MCPManager.as_capability()` path** (manager.py): Used by native agents. Previously called `config.to_pydantic_ai()` to get an `MCPServer` instance, wrapped it in `MCP(local=...)` capability. **No caching existed** — each `as_capability()` call created a fresh instance.
+2. **`MCPClient._get_client()` path** (client.py): Used by `MCPResourceProvider` and skill MCP manager. Already used FastMCP `Client` with `StdioTransport`/`SSETransport`/`StreamableHttpTransport` internally, with its own transport creation match/case logic.
+
+Both paths had their own transport creation logic. This migration unifies them via a shared `to_transport()` method on config classes and eliminates the deprecated `to_pydantic_ai()` method entirely.
+
+### Current State (post `fix-subagent-mcp-inheritance`)
+
+The `fix-subagent-mcp-inheritance` change already completed the bulk of this migration:
+- `to_transport()` methods exist on all config classes (`StdioMCPServerConfig`, `SSEMCPServerConfig`, `StreamableHTTPMCPServerConfig`)
+- `to_pydantic_ai()` methods are fully removed
+- All `MCPServer*` imports eliminated from `src/`
+- `_make_elicitation_handler()` exists with correct 4-arg FastMCP signature
+- `_make_pydantic_ai_elicitation_callback()` is removed
+- `as_capability()` is async, constructs `MCPToolset` directly, and uses `GlobalConnectionPool` / `SessionConnectionPool` for transport management
+- `_make_timeout_logger()` lives in `manager.py`
+- `client.py:_get_client()` calls `config.to_transport(force_oauth=...)`
+
+**What remains**: The `_toolset_cache` — the core connection reuse mechanism. `as_capability()` currently creates a fresh `MCPToolset` on every call. The `as_capability()` signature has evolved: it now accepts optional `snapshot` and `session_pool` parameters and delegates transport acquisition to connection pools. The caching logic must be reconciled with this new architecture.
 
 ## Goals / Non-Goals
 

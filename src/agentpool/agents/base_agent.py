@@ -67,7 +67,7 @@ if TYPE_CHECKING:
         PromptCompatible,
         StrPath,
     )
-    from agentpool.delegation import AgentPool, Team, TeamRun
+    from agentpool.delegation import AgentPool, BaseTeam
     from agentpool.hooks import AgentHooks
     from agentpool.messaging import ChatMessage
     from agentpool.orchestrator.core import EventBus, SessionPool, SessionState
@@ -320,53 +320,53 @@ class BaseAgent[TDeps = None, TResult = str](MessageNode[TDeps, TResult]):
 
     @overload
     def __and__(  # if other doesnt define deps, we take the agents one
-        self, other: ProcessorCallback[Any] | Team[TDeps] | Agent[TDeps, Any]
-    ) -> Team[TDeps]: ...
+        self, other: ProcessorCallback[Any] | BaseTeam[TDeps, Any] | Agent[TDeps, Any]
+    ) -> BaseTeam[TDeps, Any]: ...
 
     @overload
     def __and__(  # otherwise, we dont know and deps is Any
-        self, other: ProcessorCallback[Any] | Team[Any] | Agent[Any, Any]
-    ) -> Team[Any]: ...
+        self, other: ProcessorCallback[Any] | BaseTeam[Any, Any] | Agent[Any, Any]
+    ) -> BaseTeam[Any, Any]: ...
 
-    def __and__(self, other: MessageNode[Any, Any] | ProcessorCallback[Any]) -> Team[Any]:
-        """Create sequential team using & operator.
+    def __and__(self, other: MessageNode[Any, Any] | ProcessorCallback[Any]) -> BaseTeam[Any, Any]:
+        """Create parallel team using & operator.
 
         Example:
             group = analyzer & planner & executor  # Create group of 3
             group = analyzer & existing_group  # Add to existing group
         """
         from agentpool.agents.native_agent import Agent
-        from agentpool.delegation.team import Team
+        from agentpool.delegation.base_team import BaseTeam
 
         match other:
-            case Team():
-                return Team([self, *other.nodes])
+            case BaseTeam():
+                return BaseTeam([self, *other.nodes], mode="parallel")
             case Callable():
                 agent_2 = Agent.from_callback(other, agent_pool=self.agent_pool)  # ty: ignore[no-matching-overload]
-                return Team([self, agent_2])
+                return BaseTeam([self, agent_2], mode="parallel")
             case MessageNode():
-                return Team([self, other])
+                return BaseTeam([self, other], mode="parallel")
             case _:
                 raise ValueError(f"Invalid agent type: {type(other)}")
 
     @overload
-    def __or__(self, other: MessageNode[TDeps, Any]) -> TeamRun[TDeps, Any]: ...
+    def __or__(self, other: MessageNode[TDeps, Any]) -> BaseTeam[TDeps, Any]: ...
 
     @overload
-    def __or__[TOtherDeps](self, other: MessageNode[TOtherDeps, Any]) -> TeamRun[Any, Any]: ...
+    def __or__[TOtherDeps](self, other: MessageNode[TOtherDeps, Any]) -> BaseTeam[Any, Any]: ...
 
     @overload
-    def __or__(self, other: ProcessorCallback[Any]) -> TeamRun[Any, Any]: ...
+    def __or__(self, other: ProcessorCallback[Any]) -> BaseTeam[Any, Any]: ...
 
-    def __or__(self, other: MessageNode[Any, Any] | ProcessorCallback[Any]) -> TeamRun[Any, Any]:
+    def __or__(self, other: MessageNode[Any, Any] | ProcessorCallback[Any]) -> BaseTeam[Any, Any]:
         # Create new execution with sequential mode (for piping)
-        from agentpool import TeamRun
         from agentpool.agents.native_agent import Agent
+        from agentpool.delegation.base_team import BaseTeam
 
         if callable(other):
             other = Agent.from_callback(other, agent_pool=self.agent_pool)
 
-        return TeamRun([self, other])
+        return BaseTeam([self, other], mode="sequential")
 
     async def update_state(self, config_id: str, value_id: str) -> None:
         from agentpool.agents.modes import ConfigOptionChanged
