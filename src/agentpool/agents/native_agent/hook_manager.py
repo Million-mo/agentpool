@@ -141,9 +141,18 @@ class _ToolInterceptCapability(AbstractCapability[Any]):
         Returns:
             Tool result, or annotated ``ToolReturn`` on failure.
         """
+        from time import perf_counter
+
         from pydantic_ai.messages import ToolReturn
 
         from agentpool.tools.base import ToolResult
+
+        agent_ctx = ctx.deps
+        tool_start_times: dict[str, float] | None = getattr(agent_ctx, "_tool_start_times", None)
+        if tool_start_times is None:
+            tool_start_times = {}
+            agent_ctx._tool_start_times = tool_start_times
+        tool_start_times[call.tool_call_id] = perf_counter()
 
         try:
             result = await handler(args)
@@ -271,9 +280,14 @@ class _ToolInterceptCapability(AbstractCapability[Any]):
             else None
         )
 
-        # Track timing for post-tool hooks
-        # (actual timing is done by wrap_tool_execute, but hooks expect duration_ms)
-        duration_ms = 0.0  # Best-effort; wrap_tool_execute owns precise timing
+        from time import perf_counter
+
+        tool_start_times: dict[str, float] | None = getattr(agent_ctx, "_tool_start_times", None)
+        if tool_start_times is not None:
+            start_time = tool_start_times.pop(call.tool_call_id, None)
+            duration_ms = (perf_counter() - start_time) * 1000 if start_time else 0.0
+        else:
+            duration_ms = 0.0
 
         hook_result = await self.hook_manager.run_post_tool_hooks(
             agent_name=self.hook_manager.agent_name,
