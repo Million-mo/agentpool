@@ -570,21 +570,7 @@ name = "Server must not import from core app logic"
 type = "forbidden"
 source_modules = ["agentpool_server"]
 forbidden_modules = ["agentpool_commands", "agentpool_cli"]
-# Pre-existing direct violations are listed in ignore_imports; remove entries
-# as imports are fixed during Phase 7 refactoring. Indirect violations are
-# excluded via allow_indirect_imports until the core→app dependency chains
-# are untangled (see OpenSpec thin-wrapper-refactor Phase 7 tasks).
 allow_indirect_imports = true
-ignore_imports = [
-    "agentpool_server.acp_server.commands.debug_commands -> agentpool_cli",
-    "agentpool_server.acp_server.commands.debug_commands -> agentpool_commands.base",
-    "agentpool_server.acp_server.commands.docs_commands.fetch_repo -> agentpool_commands.base",
-    "agentpool_server.acp_server.commands.docs_commands.get_schema -> agentpool_commands.base",
-    "agentpool_server.acp_server.commands.docs_commands.get_source -> agentpool_commands.base",
-    "agentpool_server.acp_server.commands.docs_commands.git_diff -> agentpool_commands.base",
-    "agentpool_server.acp_server.commands.docs_commands.url_to_markdown -> agentpool_commands.base",
-    "agentpool_server.acp_server.session -> agentpool_commands.base",
-]
 
 [[tool.importlinter.contracts]]
 name = "Config must not import from core"
@@ -650,9 +636,6 @@ ignore_imports = [
     "agentpool_config.task -> agentpool.prompts.prompts",
     "agentpool_config.task -> agentpool.tools.base",
     "agentpool_config.task -> agentpool.utils.model_capabilities",
-    "agentpool_config.teams -> agentpool",
-    "agentpool_config.teams -> agentpool.delegation.base_team",
-    "agentpool_config.teams -> agentpool.messaging",
     "agentpool_config.tools -> agentpool.tools.base",
     "agentpool_config.tools -> agentpool.utils.parse_time",
     "agentpool_config.toolsets -> agentpool.prompts.conversion_manager",

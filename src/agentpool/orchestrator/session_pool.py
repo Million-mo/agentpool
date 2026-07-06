@@ -31,7 +31,7 @@ from agentpool.orchestrator.session_controller import (
 
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Sequence
 
     from agentpool.agents.base_agent import BaseAgent
     from agentpool.agents.native_agent import Agent
@@ -48,6 +48,32 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 DEFAULT_MAX_AUTO_RESUME: Final[int] = 10
+
+
+def _build_team_from_config(
+    name: str,
+    team_config: TeamConfig,
+    nodes: Sequence[MessageNode[Any, Any]],
+) -> BaseTeam[Any, Any]:
+    """Construct a ``BaseTeam`` from a ``TeamConfig`` and pre-resolved nodes.
+
+    This replaces the deprecated ``TeamConfig.get_team()`` method, keeping
+    team instantiation in the core layer instead of the config layer.
+    """
+    from agentpool.delegation.base_team import BaseTeam
+
+    member_configs = team_config.get_member_configs()
+
+    return BaseTeam(
+        nodes,
+        mode=team_config.mode,
+        name=name,
+        display_name=team_config.display_name,
+        shared_prompt=team_config.shared_prompt,
+        mcp_servers=team_config.get_mcp_servers(),
+        member_prompt_templates=member_configs or None,
+        member_timeout=team_config.member_timeout,
+    )
 
 
 class SessionPool:
@@ -159,23 +185,23 @@ class SessionPool:
 
         For each member in the team config, resolves the agent via
         :meth:`SessionController.get_or_create_session_agent`, then
-        constructs a :class:`Team` (parallel) or :class:`TeamRun`
-        (sequential) using :meth:`TeamConfig.get_team`.
+        constructs a :class:`BaseTeam` with ``mode`` set to the
+        configured execution mode.
 
         Member names are stored on the resulting team nodes; actual
         session agents are created per-execution by
-        :meth:`Team._resolve_scoped_team_nodes`.
+        :meth:`BaseTeam._resolve_scoped_team_nodes`.
 
         Args:
             team_name: Name for the created team.
             team_config: Team configuration from the manifest.
 
         Returns:
-            A ``Team`` (parallel) or ``TeamRun`` (sequential) instance.
+            A ``BaseTeam`` instance with the configured execution mode.
 
         Raises:
             ValueError: If a member name is not found in the manifest
-                agents or teams sections.
+                agents or teams section.
         """
         from agentpool_config.context import ConfigContextManager
 
@@ -188,7 +214,7 @@ class SessionPool:
                 # Create a stateless agent without entering its async context.
                 # This avoids spawning MCP subprocesses for temporary template
                 # agents — actual per-session agents are created later by
-                # Team._resolve_scoped_team_nodes() during execution.
+                # BaseTeam._resolve_scoped_team_nodes() during execution.
                 if cfg.name is None:
                     cfg = cfg.model_copy(update={"name": member_name})
                 with ConfigContextManager(self.pool._config_file_path):
@@ -202,7 +228,7 @@ class SessionPool:
                 msg = f"Team member {member_name!r} not found in manifest agents or teams"
                 raise ValueError(msg)
 
-        return team_config.get_team(nodes, team_name)
+        return _build_team_from_config(team_name, team_config, nodes)
 
     async def _get_resume_lock(self, session_id: str) -> asyncio.Lock:
         """Get or create per-session lock for resume serialization.
