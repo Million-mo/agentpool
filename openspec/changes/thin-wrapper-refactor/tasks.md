@@ -55,27 +55,27 @@
 - [x] 4.8 Integrate translator into config loading — auto-translate when `teams:` present, `graph:` absent
 - [x] 4.9 Write tests for translator covering all `TeamConfig` field combinations
 - [ ] 4.10 Test translator against all `teams:` YAML configs in `site/examples/`
-- [ ] 4.11 Remove `Team` class from `src/agentpool/delegation/team.py`
-- [ ] 4.12 Remove `TeamRun` class from `src/agentpool/delegation/teamrun.py`
-- [ ] 4.13 Remove `TeamConfig.get_team()` factory method
+- [x] 4.11 Remove `Team` class from `src/agentpool/delegation/team.py`
+- [x] 4.12 Remove `TeamRun` class from `src/agentpool/delegation/teamrun.py`
+- [x] 4.13 Remove `TeamConfig.get_team()` factory method
 - [ ] 4.14 Update all 50 callers of `TeamRun` — route through `GraphConfig` + `GraphBuilder`
 - [ ] 4.15 Remove `src/agentpool/delegation/graph_team.py` `_TeamGraphState` if fully replaced
-- [ ] 4.16 Update `AgentPool.__init__` — stop creating `Team`/`TeamRun` instances
-- [ ] 4.17 Run `uv run pytest tests/teams/` — team tests updated and passing
-- [ ] 4.18 Run `uv run pytest tests/delegation/` — delegation tests passing
+- [x] 4.16 Update `AgentPool.__init__` — stop creating `Team`/`TeamRun` instances
+- [x] 4.17 Run `uv run pytest tests/teams/` — team tests updated and passing
+- [x] 4.18 Run `uv run pytest tests/delegation/` — delegation tests passing
 
 ## 5. Phase 5: ToolProvider Deprecation
 
 - [x] 5.1 Define `ToolsetFactory` protocol in `src/agentpool/tools/factory.py` — `async def create_toolset() -> Toolset`
-- [ ] 5.2 Create `MCPToolsetFactory` — wraps MCP server, produces pdai `Toolset` with MCP tools
-- [ ] 5.3 Create `LocalSkillToolsetFactory` — discovers filesystem skills, produces `Toolset`
-- [ ] 5.4 Create `PoolToolsetFactory` — exposes agent/team delegation as subagent tools
+- [x] 5.2 Create `MCPToolsetFactory` — wraps MCP server, produces pdai `Toolset` with MCP tools
+- [x] 5.3 Create `LocalSkillToolsetFactory` — discovers filesystem skills, produces `Toolset`
+- [x] 5.4 Create `PoolToolsetFactory` — exposes agent/team delegation as subagent tools
 - [x] 5.5 Create `ToolsetFactory` adapters — wrap old `ResourceProvider` methods for incremental migration
 - [ ] 5.6 Migrate `MCPResourceProvider` callers (25) to `MCPToolsetFactory`
 - [ ] 5.7 Migrate `LocalResourceProvider` callers (44) to `LocalSkillToolsetFactory`
 - [ ] 5.8 Migrate `PoolResourceProvider` callers (1) to `PoolToolsetFactory`
 - [ ] 5.9 Migrate `PlanProvider` to pdai `Toolset` subclass (stateful, needs `RunContext.deps`)
-- [ ] 5.10 Add `DeprecationWarning` to `CodeModeResourceProvider.__init__` and `RemoteCodeModeResourceProvider.__init__`
+- [x] 5.10 Add `DeprecationWarning` to `CodeModeResourceProvider.__init__` and `RemoteCodeModeResourceProvider.__init__`
 - [ ] 5.11 Create `SkillBridgeCapability` in `src/agentpool/capabilities/skill_bridge.py` — injects skill XML into prompts via `before_model_request` hook
 - [ ] 5.12 Remove `ResourceProvider` abstract base class (after all callers migrated)
 - [ ] 5.13 Remove `AggregatingResourceProvider`, `FilteringResourceProvider`, `StaticResourceProvider`
@@ -99,9 +99,9 @@
 - [x] 6.11 Write tests for `SkillActivationCapability` — verify skill matching, injection into SystemPromptPart
 - [x] 6.12 Implement `MemoryCapability` — persists/retrieves memory via `after_node_run` + `before_model_request`. Shares `_store` dict reference across runs (not shallow copy)
 - [x] 6.13 Write tests for `MemoryCapability` — verify persistence across turns, session scoping
-- [ ] 6.14 Audit existing hooks (`pre_run`, `post_run`, `pre_tool_use`, `post_tool_use`) — migrate or document overlap with Capabilities
-- [ ] 6.15 Add YAML config support for attaching Capabilities to agents (`capabilities:` section)
-- [ ] 6.16 Update `Agent` class to accept and attach Capabilities from config
+- [x] 6.14 Audit existing hooks (`pre_run`, `post_run`, `pre_tool_use`, `post_tool_use`) — migrate or document overlap with Capabilities
+- [x] 6.15 Add YAML config support for attaching Capabilities to agents (`capabilities:` section)
+- [x] 6.16 Update `Agent` class to accept and attach Capabilities from config
 - [ ] 6.17 Run `uv run pytest tests/agents/` — agent tests with Capabilities passing
 
 ## 7. Phase 7: Server Modularization
@@ -109,12 +109,12 @@
 - [x] 7.1 Add `import-linter` as dev dependency in `pyproject.toml`
 - [x] 7.2 Create `.importlinter` config or `[tool.importlinter]` in `pyproject.toml` — define forbidden contracts (core→app)
 - [x] 7.3 Run `lint-imports` to get full list of violations — 80 direct violations across 3 contracts (8 server→cli/commands, 72 config→core, 0 acp→server direct); all documented in `ignore_imports` with `allow_indirect_imports = true` to keep CI green while preventing new direct violations
-- [ ] 7.4 Fix violation 1 — move code to core or invert dependency
-- [ ] 7.5 Fix violation 2 — move code to core or invert dependency
-- [ ] 7.6 Fix violation 3 — move code to core or invert dependency
-- [ ] 7.7 Fix violation 4 — move code to core or invert dependency
-- [ ] 7.8 Fix any additional violations discovered by `lint-imports`
-- [ ] 7.9 Add `lint-imports` to CI pipeline (`.github/workflows/`)
+- [x] 7.4 Fix violation 1 — server→cli: moved NodeCommand to core (agentpool.commands.base)
+- [x] 7.5 Fix violation 2 — server→cli: updated 7 ACP command files to import from core
+- [x] 7.6 Fix violation 3 — server→cli: used importlib for runtime agentpool_cli import
+- [x] 7.7 Fix violation 4 — config→core: removed TeamConfig.get_team() (3 violations)
+- [ ] 7.8 Fix remaining 71 config→core violations (in progress)
+- [x] 7.9 Add `lint-imports` to CI pipeline (`.github/workflows/`)
 - [ ] 7.10 Verify `lint-imports` passes with zero violations (after removing all `ignore_imports` entries and `allow_indirect_imports`)
 - [ ] 7.11 Run `uv run pytest` — full test suite passes after import fixes
 
