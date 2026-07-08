@@ -5,7 +5,7 @@ status: DRAFT
 author: yuchen.liu
 reviewers: []
 created: 2026-07-08
-last_updated: 2026-07-08 (revision 4: Journal/SnapshotStore split, upsert semantics, resume() as first-class operation)
+last_updated: 2026-07-08 (revision 4.3: Oracle-reviewed PASS — _replaying flag, StateUpdate session_id, journal instance injection, MQChannel seq fix)
 decision_date:
 related_rfcs:
   - RFC-0041 (Run vs Turn Separation — prerequisite Phase 1)
@@ -158,7 +158,7 @@ The full research is in `docs/design/lifecycle-analysis.md`. Key patterns releva
 | **RunLoop** | The core execution loop that drives Turns. Owns the idle/running/done state machine. Built on RFC-0041's restructured RunHandle. Supports checkpoint/resume. |
 | **Turn** | Single reactive cycle: prompt → model → tools → response. Agent-type-specific (NativeTurn, ACPTurn). Defined by RFC-0041. |
 | **TriggerSource** | Pluggable abstraction for how prompts arrive at the RunLoop. Bridges external stimuli to internal message queue. |
-| **Journal** | Pluggable abstraction for event persistence, crash recovery, and replay. Owned by CommChannel. Implements append + upsert semantics (Akka/Pekko journal model). Controls event-layer durability guarantees. |
+| **Journal** | (Formerly "WAL") Pluggable abstraction for event persistence, crash recovery, and replay. Owned by CommChannel. Implements append + upsert semantics (Akka/Pekko journal model). Controls event-layer durability guarantees. Events are persisted to the journal before delivery to CommChannel, ensuring crash safety: if process dies after journal append but before delivery, the event is recoverable on restart. |
 | **SnapshotStore** | Pluggable abstraction for state snapshots at Turn boundaries, turn results for idempotency, and crash recovery state. Owned by RunLoop. Implements save/load semantics (Akka/Pekko snapshot-store model). Controls loop-layer durability guarantees. |
 | **CommChannel** | Pluggable abstraction for delivering events and responses back to the caller. May also receive feedback (steer/followup). |
 | **EventTransport** | Pluggable abstraction for the wire protocol between RunLoop and external consumers. Enables language-agnostic protocol servers via MQ backends. |
@@ -166,7 +166,6 @@ The full research is in `docs/design/lifecycle-analysis.md`. Key patterns releva
 | **ProtocolBridge** | CommChannel decorator that translates between protocol versions at the boundary (e.g., ACP v2↔v1). |
 | **StateUpdate** | Protocol-agnostic state notification event: `Running | Idle(stop_reason) | RequiresAction`. Inspired by ACP v2. |
 | **Feedback** | Messages flowing from CommChannel back to the RunLoop (e.g., user steering, channel replies). Distinct from TriggerSource prompts. |
-| **Journal** | (Formerly "WAL") Append-only event log. Events are persisted to the journal before delivery to CommChannel. Ensures crash safety: if process dies after journal append but before delivery, the event is recoverable on restart. Inspired by Akka/Pekko's `journal` (event persistence) which is separate from the snapshot store. |
 | **Snapshot** | (Formerly "Checkpoint") Full state image at a Turn boundary. Combined with journal replay, enables efficient crash recovery without full history replay. Inspired by Akka/Pekko's `snapshot-store` (periodic state images). |
 | **Recovery Point** | Logical sequence number in the journal where execution can resume after a crash. Defined by the last committed Turn boundary. Not a named primitive — it's an emergent property of the journal's sequence ordering. |
 | **Committed** | Journal entries that have been fully processed and checkpointed. Committed entries are immutable and safe to compact. |
@@ -596,13 +595,13 @@ class RunLoop:
             if not self._message_queue:
                 self._status = "idle"
                 await self._comm.on_state_change(RunState.IDLE)
-                await self._comm.publish(StateUpdate(session_id=self._session_id, state="idle"))
+                await self._comm.publish(StateUpdate(session_id=self._session_id, state=RunState.IDLE))
                 await self._wait_for_wake()  # asyncio.Event from RFC-0041
                 continue
 
             self._status = "running"
             await self._comm.on_state_change(RunState.RUNNING)
-            await self._comm.publish(StateUpdate(session_id=self._session_id, state="running"))
+            await self._comm.publish(StateUpdate(session_id=self._session_id, state=RunState.RUNNING))
             turn_id = generate_turn_id()
             turn = self._agent.create_turn(prompts=self._message_queue, turn_id=turn_id, ...)
 
@@ -623,7 +622,7 @@ class RunLoop:
 
         self._status = "done"
         await self._comm.on_state_change(RunState.DONE)
-        await self._comm.publish(StateUpdate(session_id=self._session_id, state="done"))
+        await self._comm.publish(StateUpdate(session_id=self._session_id, state=RunState.DONE))
 ```
 
 **Key point**: The RunLoop code is **identical** regardless of execution mode. The mode is determined entirely by which TriggerSource, Journal, SnapshotStore, and CommChannel are injected.
@@ -1045,13 +1044,13 @@ class RunLoop:
             if not self._message_queue:
                 self._status = "idle"
                 await self._comm.on_state_change(RunState.IDLE)
-                await self._comm.publish(StateUpdate(session_id=self._session_id, state="idle"))
+                await self._comm.publish(StateUpdate(session_id=self._session_id, state=RunState.IDLE))
                 await self._wait_for_wake()
                 continue
 
             self._status = "running"
             await self._comm.on_state_change(RunState.RUNNING)
-            await self._comm.publish(StateUpdate(session_id=self._session_id, state="running"))
+            await self._comm.publish(StateUpdate(session_id=self._session_id, state=RunState.RUNNING))
 
             turn_id = generate_turn_id()
             turn = self._agent.create_turn(
@@ -1077,7 +1076,7 @@ class RunLoop:
 
         self._status = "done"
         await self._comm.on_state_change(RunState.DONE)
-        await self._comm.publish(StateUpdate(session_id=self._session_id, state="done"))
+        await self._comm.publish(StateUpdate(session_id=self._session_id, state=RunState.DONE))
 ```
 
 #### Crash Recovery Procedure
@@ -1099,7 +1098,7 @@ On process restart, the RunLoop calls `journal.resume(snapshot_store)` — a fir
    a. If None → fresh start, no recovery needed
    b. If is_inflight=True:
       - Deliver replayed events to consumer (no gaps in event stream)
-      - Publish StateUpdate(session_id=..., state="idle", stop_reason="crash_recovery")
+      - Publish StateUpdate(session_id=..., state=RunState.IDLE, stop_reason="crash_recovery")
       - Do NOT re-execute the Turn (LLM is non-deterministic)
    c. If is_inflight=False:
       - Resume from snapshot state normally
@@ -1165,7 +1164,7 @@ Crash Recovery for In-Flight Turns:
 
 2. RunLoop.start() handles ResumeResult:
    - Delivers replayed events to consumer (no gaps in event stream)
-   - Publishes StateUpdate(session_id=..., state="idle", stop_reason="crash_recovery")
+   - Publishes StateUpdate(session_id=..., state=RunState.IDLE, stop_reason="crash_recovery")
    - Does NOT re-execute the Turn (LLM is non-deterministic)
 
 3. Alternative strategies (configurable):
@@ -2035,8 +2034,12 @@ class ProtocolBridge(Protocol):
 
     def translate_event(
         self, event: RichAgentStreamEvent | StateUpdate
-    ) -> RichAgentStreamEvent | StateUpdate:
-        """Translate an outbound event to the target protocol version."""
+    ) -> RichAgentStreamEvent | StateUpdate | None:
+        """Translate an outbound event to the target protocol version.
+
+        Returns None to filter out events that have no equivalent
+        in the target protocol version.
+        """
         ...
 
     def translate_feedback(self, feedback: Feedback) -> Feedback:
@@ -2067,7 +2070,8 @@ class BridgedCommChannel(CommChannel):
     async def publish(self, event) -> None:
         self._underlying._replaying = self._replaying  # propagate to underlying channel
         translated = self._bridge.translate_event(event)
-        await self._underlying.publish(translated)
+        if translated is not None:
+            await self._underlying.publish(translated)
 
     async def recv(self) -> Feedback | None:
         feedback = await self._underlying.recv()
