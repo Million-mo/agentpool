@@ -894,7 +894,10 @@ def _format_tool_output(result: Any) -> str:
     if isinstance(result, str):
         return result
     if isinstance(result, (dict, list)):
-        return anyenv.dump_json(result, indent=True)
+        try:
+            return anyenv.dump_json(result, indent=True)
+        except Exception:  # noqa: BLE001
+            return str(result)
     return str(result)
 
 

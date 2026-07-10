@@ -452,8 +452,14 @@ class AgentContext[TDeps = Any](NodeContext[TDeps]):
                 else "Elicitation timed out"
             ) from None
         finally:
-            registry.remove(handle)
-            provider.cleanup_elicitation_question(handle)
+            try:
+                registry.remove(handle)
+            except Exception:
+                logger.exception("Failed to remove elicitation handle from registry")
+            try:
+                provider.cleanup_elicitation_question(handle)
+            except Exception:
+                logger.exception("Failed to cleanup elicitation question")
 
         # Convert payload to ElicitResult.
         # payload can be either:
@@ -479,9 +485,21 @@ class AgentContext[TDeps = Any](NodeContext[TDeps]):
                     if isinstance(prop_schema, dict) and (
                         prop_schema.get("type") == "array" or "items" in prop_schema
                     ):
-                        content[key] = answer_list
+                        content[key] = (
+                            answer_list
+                            if isinstance(answer_list, list)
+                            else [answer_list]
+                            if answer_list
+                            else []
+                        )
                     else:
-                        content[key] = answer_list[0] if answer_list else ""
+                        content[key] = (
+                            answer_list[0]
+                            if isinstance(answer_list, list) and answer_list
+                            else answer_list
+                            if isinstance(answer_list, str)
+                            else ""
+                        )
                 return MCPElicitResult(action="accept", content=content)
 
             is_multi = isinstance(schema, dict) and (

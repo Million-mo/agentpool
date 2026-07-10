@@ -60,6 +60,7 @@ class OpenCodeInputProvider(InputProvider):
         self._pending_permissions: dict[str, PendingPermission] = {}
         self._tool_approvals: dict[str, str] = {}  # tool_name -> "always" | "reject"
         self._id_counter = 0
+        self._fallback_pending_questions: dict[str, Any] = {}
 
     @property
     def supports_durable_elicitation(self) -> bool:
@@ -81,13 +82,14 @@ class OpenCodeInputProvider(InputProvider):
         """Get the pending questions dict for this session.
 
         Returns SessionState.pending_questions for per-session isolation.
-        Returns empty dict if no session_controller or session not found.
+        Falls back to an instance-level dict if no session_controller or
+        session not found, ensuring writes persist across accesses.
         """
         if self.state.session_controller is not None:
             session = self.state.session_controller.get_session(self.session_id)
             if session is not None:
                 return session.pending_questions
-        return {}
+        return self._fallback_pending_questions
 
     def _generate_permission_id(self) -> str:
         """Generate a unique permission ID."""
