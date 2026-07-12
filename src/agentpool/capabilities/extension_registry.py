@@ -19,9 +19,10 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from enum import Enum, auto
-import logging
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
+
+from agentpool.log import get_logger
 
 
 if TYPE_CHECKING:
@@ -39,7 +40,7 @@ if TYPE_CHECKING:
     from agentpool.skills.skill import Skill
 
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 DEFAULT_MAX_COMPOSITION_DEPTH = 3
 """Default maximum composition depth (root-inclusive)."""
@@ -422,7 +423,7 @@ class ExtensionRegistry:
         if uri.startswith("skill://"):
             # Flat URI (D9): parse via ResolvedSkillURI for consistency.
             from agentpool.skills.skill import Skill
-            from agentpool.skills.uri_resolver import ResolvedSkillURI
+            from agentpool.skills.uri_resolver import ResolvedSkillURI, _name_alternatives
 
             resolved = ResolvedSkillURI.parse(uri)
             skill_name = resolved.skill_name
@@ -434,8 +435,10 @@ class ExtensionRegistry:
                     entry = next((e for e in entries if e.name == skill_name), None)
                     if entry is None:
                         # Fuzzy match: try underscore↔hyphen alternatives.
-                        alt = skill_name.replace("-", "_").replace("_", "-")
-                        entry = next((e for e in entries if e.name == alt), None)
+                        for alt_name in _name_alternatives(skill_name):
+                            entry = next((e for e in entries if e.name == alt_name), None)
+                            if entry is not None:
+                                break
                     if entry is None:
                         continue
                     content = await cap.read_skill(entry.name)

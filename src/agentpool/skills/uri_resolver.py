@@ -346,7 +346,6 @@ class SkillURIResolver:
             return None
         if content is None:
             return None
-        from agentpool.skills.skill import Skill
 
         skill = Skill(
             name=entry.name,
@@ -355,7 +354,7 @@ class SkillURIResolver:
             instructions=content,
         )
         if ref_path is not None:
-            skill._resolved_reference_path = ref_path  # type: ignore[attr-defined]
+            skill.resolved_reference_path = ref_path
         return skill
 
     async def _find_skill_with_alternatives(self, skill_name: str) -> Skill | None:

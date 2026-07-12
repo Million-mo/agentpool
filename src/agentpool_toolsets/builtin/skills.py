@@ -11,7 +11,7 @@ from agentpool.capabilities.function_toolset import FunctionToolsetCapability
 from agentpool.capabilities.resource_protocols import SkillResource
 from agentpool.skills.skill import Skill
 from agentpool.skills.skill_tool_manager import SkillToolManager
-from agentpool.skills.uri_resolver import ResolvedSkillURI
+from agentpool.skills.uri_resolver import ResolvedSkillURI, _name_alternatives
 
 
 if TYPE_CHECKING:
@@ -195,8 +195,10 @@ async def _load_visible_bare_skill(
     local_skill = next((skill for skill in local_skills if skill.name == skill_name), None)
     if local_skill is None:
         # Fuzzy match: try underscore↔hyphen alternatives.
-        alt = skill_name.replace("-", "_").replace("_", "-")
-        local_skill = next((skill for skill in local_skills if skill.name == alt), None)
+        for alt_name in _name_alternatives(skill_name):
+            local_skill = next((skill for skill in local_skills if skill.name == alt_name), None)
+            if local_skill is not None:
+                break
     if local_skill is not None:
         return local_skill, ctx.pool.skills.get_skill_instructions(skill_name)
 
@@ -234,11 +236,13 @@ async def _load_visible_bare_skill(
         )
         if matching_skill is None:
             # Fuzzy match: try underscore↔hyphen alternatives.
-            alt = skill_name.replace("-", "_").replace("_", "-")
-            matching_skill = next(
-                (s for s in visible_skills if s.name == alt),
-                None,
-            )
+            for alt_name in _name_alternatives(skill_name):
+                matching_skill = next(
+                    (s for s in visible_skills if s.name == alt_name),
+                    None,
+                )
+                if matching_skill is not None:
+                    break
         if matching_skill is not None:
             try:
                 instructions = await provider.read_skill(matching_skill.name)
@@ -324,7 +328,7 @@ async def _load_skill(  # noqa: PLR0911, PLR0915
         # for provider-less URIs like skill://skill-name/path), then parsed path.
         # The resolver's fallback correctly reconstructs the full reference path
         # when URI parsing misidentifies the skill name as a provider.
-        ref_path = getattr(skill, "_resolved_reference_path", None) or resolved.reference_path
+        ref_path = skill.resolved_reference_path or resolved.reference_path
 
         if ref_path:
             # Reference-only loading: skip main SKILL.md content
@@ -369,7 +373,7 @@ async def _load_skill(  # noqa: PLR0911, PLR0915
     # Determine if this is a reference-only load
     # Priority: _resolved_reference_path first (resolver's fallback correction
     # for provider-less URIs), then parsed path.
-    effective_ref_path = getattr(skill, "_resolved_reference_path", None) or (
+    effective_ref_path = skill.resolved_reference_path or (
         resolved.reference_path if is_uri else None
     )
     is_reference_load = is_uri and effective_ref_path is not None

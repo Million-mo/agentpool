@@ -18,6 +18,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
     from pathlib import PurePosixPath
 
+    from upath import UPath
+
     from agentpool.capabilities.change_event import ChangeEvent
 
 
@@ -41,7 +43,7 @@ class SkillEntry:
     description: str = ""
     uri: str = ""
     source: str = "local"
-    skill_path: PurePosixPath | None = None
+    skill_path: UPath | PurePosixPath | None = None
 
 
 @dataclass(frozen=True, slots=True)
