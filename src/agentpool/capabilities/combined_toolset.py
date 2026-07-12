@@ -260,7 +260,6 @@ class CombinedToolsetCapability(AbstractCapability[AgentDepsT]):
             finally:
                 await queue.put(None)
 
-        tasks: list[asyncio.Task[None]] = []
         for gen in generators:
             task = asyncio.create_task(_consume(gen))
             self._background_tasks.add(task)
