@@ -219,10 +219,13 @@ class McpServerCap(
                 return None
             from pydantic_ai.toolsets import CombinedToolset, FunctionToolset
 
+            from agentpool.tools.tool_wrapping import wrap_tool_for_pydantic_ai
+
             converted = [client.convert_tool(t) for t in tools]
+            pydantic_tools = [wrap_tool_for_pydantic_ai(tool) for tool in converted]
             toolsets: list[AbstractToolset[Any]] = [
-                FunctionToolset[Any]([tool])  # type: ignore[list-item]
-                for tool in converted
+                FunctionToolset[Any]([tool])
+                for tool in pydantic_tools
             ]
             if not toolsets:
                 return None
