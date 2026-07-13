@@ -22,8 +22,9 @@ from agentpool.agents.events import (
     RunFailedEvent,
     StreamCompleteEvent,
 )
+from agentpool.lifecycle import RunState
 from agentpool.log import get_logger
-from agentpool.orchestrator.run import RunHandle, RunStatus, inject_cancelled_tool_results
+from agentpool.orchestrator.run import RunHandle, inject_cancelled_tool_results
 from agentpool.orchestrator.runtime_registry import RuntimeAgentRegistry
 from agentpool.sessions.models import PendingDeferredCall, SessionData
 from agentpool_server.opencode_server.models.session_info import SessionInfo
@@ -481,14 +482,6 @@ class SessionController:
 
             logger.info("Created session agent", session_id=session_id, agent_name=agent_name)
             return agent
-            available_manifest = list(self.pool.manifest.agents.keys())
-            available_runtime = self._runtime_registry.names()
-            msg = (
-                f"Agent config not found: {agent_name!r}. "
-                f"Available in manifest: {available_manifest}. "
-                f"Available in runtime registry: {available_runtime}."
-            )
-            raise RuntimeError(msg)
 
     def list_sessions(self) -> list[SessionInfo]:
         """List all active sessions.
@@ -1055,11 +1048,7 @@ class SessionController:
             # or terminal run, clear it and start a new run.
             if session.current_run_id is not None:
                 existing_run = self._runs.get(session.current_run_id)
-                if existing_run is None or existing_run._status in (
-                    RunStatus.failed,
-                    RunStatus.completed,
-                    RunStatus.done,
-                ):
+                if existing_run is None or existing_run._run_state == RunState.DONE:
                     session.current_run_id = None
             if session.current_run_id is None:
                 return self._start_run_handle(session, agent, session_id, content_str, deps=deps)

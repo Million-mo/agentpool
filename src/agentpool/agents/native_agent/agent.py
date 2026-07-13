@@ -75,8 +75,7 @@ if TYPE_CHECKING:
     )
     from agentpool.delegation import AgentPool
     from agentpool.hooks import AgentHooks
-    from agentpool.mcp_server.config_snapshot import McpConfigEntry, McpConfigSnapshot
-    from agentpool.mcp_server.session_pool import SessionConnectionPool
+    from agentpool.mcp_server.config_snapshot import McpConfigEntry
     from agentpool.messaging import MessageNode
     from agentpool.models.agents import NativeAgentConfig, ToolMode
     from agentpool.orchestrator.turn import Turn
@@ -331,11 +330,6 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
         self._providers = list(providers) if providers else None  # model discovery
         self._direct_history_processors = list(history_processors) if history_processors else None
         self._resolved_history_processors: list[Callable[..., Any]] | None = None
-        # MCP lifecycle snapshot — set externally (e.g. by SessionController) to
-        # enable snapshot-aware capability building in get_agentlet().
-        # When None, get_agentlet() falls back to the legacy get_capabilities() path.
-        self._mcp_snapshot: McpConfigSnapshot | None = None
-        self._session_connection_pool: SessionConnectionPool | None = None
         self._extra_capabilities: list[Any] = capabilities or []
 
     def _build_pool_configs(self) -> tuple[McpConfigEntry, ...]:
@@ -911,9 +905,9 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
         tool_capabilities.extend(mcp_capabilities)
         # 5. Skill capabilities — from pool-scoped instances created during __aenter__.
         #    Each SkillManagerCap provides tools and MCP servers.
-        ctx = self.host_context
-        if ctx is not None and ctx.pool is not None:
-            pool_capabilities = ctx.pool.skill_capabilities
+        pool = self._agent_pool
+        if pool is not None:
+            pool_capabilities = pool.skill_capabilities
             if pool_capabilities:
                 from agentpool.capabilities.skill_manager_cap import SkillManagerCap
 

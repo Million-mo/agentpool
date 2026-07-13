@@ -89,6 +89,7 @@ class ServerState:
     skill_bridge: Any = field(default=None)
     command_store: CommandStore | None = field(default=None)
     _skill_change_task: Any = field(default=None, repr=False)
+    _mcp_tool_change_task: Any = field(default=None, repr=False)
     session_pool_integration: Any = field(default=None)
     session_controller: SessionController | None = field(default=None)
     event_bridge: Any = field(default=None, repr=False)
@@ -115,8 +116,7 @@ class ServerState:
         # Cache non-session-scoped dependencies directly so they remain
         # accessible even after the shared ``self.agent`` is removed in a
         # later migration step.
-        _ctx = self.agent.host_context
-        self._pool: AgentPool[Any] | None = _ctx.pool if _ctx is not None else None
+        self._pool: AgentPool[Any] | None = self.agent._agent_pool
         self._storage: StorageManager | None = self.agent.storage
 
         # Create a standalone execution environment for shell commands.

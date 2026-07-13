@@ -251,17 +251,19 @@ class AgentPoolACPAgent(ACPAgent):
         self.client_capabilities: ClientCapabilities | None = None
         self.client_info: Implementation | None = None
         ctx = self.host_context
-        if ctx is None or ctx.pool is None:
+        pool = self.default_agent._agent_pool
+        if pool is None:
             msg = "Default agent has no associated pool"
             raise RuntimeError(msg)
         if self.session_manager is None:
-            self.session_manager = ACPSessionManager(pool=ctx.pool)
+            self.session_manager = ACPSessionManager(pool=pool)
         self.tasks = TaskManager()
         self._initialized = False
         self._sessions_cache: ListSessionsResponse | None = None
         self._sessions_cache_time: float = 0.0
         # Connect to title generation signal to notify clients of session updates
-        ctx.storage.metadata_generated.connect(self._on_metadata_generated)
+        if ctx is not None:
+            ctx.storage.metadata_generated.connect(self._on_metadata_generated)
 
         # Initialize MCP-over-ACP connection manager
         self._mcp_manager = AcpMcpConnectionManager()
@@ -981,7 +983,7 @@ class AgentPoolACPAgent(ACPAgent):
             raise RequestError.invalid_params(msg)
 
         # Block swap during active prompt
-        if hasattr(session, "_task_lock") and session._task_lock.locked():
+        if session.is_busy:
             msg = {"session_id": session_id, "reason": "Prompt active"}
             raise RequestError.invalid_params(msg)
 
@@ -1109,7 +1111,8 @@ class AgentPoolACPAgent(ACPAgent):
 
             # 6. Update cached agent config from new pool
             ctx = new_agent.host_context
-            if ctx is None or ctx.pool is None:
+            new_pool = new_agent._agent_pool
+            if ctx is None or new_pool is None:
                 msg = "New agent has no associated pool"
                 raise RuntimeError(msg)
 
@@ -1133,7 +1136,7 @@ class AgentPoolACPAgent(ACPAgent):
 
             # 7. Update default_agent reference and pool
             self.default_agent = new_agent
-            self.session_manager._pool = ctx.pool
+            self.session_manager._pool = new_pool
 
             # 8. Invalidate sessions cache
             self._sessions_cache = None

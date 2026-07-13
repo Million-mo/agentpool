@@ -15,9 +15,9 @@ from pydantic_ai import RequestUsage
 import pytest
 
 from agentpool.agents.events import StreamCompleteEvent
+from agentpool.lifecycle import RunOutcome, RunState
 from agentpool.messaging import ChatMessage
 from agentpool.orchestrator.core import EventBus
-from agentpool.orchestrator.run import RunStatus
 from agentpool.utils import identifiers as identifier
 from agentpool.utils.time_utils import now_ms
 from agentpool_server.opencode_server.models import (
@@ -115,14 +115,15 @@ def mock_agent_with_event_bus(tmp_project_dir):
 
     # RunHandle whose complete_event we control from the test
     run_handle = Mock()
-    run_handle.status = RunStatus.completed
+    run_handle._run_state = RunState.DONE
+    run_handle.outcome = RunOutcome.COMPLETED
     run_handle.complete_event = asyncio.Event()
     session_pool.receive_request = AsyncMock(return_value=run_handle)
 
     pool.session_pool = session_pool
     agent.agent_pool = pool
     agent.host_context = pool
-    pool.pool = pool  # state.py resolves _pool via _ctx.pool
+    agent._agent_pool = pool  # state.py resolves _pool via agent._agent_pool
 
     return agent, run_handle, event_bus
 
