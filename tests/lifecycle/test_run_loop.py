@@ -21,7 +21,6 @@ from agentpool.agents.events import (
 )
 from agentpool.lifecycle import (
     DirectChannel,
-    Feedback,
     ImmediateTrigger,
     InProcessTransport,
     MemoryJournal,
@@ -1037,14 +1036,14 @@ async def test_idempotency_skip_when_turn_result_exists() -> None:
 
 @pytest.mark.unit
 async def test_steer_direct_channel_does_not_use_deliver_feedback() -> None:
-    """steer() with DirectChannel returns False from deliver_feedback (falls through to queue)."""
+    """steer() with DirectChannel does NOT call deliver_feedback (it doesn't exist)."""
     handle = _make_run_handle()
-    # DirectChannel.deliver_feedback returns False (no-op).
-    assert handle._comm_channel is not None
-    feedback_result = handle._comm_channel.deliver_feedback(
-        Feedback(content="test", is_steer=True)
-    )
-    assert feedback_result is False
+    # DirectChannel does not have deliver_feedback.
+    try:
+        _ = handle._comm_channel.deliver_feedback  # type: ignore[union-attr]
+        raise AssertionError("DirectChannel should not have deliver_feedback")
+    except AttributeError:
+        pass  # Expected
 
     handle._status = RunStatus.idle
     result = handle.steer("direct steer")
