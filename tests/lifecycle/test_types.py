@@ -288,11 +288,7 @@ class _DummySnapshotStore:
 class _DummyCommChannel:
     """Minimal CommChannel implementation for isinstance testing."""
 
-    def set_replaying(self, flag: bool) -> None: ...
-
-    @property
-    def publishes_to_event_bus(self) -> bool:
-        return False
+    _replaying: bool = False
 
     def attach(self, run_loop: Any) -> None: ...
 
@@ -302,9 +298,6 @@ class _DummyCommChannel:
 
     def recv(self) -> Feedback | None:
         return None
-
-    def deliver_feedback(self, feedback: Feedback) -> bool:
-        return False
 
     def close(self) -> None: ...
 
