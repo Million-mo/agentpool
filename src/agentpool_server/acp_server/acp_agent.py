@@ -981,7 +981,7 @@ class AgentPoolACPAgent(ACPAgent):
             raise RequestError.invalid_params(msg)
 
         # Block swap during active prompt
-        if session.is_busy:
+        if hasattr(session, "_task_lock") and session._task_lock.locked():
             msg = {"session_id": session_id, "reason": "Prompt active"}
             raise RequestError.invalid_params(msg)
 
