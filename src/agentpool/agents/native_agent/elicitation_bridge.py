@@ -320,7 +320,12 @@ async def _handle_elicitation_deferred(
                 try:
                     data = await store.load(session_id)
                     if data is not None and data.status == "active":
-                        data = data.model_copy(update={"status": "checkpointed"})
+                        data = data.model_copy(
+                            update={
+                                "status": "checkpointed",
+                                "pending_deferred_calls": pending_calls,
+                            }
+                        )
                         data.touch()
                         await store.save(data)
                 except Exception:  # noqa: BLE001

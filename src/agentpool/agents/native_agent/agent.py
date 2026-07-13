@@ -1094,6 +1094,7 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
         input_provider: InputProvider | None = None,
         wait_for_connections: bool | None = None,
         deps: TDeps | None = None,
+        **pydantic_ai_kwargs: Any,
     ) -> AsyncIterator[RichAgentStreamEvent[OutputDataT]]:
         """Stream agent events in real-time using NativeTurn.
 
@@ -1132,6 +1133,7 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
             run_ctx=run_ctx,
             message_history=model_messages,
             parent_id=user_msg.message_id,
+            **pydantic_ai_kwargs,
         )
         turn_failed = False
         error_msg = ""

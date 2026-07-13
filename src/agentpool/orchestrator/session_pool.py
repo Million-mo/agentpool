@@ -491,7 +491,18 @@ class SessionPool:
                         )
 
         try:
-            message_history: list[Any] = list(checkpoint.message_history)
+            # Wrap checkpoint ModelMessages in a ChatMessage + MessageHistory
+            # so run_stream()'s internal _run_stream_once() can use the same
+            # MessageHistory API (get_pending_parts, get_history, etc.).
+            from agentpool.messaging import ChatMessage, MessageHistory
+
+            chat_msg = ChatMessage(
+                content="",
+                role="assistant",
+                messages=list(checkpoint.message_history),
+                session_id=session_data.session_id,
+            )
+            history = MessageHistory(messages=[chat_msg])
 
             # Set up run context with cached elicitation responses for
             # crash recovery.
@@ -502,15 +513,19 @@ class SessionPool:
             if cached_elicitation:
                 run_ctx.cached_elicitation_responses = cached_elicitation
 
-            # Call run_stream() directly so we can pass _run_ctx with
-            # cached elicitation responses. Cast to Any since
-            # BaseAgent.run_stream() doesn't declare deferred_tool_results
-            # in its signature — pydantic-ai picks it up via **kwargs.
-            stream_fn: Any = agent.run_stream
-            async for _ in stream_fn(
-                message_history=message_history,
-                deferred_tool_results=results,
-                _run_ctx=run_ctx,
+            # Call run_stream() with deferred_tool_results and _run_ctx.
+            # run_stream() forwards **pydantic_ai_kwargs to agentlet.iter().
+            # Only pass deferred_tool_results when it has actual results —
+            # passing an empty DeferredToolResults makes pydantic-ai expect
+            # results for ALL tool calls in the message history, which breaks
+            # crash recovery for elicitation (Path 3 local tools) where the
+            # tool should re-execute and hit cached_elicitation_responses.
+            run_kwargs: dict[str, Any] = dict(_run_ctx=run_ctx)
+            if getattr(results, "calls", None):
+                run_kwargs["deferred_tool_results"] = results
+            async for _ in agent.run_stream(
+                message_history=history,
+                **run_kwargs,
             ):
                 pass
         finally:

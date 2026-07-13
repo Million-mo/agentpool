@@ -1315,6 +1315,7 @@ class BaseAgent[TDeps = None, TResult = str](MessageNode[TDeps, TResult]):
         depth: int = 0,
         _run_ctx: AgentRunContext | None = None,
         _skip_pool: bool = False,
+        **pydantic_ai_kwargs: Any,
     ) -> AsyncIterator[RichAgentStreamEvent[TResult]]:
         """Run agent with streaming output (the react loop).
 
@@ -1425,6 +1426,7 @@ class BaseAgent[TDeps = None, TResult = str](MessageNode[TDeps, TResult]):
                         deps=deps,
                         event_handlers=event_handlers,
                         _owns_event_bus=_created_local_bus,
+                        **pydantic_ai_kwargs,
                     ):
                         await local_bus.publish(effective_session_id, event)
                 except (Exception, asyncio.CancelledError) as exc:  # noqa: BLE001
@@ -1474,6 +1476,7 @@ class BaseAgent[TDeps = None, TResult = str](MessageNode[TDeps, TResult]):
         deps: TDeps | None = None,
         event_handlers: Sequence[AnyEventHandlerType] | None = None,
         _owns_event_bus: bool = False,
+        **pydantic_ai_kwargs: Any,
     ) -> AsyncIterator[RichAgentStreamEvent[TResult]]:
         """Process a single prompt group with streaming output.
 
@@ -1555,6 +1558,7 @@ class BaseAgent[TDeps = None, TResult = str](MessageNode[TDeps, TResult]):
                 input_provider=input_provider,
                 wait_for_connections=wait_for_connections,
                 deps=deps,
+                **pydantic_ai_kwargs,
             ):
                 yield event
                 # Capture final message from StreamCompleteEvent
@@ -1734,6 +1738,7 @@ class BaseAgent[TDeps = None, TResult = str](MessageNode[TDeps, TResult]):
         deps: TDeps | None = None,
         wait_for_connections: bool | None = None,
         store_history: bool = True,
+        **pydantic_ai_kwargs: Any,
     ) -> AsyncIterator[RichAgentStreamEvent[TResult]]:
         """Agent-specific streaming implementation.
 

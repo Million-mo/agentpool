@@ -264,14 +264,15 @@ class BaseAgentConfig(NodeConfig):
     """
 
     elicitation_timeout: timedelta | None = Field(
-        default=timedelta(seconds=300),
+        default=None,
         title="Elicitation timeout",
         examples=["300s", "5m", "10m"],
     )
     """How long to wait for user elicitation responses before aborting the run.
 
     Accepts time strings (``"5m"``, ``"300s"``), numbers (seconds), or
-    ``timedelta``. Set to ``null`` for no timeout (infinite wait).
+    ``timedelta``. Set to ``null`` (the default) for no timeout (infinite
+    wait). Configure explicitly to enable a timeout.
 
     Example:
         ```yaml

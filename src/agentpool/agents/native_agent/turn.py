@@ -74,6 +74,7 @@ class NativeTurn(HookAwareTurn, Turn):
         message_history: list[ModelMessage],
         parent_id: str | None = None,
         hooks: AgentHooks | None = None,
+        **pydantic_ai_kwargs: Any,
     ) -> None:
         """Initialize the turn.
 
@@ -85,6 +86,8 @@ class NativeTurn(HookAwareTurn, Turn):
                 ModelMessage list.
             parent_id: Optional parent message ID for threading.
             hooks: Optional AgentHooks for pre_turn/post_turn hook firing.
+            **pydantic_ai_kwargs: Extra kwargs forwarded to
+                ``agentlet.iter()`` (e.g. ``deferred_tool_results``).
         """
         super().__init__()
         self._agent = agent
@@ -95,6 +98,7 @@ class NativeTurn(HookAwareTurn, Turn):
         self._message_id = uuid4().hex
         self._parent_id = parent_id
         self._hooks = hooks
+        self._pydantic_ai_kwargs = pydantic_ai_kwargs
 
     @property
     def _hook_env(self) -> Any | None:
@@ -187,11 +191,15 @@ class NativeTurn(HookAwareTurn, Turn):
 
             agent_run: Any = None
             try:
-                async with agentlet.iter(
-                    effective_prompts,
+                iter_kwargs: dict[str, Any] = dict(
                     deps=agent_deps,
                     message_history=self._message_history_input,
                     usage_limits=self._agent._default_usage_limits,
+                    **self._pydantic_ai_kwargs,
+                )
+                async with agentlet.iter(
+                    effective_prompts,
+                    **iter_kwargs,
                 ) as agent_run:
                     if self._run_ctx._run_handle is not None:
                         self._run_ctx._run_handle.active_agent_run = agent_run

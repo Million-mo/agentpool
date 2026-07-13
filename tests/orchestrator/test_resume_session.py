@@ -332,7 +332,10 @@ async def test_resume_native_agent_loads_checkpoint_and_runs(
     assert len(run_stream_calls) == 1
     kwargs = run_stream_calls[0]
     assert "message_history" in kwargs
-    assert kwargs["message_history"] == []
+    # message_history is now wrapped in a MessageHistory object (not raw list)
+    from agentpool.messaging import MessageHistory
+
+    assert isinstance(kwargs["message_history"], MessageHistory)
     assert "deferred_tool_results" in kwargs
 
 

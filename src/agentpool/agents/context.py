@@ -156,11 +156,12 @@ class AgentRunContext:
     before awaiting an elicitation future, enabling crash recovery.
     """
 
-    elicitation_timeout: float | None = 300.0
+    elicitation_timeout: float | None = None
     """Timeout in seconds for elicitation responses.
 
     Set from agent config (``BaseAgentConfig.elicitation_timeout``) by
-    ``get_agentlet()``. ``None`` means no timeout (infinite wait). Used
+    ``get_agentlet()``. ``None`` means no timeout (infinite wait, the
+    default). Configure explicitly in YAML to enable a timeout. Used
     by ``handle_elicitation()`` for ``asyncio.wait_for()``.
     """
 
@@ -392,7 +393,8 @@ class AgentContext[TDeps = Any](NodeContext[TDeps]):
                 run_ctx.checkpointed = True
                 # Update session store status to "checkpointed" so
                 # resume_session() can find it without relying on the
-                # allow_active_run workaround.
+                # allow_active_run workaround. Also set pending_deferred_calls
+                # so resume_session() knows which calls need resolution.
                 pool = self.node.host_context
                 if pool is not None and pool.session_pool is not None:
                     store = pool.session_pool.sessions.store
@@ -400,7 +402,12 @@ class AgentContext[TDeps = Any](NodeContext[TDeps]):
                         try:
                             data = await store.load(run_ctx.session_id)
                             if data is not None and data.status == "active":
-                                data = data.model_copy(update={"status": "checkpointed"})
+                                data = data.model_copy(
+                                    update={
+                                        "status": "checkpointed",
+                                        "pending_deferred_calls": [pending_call],
+                                    }
+                                )
                                 data.touch()
                                 await store.save(data)
                         except Exception:  # noqa: BLE001
@@ -446,6 +453,12 @@ class AgentContext[TDeps = Any](NodeContext[TDeps]):
         except TimeoutError:
             from agentpool.tasks.exceptions import RunAbortedError
 
+            logger.warning(
+                "Elicitation timed out — aborting agent run",
+                session_id=run_ctx.session_id,
+                tool_call_id=handle,
+                timeout_seconds=timeout,
+            )
             raise RunAbortedError(
                 f"Elicitation timed out after {timeout}s"
                 if timeout is not None
