@@ -371,7 +371,6 @@ async def test_elicitation_timeout_yields_cancelled_stream_complete() -> None:
     caused history loss because _execute_turn's StreamCompleteEvent branch
     was never taken, leaving agent.conversation without the assistant message.
     """
-
     agent = _make_agent()
 
     async with agent:
@@ -409,8 +408,7 @@ async def test_elicitation_timeout_yields_cancelled_stream_complete() -> None:
             with contextlib.suppress(asyncio.CancelledError):
                 await collector
             pytest.fail(
-                "Turn did not complete within 10s. "
-                f"Events: {[type(e).__name__ for e in events]}"
+                f"Turn did not complete within 10s. Events: {[type(e).__name__ for e in events]}"
             )
 
         # Assert: StreamCompleteEvent(cancelled=True) should be yielded.

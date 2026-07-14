@@ -563,7 +563,7 @@ class RunHandle:
         self._message_queue.clear()
         return prompts
 
-    async def _execute_turn(
+    async def _execute_turn(  # noqa: PLR0915
         self,
         agent: BaseAgent[Any, Any],
         event_bus: EventBus,
