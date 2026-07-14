@@ -155,15 +155,12 @@ class CombinedToolsetCapability(AbstractCapability[AgentDepsT]):
             if isinstance(toolset, AbstractToolset):
                 toolsets.append(toolset)
             else:
-                # ToolsetFunc (async callable) — wrap in CombinedToolset
-                # which handles both concrete toolsets and callables.
-                # We use a DynamicToolset-like wrapper by deferring to
-                # CombinedToolset which accepts AbstractToolset instances.
-                # For callable toolsets, we must wrap them first.
-                # CombinedToolset expects AbstractToolset instances, not
-                # callables, so we create a deferred wrapper.
-                from pydantic_ai.toolsets._dynamic import DynamicToolset
-
+                # ToolsetFunc (async callable) — wrap in DynamicToolset
+                # which handles callable toolsets by resolving them per-run.
+                try:
+                    from pydantic_ai.toolsets._dynamic import DynamicToolset
+                except ImportError:
+                    from pydantic_ai.toolsets import DynamicToolset
                 toolsets.append(DynamicToolset(toolset_func=toolset))
         if not toolsets:
             return None

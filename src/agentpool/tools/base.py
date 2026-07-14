@@ -370,12 +370,16 @@ class Tool[TOutputType = Any]:
 
         # Try primary path with pydantic_ai.function_schema
         try:
-            # pydantic-ai function_schema is internal API but needed for schema generation
-            # This is the standard way to generate schemas for tools in pydantic-ai
-            from pydantic_ai._function_schema import (  # type: ignore[attr-defined]
-                GenerateJsonSchema,
-                function_schema,
-            )
+            try:
+                from pydantic_ai._function_schema import (  # type: ignore[attr-defined]
+                    GenerateJsonSchema,
+                    function_schema,
+                )
+            except ImportError:
+                from pydantic_ai.function_schema import (  # type: ignore[attr-defined]
+                    GenerateJsonSchema,
+                    function_schema,
+                )
 
             # ToolResult is a dataclass, not a Pydantic model: GenerateJsonSchema cannot
             # build a return-value JSON Schema and emits UserWarning, then falls back to an
