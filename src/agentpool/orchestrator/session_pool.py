@@ -1118,7 +1118,18 @@ class SessionPool:
             _agent_registry=agent_registry,
         )
         if message_history is not None:
-            run_handle._message_history = list(message_history)
+            # Handle both list[ModelMessage] and MessageHistory objects.
+            # Some callers (e.g. subagent_tools.py) pass MessageHistory()
+            # which is not directly iterable as list[ModelMessage].
+            from agentpool.messaging.message_history import MessageHistory
+
+            if isinstance(message_history, MessageHistory):
+                model_msgs: list[ModelMessage] = []
+                for chat_msg in message_history.get_history():
+                    model_msgs.extend(chat_msg.messages)
+                run_handle._message_history = model_msgs
+            else:
+                run_handle._message_history = list(message_history)
         if deferred_tool_results is not None:
             run_handle._resume_deferred_tool_results = deferred_tool_results
         self.sessions._runs[run_handle.run_id] = run_handle
