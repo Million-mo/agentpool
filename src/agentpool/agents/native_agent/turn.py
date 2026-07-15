@@ -69,7 +69,7 @@ class NativeTurn(HookAwareTurn, Turn):
     def __init__(
         self,
         agent: Agent[Any, Any],
-        prompts: list[str],
+        prompts: list[str | list[Any]],
         run_ctx: AgentRunContext,
         message_history: list[ModelMessage],
         parent_id: str | None = None,
@@ -80,7 +80,8 @@ class NativeTurn(HookAwareTurn, Turn):
 
         Args:
             agent: The native Agent whose agentlet will be executed.
-            prompts: Pre-converted prompt strings for this turn.
+            prompts: Pre-converted prompts for this turn. May contain
+                plain strings or structured content blocks (``list[Any]``).
             run_ctx: Per-run isolated context (cancellation, deps, etc.).
             message_history: Incoming message history as pydantic-ai
                 ModelMessage list.
@@ -181,13 +182,25 @@ class NativeTurn(HookAwareTurn, Turn):
             # run_stream() path which did the same before calling agentlet.iter().
             # Without this, skill instructions are silently discarded.
             staged_text = await self._agent.staged_content.consume_as_text()
+            # Flatten prompts into a single list of UserContent items.
+            # pydantic_ai's agentlet.iter() accepts str | Sequence[UserContent].
+            # String prompts are valid UserContent items. List prompts contain
+            # structured content blocks (TextContent, ImageUrl, etc.) that must
+            # be flattened into the top-level sequence, NOT stringified.
+            flattened: list[Any] = []
+            for p in self._prompts:
+                if isinstance(p, str):
+                    flattened.append(p)
+                else:
+                    flattened.extend(p)
             if staged_text is not None:
-                user_request = "\n\n".join(self._prompts)
-                effective_prompts = (
-                    [f"{staged_text}\n\n{user_request}"] if user_request else [staged_text]
-                )
+                if flattened and isinstance(flattened[0], str):
+                    first = f"{staged_text}\n\n{flattened[0]}"
+                    effective_prompts: list[Any] = [first, *flattened[1:]]
+                else:
+                    effective_prompts = [staged_text, *flattened]
             else:
-                effective_prompts = self._prompts
+                effective_prompts = flattened
 
             agent_run: Any = None
             try:

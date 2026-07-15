@@ -18,6 +18,7 @@ Two implementations are provided:
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from typing import TYPE_CHECKING, Any
 
 from agentpool.agents.events import (
@@ -183,6 +184,35 @@ class DirectChannel:
         """
         return False
 
+    def revoke(self, message_id: str) -> bool:
+        """No-op revoke for unidirectional channel.
+
+        DirectChannel has no feedback queue, so there is nothing to
+        revoke. Always returns ``False``.
+
+        Args:
+            message_id: Ignored.
+
+        Returns:
+            Always ``False``.
+        """
+        return False
+
+    def replace(self, message_id: str, new_content: str | list[Any]) -> bool:
+        """No-op replace for unidirectional channel.
+
+        DirectChannel has no feedback queue, so there is nothing to
+        replace. Always returns ``False``.
+
+        Args:
+            message_id: Ignored.
+            new_content: Ignored.
+
+        Returns:
+            Always ``False``.
+        """
+        return False
+
     def close(self) -> None:
         """Drain the queue and mark the channel as closed.
 
@@ -202,7 +232,19 @@ class ProtocolChannel:
 
     Publishes events to the ``EventBus`` for consumption by protocol
     servers (ACP, OpenCode, AG-UI, etc.). Maintains a feedback queue
-    for steer/followup messages injected by ``SessionController``.
+    (``collections.deque``) for steer/followup messages injected by
+    ``SessionController``.
+
+    The feedback queue is backed by ``deque`` (not ``asyncio.Queue``)
+    to support O(1) removal by value via ``revoke()``. Three tracking
+    structures provide ID-based lifecycle management:
+
+    - ``_pending``: ``dict[str, Feedback]`` — feedback waiting in the
+      queue, keyed by ``message_id``.
+    - ``_revoked``: ``set[str]`` — revoked message IDs; rejected if
+      re-delivered.
+    - ``_delivered``: ``set[str]`` — delivered message IDs; ``revoke()``
+      returns ``False`` for these.
 
     Events are journaled (append or upsert) before delivery, unless
     ``_replaying`` is ``True``.
@@ -224,7 +266,10 @@ class ProtocolChannel:
         self._journal: Journal = journal
         self._event_bus: EventBus = event_bus
         self._session_id: str = session_id
-        self._feedback_queue: asyncio.Queue[Feedback] = asyncio.Queue()
+        self._feedback_queue: deque[Feedback] = deque()
+        self._pending: dict[str, Feedback] = {}
+        self._revoked: set[str] = set()
+        self._delivered: set[str] = set()
         self._replaying: bool = False
         self._closed: bool = False
         self._run_loop: Any = None
@@ -304,18 +349,25 @@ class ProtocolChannel:
     def recv(self) -> Feedback | None:
         """Non-blocking dequeue from the feedback queue.
 
+        Transitions the dequeued feedback from ``_pending`` to
+        ``_delivered`` to prevent revoking already-delivered messages.
+
         Returns:
             The next ``Feedback`` if available, or ``None``.
         """
-        try:
-            return self._feedback_queue.get_nowait()
-        except asyncio.QueueEmpty:
+        if not self._feedback_queue:
             return None
+        feedback = self._feedback_queue.popleft()
+        msg_id = feedback.message_id
+        self._pending.pop(msg_id, None)
+        self._delivered.add(msg_id)
+        return feedback
 
     def deliver_feedback(self, feedback: Feedback) -> bool:
         """Enqueue feedback from SessionController.
 
         This is how steer/followup messages arrive at the RunLoop.
+        Revoked messages are rejected.
 
         Args:
             feedback: The feedback to enqueue.
@@ -323,21 +375,96 @@ class ProtocolChannel:
         Returns:
             Always ``True`` (ProtocolChannel supports feedback delivery).
         """
-        self._feedback_queue.put_nowait(feedback)
+        if feedback.message_id in self._revoked:
+            return True
+        self._feedback_queue.append(feedback)
+        self._pending[feedback.message_id] = feedback
+        return True
+
+    def revoke(self, message_id: str) -> bool:
+        """Revoke a pending feedback message by ID.
+
+        Revocation only operates at the CommChannel queue layer. If the
+        feedback is still in the queue (not yet delivered to the
+        RunLoop), it is removed and marked as revoked. If already
+        delivered, revocation is not possible and ``False`` is returned.
+
+        Design decision: Once feedback is dequeued by ``recv()`` and
+        delivered to the agent runtime (via ``_idle_loop`` →
+        ``_execute_turn`` → ``agent_run``), it cannot be revoked. This
+        is a deliberate design choice — post-delivery revocation would
+        require deep integration with pydantic_ai's ``PendingMessage``
+        lifecycle, which is fragile and provides little value (the
+        message is already being processed). Future work: If ACP v2
+        requires post-delivery revocation, a PydanticAI capability hook
+        could be added to support it.
+
+        Args:
+            message_id: The ID of the feedback message to revoke.
+
+        Returns:
+            ``True`` if revoked or already gone, ``False`` if delivered.
+        """
+        # Already delivered — cannot revoke.
+        if message_id in self._delivered:
+            return False
+
+        # Still pending in CommChannel queue — remove and mark revoked.
+        if message_id in self._pending:
+            feedback = self._pending.pop(message_id)
+            self._feedback_queue.remove(feedback)
+            self._revoked.add(message_id)
+            return True
+
+        # Unknown message_id — idempotent success.
+        return True
+
+    def replace(self, message_id: str, new_content: str | list[Any]) -> bool:
+        """Replace the content of a pending feedback message in-place.
+
+        Updates the content of a feedback message that is still pending
+        in the channel's feedback queue, preserving its position. When
+        ``new_content`` is a ``list``, updates ``Feedback.content_blocks``;
+        when ``str``, updates ``Feedback.content``.
+
+        Returns ``False`` if the message has already been delivered
+        (past CommChannel scope).
+
+        Args:
+            message_id: The ID of the feedback message to replace.
+            new_content: New content (``str`` or ``list[Any]``).
+
+        Returns:
+            ``True`` if replaced, ``False`` if past CommChannel scope.
+        """
+        # Cannot replace if already delivered.
+        if message_id in self._delivered:
+            return False
+
+        if message_id not in self._pending:
+            # Unknown message_id — nothing to replace.
+            return False
+
+        feedback = self._pending[message_id]
+        if isinstance(new_content, list):
+            feedback.content_blocks = new_content
+            feedback.content = ""
+        else:
+            feedback.content = new_content
+            feedback.content_blocks = None
         return True
 
     def close(self) -> None:
-        """Clean up the feedback queue and mark as closed.
+        """Clean up all tracking structures and mark as closed.
 
         After ``close()``, further calls to ``publish()`` raise
         ``RuntimeError``.
         """
         self._closed = True
-        while not self._feedback_queue.empty():
-            try:
-                self._feedback_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
+        self._feedback_queue.clear()
+        self._pending.clear()
+        self._revoked.clear()
+        self._delivered.clear()
 
 
 __all__ = [

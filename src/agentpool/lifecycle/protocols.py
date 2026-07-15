@@ -294,6 +294,57 @@ class CommChannel(Protocol):
         """
         ...
 
+    def revoke(self, message_id: str) -> bool:
+        """Revoke a pending feedback message by ID.
+
+        Revocation operates at the CommChannel queue layer only. If the
+        feedback is still pending in the channel's feedback queue (not
+        yet delivered to the RunLoop), it is removed and marked as
+        revoked.
+
+        Once feedback is delivered to the agent runtime (dequeued by
+        ``recv()`` and passed to ``agent_run``), it cannot be revoked.
+        This is a deliberate design choice — post-delivery revocation
+        would require deep integration with pydantic_ai's
+        ``PendingMessage`` lifecycle, which is fragile and provides
+        little value.
+
+        Returns ``True`` if the message was revoked or is already gone
+        (idempotent). Returns ``False`` if the message was already
+        delivered to the agent runtime (past the revoke window).
+
+        Unidirectional channels (``DirectChannel``) always return
+        ``False`` since they have no feedback queue.
+
+        Args:
+            message_id: The ID of the feedback message to revoke.
+
+        Returns:
+            ``True`` if revoked or already gone, ``False`` if delivered.
+        """
+        ...
+
+    def replace(self, message_id: str, new_content: str | list[Any]) -> bool:
+        """Replace the content of a pending feedback message in-place.
+
+        Updates the content of a feedback message that is still pending
+        in the channel's feedback queue, preserving its position. When
+        ``new_content`` is a ``list``, updates ``Feedback.content_blocks``;
+        when ``str``, updates ``Feedback.content``.
+
+        Returns ``False`` if the message has already been delivered
+        (past CommChannel scope). Unidirectional channels always return
+        ``False``.
+
+        Args:
+            message_id: The ID of the feedback message to replace.
+            new_content: New content (``str`` or ``list[Any]``).
+
+        Returns:
+            ``True`` if replaced, ``False`` if past CommChannel scope.
+        """
+        ...
+
     def close(self) -> None:
         """Release all resources held by the CommChannel."""
         ...
