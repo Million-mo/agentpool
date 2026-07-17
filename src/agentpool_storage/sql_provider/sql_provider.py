@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Self
 
 from sqlmodel import SQLModel
@@ -79,8 +80,25 @@ class SQLModelProvider(
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        """Clean up async database resources properly."""
-        await self.engine.dispose()
+        """Clean up async database resources properly.
+
+        Handles CancelledError gracefully — during shutdown, asyncio may cancel
+        the main task while engine.dispose() is still running. We shield the
+        dispose call so it continues in the background even if the current task
+        is cancelled, and suppress the CancelledError to avoid noisy logs.
+        SQLite's WAL mode ensures data integrity even if connections are not
+        explicitly closed.
+        """
+        dispose_task = asyncio.create_task(self.engine.dispose())
+        try:
+            await asyncio.shield(dispose_task)
+        except asyncio.CancelledError:
+            logger.warning(
+                "engine.dispose() was cancelled during shutdown; "
+                "SQLite WAL mode ensures data integrity"
+            )
+        except Exception:
+            logger.exception("Error during engine.dispose()")
         return await super().__aexit__(exc_type, exc_val, exc_tb)
 
     def cleanup(self) -> None:
