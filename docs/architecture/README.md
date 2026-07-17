@@ -31,6 +31,7 @@ above them: the narrative that connects local decisions into a coherent system.
 | [04-constraints-and-principles](./04-constraints-and-principles.md) | Hard constraints and design principles | ...to know what we cannot compromise |
 | [05-framework-comparison](./05-framework-comparison.md) | Comparative survey of multi-agent frameworks | ...to see how our choices compare to the field |
 | [06-rfc-roadmap](./06-rfc-roadmap.md) | Existing RFCs, dependencies, and phase plan | ...to navigate the RFC landscape |
+| [07-team-mode-design-space](./07-team-mode-design-space.md) | Design space for Dynamic Agent Team | ...to understand the dimensions and choices of team design |
 | [06-decisions/](./06-decisions/) | Design decision records (DDRs) | ...to review specific architectural decisions |
 | [Team Mode: RFC-0055 design notes](../team-mode/RFC-0055-design-notes.md) | Local implementation notes for Dynamic Team Mode | ...to connect RFC-0055 to the current codebase |
 
