@@ -254,7 +254,20 @@ class RunHandle:
         in-process implementation. Both ``DirectChannel`` and
         ``ProtocolChannel`` receive the journal via their constructor,
         so no post-hoc journal injection is needed.
+
+        If ``_comm_channel`` is provided but ``_journal`` is ``None``,
+        the CommChannel's journal is reused. This ensures
+        ``journal.resume()`` reads the same events that ``publish()``
+        writes — without it, crash recovery silently fails because
+        ``resume()`` reads from a fresh empty journal while events
+        are written to the CommChannel's journal instance.
         """
+        # If CommChannel is provided but _journal is not, reuse the
+        # CommChannel's journal to ensure resume() reads the same events
+        # that publish() writes. Without this, crash recovery silently
+        # fails because resume() reads an empty journal.
+        if self._journal is None and self._comm_channel is not None:
+            self._journal = self._comm_channel.journal
         if self._journal is None:
             self._journal = MemoryJournal()
         if self._snapshot_store is None:
