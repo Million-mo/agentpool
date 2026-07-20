@@ -21,6 +21,7 @@ from agentpool_server.opencode_server.models.parts import (
     FilePart,
     FilePartSource,
     Part,
+    ReasoningPart,
     RetryPart,
     StepFinishPart,
     StepStartPart,
@@ -366,6 +367,24 @@ class MessageWithParts(OpenCodeBaseModel):
             text=text,
             synthetic=synthetic,
             ignored=ignored,
+            time=time,
+            metadata=metadata,
+        )
+        self.parts.append(part)
+        return part
+
+    def add_reasoning_part(
+        self,
+        text: str,
+        time: TimeStartEndOptional | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> ReasoningPart:
+        """Create and append a reasoning/thinking part."""
+        part = ReasoningPart(
+            id=identifier.ascending("part"),
+            message_id=self.info.id,
+            session_id=self.info.session_id,
+            text=text,
             time=time,
             metadata=metadata,
         )

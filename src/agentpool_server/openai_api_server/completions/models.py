@@ -55,6 +55,7 @@ class OpenAIMessage(Schema):
     name: str | None = None
     function_call: FunctionCall | None = None
     tool_calls: list[ToolCall] | None = None
+    reasoning_content: str | None = None
 
 
 class ChatCompletionRequest(Schema):

@@ -11,6 +11,7 @@ from pydantic_ai import (
     RequestUsage,
     RetryPromptPart,
     TextPart as PydanticTextPart,
+    ThinkingPart as PydanticThinkingPart,
     ToolCallPart as PydanticToolCallPart,
     ToolReturnPart as PydanticToolReturnPart,
     UserPromptPart,
@@ -30,6 +31,7 @@ from agentpool_server.opencode_server.models import (
     MessagePath,
     MessageTime,
     MessageWithParts,
+    ReasoningPart,
     Session,
     SessionRevert,
     SessionShare,
@@ -290,12 +292,43 @@ def chat_message_to_opencode(  # noqa: PLR0915
                         if content:
                             ts_opt = TimeStartEndOptional(start=created_ms, end=completed_ms)
                             result.add_text_part(content, time=ts_opt)
+                    elif isinstance(part_dict, dict) and part_dict.get("part_kind") == "thinking":
+                        content = part_dict.get("content") or ""
+                        if content:
+                            ts_opt = TimeStartEndOptional(start=created_ms, end=completed_ms)
+                            reasoning_meta: dict[str, Any] = {}
+                            if part_dict.get("id") is not None:
+                                reasoning_meta["thinking_id"] = part_dict["id"]
+                            if part_dict.get("provider_name") is not None:
+                                reasoning_meta["provider_name"] = part_dict["provider_name"]
+                            if part_dict.get("signature") is not None:
+                                reasoning_meta["signature"] = part_dict["signature"]
+                            if part_dict.get("provider_details") is not None:
+                                reasoning_meta["provider_details"] = part_dict["provider_details"]
+                            result.add_reasoning_part(
+                                content, time=ts_opt, metadata=reasoning_meta or None
+                            )
                 continue
             for p in model_msg.parts:
                 match p:
                     case PydanticTextPart(content=content):
                         ts_opt = TimeStartEndOptional(start=created_ms, end=completed_ms)
                         result.add_text_part(content, time=ts_opt)
+                    case PydanticThinkingPart(content=content):
+                        if content:
+                            ts_opt = TimeStartEndOptional(start=created_ms, end=completed_ms)
+                            thinking_meta: dict[str, Any] = {}
+                            if p.id is not None:
+                                thinking_meta["thinking_id"] = p.id
+                            if p.provider_name is not None:
+                                thinking_meta["provider_name"] = p.provider_name
+                            if p.signature is not None:
+                                thinking_meta["signature"] = p.signature
+                            if p.provider_details is not None:
+                                thinking_meta["provider_details"] = p.provider_details
+                            result.add_reasoning_part(
+                                content, time=ts_opt, metadata=thinking_meta or None
+                            )
                     case PydanticToolCallPart(tool_name=tool_name, tool_call_id=call_id):
                         tool_input = _convert_params_for_ui(safe_args_as_dict(p))
                         ts = TimeStart(start=created_ms)
@@ -466,6 +499,20 @@ def opencode_to_chat_message(  # noqa: PLR0915
             match part:
                 case TextPart(text=text, id=part_id):
                     response_parts.append(PydanticTextPart(content=text, id=part_id))
+                case ReasoningPart(text=text):
+                    if text:
+                        thinking_kwargs: dict[str, Any] = {"content": text}
+                        meta = part.metadata
+                        if meta:
+                            if meta.get("thinking_id") is not None:
+                                thinking_kwargs["id"] = meta["thinking_id"]
+                            if meta.get("provider_name") is not None:
+                                thinking_kwargs["provider_name"] = meta["provider_name"]
+                            if meta.get("signature") is not None:
+                                thinking_kwargs["signature"] = meta["signature"]
+                            if meta.get("provider_details") is not None:
+                                thinking_kwargs["provider_details"] = meta["provider_details"]
+                        response_parts.append(PydanticThinkingPart(**thinking_kwargs))
                 case ToolPart(tool=tool_name, call_id=call_id, state=state):
                     response_parts.append(
                         PydanticToolCallPart(

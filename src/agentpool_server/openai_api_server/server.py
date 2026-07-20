@@ -7,6 +7,7 @@ import uuid
 
 import anyenv
 from fastapi import Header
+from pydantic_ai.messages import ModelResponse, ThinkingPart
 
 from agentpool.agents.events import StreamCompleteEvent
 from agentpool.log import get_logger
@@ -219,7 +220,17 @@ class OpenAIAPIServer(BaseServer, ProtocolEventConsumerMixin):
         if final_message is None:
             raise HTTPException(500, "No response received from agent")
 
-        msg = OpenAIMessage(role="assistant", content=str(final_message.content))
+        reasoning_text = ""
+        for m in final_message.messages:
+            if isinstance(m, ModelResponse):
+                for p in m.parts:
+                    if isinstance(p, ThinkingPart) and p.content:
+                        reasoning_text += p.content
+        msg = OpenAIMessage(
+            role="assistant",
+            content=str(final_message.content),
+            reasoning_content=reasoning_text or None,
+        )
         completion_response = ChatCompletionResponse(
             id=final_message.message_id,
             created=int(final_message.timestamp.timestamp()),

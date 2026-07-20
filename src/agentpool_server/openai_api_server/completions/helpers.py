@@ -6,7 +6,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 import anyenv
-from pydantic_ai import PartDeltaEvent, TextPartDelta
+from pydantic_ai import PartDeltaEvent, TextPartDelta, ThinkingPartDelta
 
 from agentpool.log import get_logger
 
@@ -47,10 +47,22 @@ async def stream_response(
         async for event in events:
             match event:
                 case PartDeltaEvent(delta=TextPartDelta(content_delta=chunk)):
-                    # Skip empty chunks
                     if not chunk:
                         continue
                     delta = {"content": chunk}
+                    choice = {"index": 0, "delta": delta, "finish_reason": None}
+                    chunk_data = {
+                        "id": response_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": request.model,
+                        "choices": [choice],
+                    }
+                    yield f"data: {anyenv.dump_json(chunk_data)}\n\n"
+                case PartDeltaEvent(delta=ThinkingPartDelta(content_delta=chunk)):
+                    if not chunk:
+                        continue
+                    delta = {"reasoning_content": chunk}
                     choice = {"index": 0, "delta": delta, "finish_reason": None}
                     chunk_data = {
                         "id": response_id,

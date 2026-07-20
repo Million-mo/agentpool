@@ -5,10 +5,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from pydantic_ai.messages import ModelResponse, ThinkingPart
+
 from agentpool_server.openai_api_server.responses.models import (
     Response,
     ResponseMessage,
     ResponseOutputText,
+    ResponseReasoning,
     ResponseToolCall,
     ResponseUsage,
 )
@@ -23,13 +26,23 @@ async def handle_request(request: ResponseRequest, message: ChatMessage[Any]) ->
     text = ResponseOutputText(text=str(message.content))
     output_msg_id = f"msg_{uuid4().hex}"
     output_msg = ResponseMessage(id=output_msg_id, role="assistant", content=[text])
-    output: list[ResponseMessage | ResponseToolCall] = [output_msg]
+    output: list[ResponseMessage | ResponseToolCall | ResponseReasoning] = [output_msg]
+
+    reasoning_parts = [
+        {"type": "text", "text": p.content}
+        for m in message.messages
+        if isinstance(m, ModelResponse)
+        for p in m.parts
+        if isinstance(p, ThinkingPart) and p.content
+    ]
+    if reasoning_parts:
+        output.append(ResponseReasoning(content=reasoning_parts))
 
     calls = [
         ResponseToolCall(type=f"{tc.tool_name}_call", id=tc.tool_call_id)
         for tc in message.get_tool_calls()
     ]
-    output = calls + output  # type: ignore[assignment, operator]
+    output = calls + output
 
     usage_info: ResponseUsage | None = None
     if message.cost_info and (token_usage := message.cost_info.token_usage):
