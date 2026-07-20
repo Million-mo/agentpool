@@ -527,19 +527,19 @@ class TestNormalizeThinkingPartsInMessages:
         normalize_thinking_parts_in_messages(messages)
         assert messages == []
 
-    def test_multi_raw_content_list_uses_last_entry(self):
-        """When raw_content has multiple entries, the last one is used."""
+    def test_multi_raw_content_list_are_joined(self):
+        """When raw_content has multiple entries, they are joined together."""
         thinking = ThinkingPart(
             content="",
             provider_name="openai",
-            provider_details={"raw_content": ["", "", "final segment"]},
+            provider_details={"raw_content": ["I think", " therefore", " I am"]},
         )
         response = ModelResponse(parts=[thinking], model_name="svc/kimi-k2")
         messages: list[Any] = [response]
 
         normalize_thinking_parts_in_messages(messages)
 
-        assert messages[0].parts[0].content == "final segment"
+        assert messages[0].parts[0].content == "I think therefore I am"
 
     def test_idempotent_double_normalization(self):
         """Calling normalize twice does not corrupt content."""

@@ -443,6 +443,7 @@ class NativeTurn(HookAwareTurn, Turn):
                     # state in concurrent runs.
                     if agent_run is not None:
                         new_messages = agent_run.new_messages()
+                        normalize_thinking_parts_in_messages(new_messages)
                     else:
                         new_messages = self._message_history[self._input_history_len :]
                     content: Any = extract_text_from_messages(new_messages)

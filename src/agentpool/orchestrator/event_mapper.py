@@ -293,7 +293,23 @@ def normalize_thinking_parts_in_messages(
         for i, part in enumerate(msg.parts):
             if not isinstance(part, ThinkingPart) or part.content:
                 continue
-            text = _extract_raw_content_text(part.provider_details)
+            pd = part.provider_details
+            resolved: dict[str, Any] | None = None
+            if callable(pd):
+                try:
+                    result = pd(None)
+                    if isinstance(result, dict):
+                        resolved = result
+                except Exception:  # noqa: BLE001
+                    pass
+            elif isinstance(pd, dict):
+                resolved = pd
+            if resolved is None:
+                continue
+            raw = resolved.get("raw_content")
+            if not raw or not isinstance(raw, list):
+                continue
+            text = "".join(chunk for chunk in raw if isinstance(chunk, str))
             if not text:
                 continue
             if new_parts is None:
