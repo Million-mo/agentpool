@@ -1167,7 +1167,7 @@ async def fork_session(  # noqa: D417
 
     # Copy messages in storage via SessionPool
     if session_pool is not None:
-        with contextlib.suppress(KeyError, TypeError):
+        with contextlib.suppress(KeyError, TypeError, ValueError):
             await session_pool.copy_messages(
                 session_id,
                 new_session_id,
