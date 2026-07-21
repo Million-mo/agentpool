@@ -129,7 +129,7 @@ The BackgroundTask system was initially designed as a xeno-agent-specific augmen
 
 ### 2.5 Cross-System Comparison: opencode
 
-A comparative analysis of opencode's background task system (located at `/Users/mollion-mo/Downloads/projects/opencode`) was conducted to inform this RFC's status query design. Key findings:
+A comparative analysis of [opencode's](https://github.com/anomalyco/opencode) background task system was conducted to inform this RFC's status query design. Key findings:
 
 #### 2.5.1 Tool Surface
 
