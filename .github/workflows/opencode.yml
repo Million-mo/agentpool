@@ -8,11 +8,16 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
 
+concurrency:
+  group: opencode-${{ github.event.issue.number || github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: false
+
 jobs:
   # Automatic PR review on open/sync/reopen
   review:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       id-token: write
       contents: read
@@ -31,18 +36,32 @@ jobs:
           model: kimi-for-coding/kimi-for-coding
           use_github_token: true
           prompt: |
-            Review this pull request:
-            - Check for code quality issues
-            - Look for potential bugs
-            - Suggest improvements
-            - Focus on Python type safety, async correctness, and test coverage
+            You are reviewing a pull request for AgentPool, a Python async agent
+            orchestration framework built on Pydantic AI.
+
+            Before reviewing, read AGENTS.md and tests/AGENTS.md for project
+            conventions.
+
+            Review guidelines:
+            - Read full changed files, not just the diff, to understand context.
+            - Focus on: Python type safety (mypy strict), async correctness,
+              Pydantic AI patterns (capabilities, RunLoop, AgentContext),
+              test coverage, and OpenSpec compliance.
+            - Be conservative. Only flag issues you are highly confident about.
+            - Frame all suggestions as suggestions, not commands.
+            - Avoid style nitpicks; respect existing patterns.
+            - If no issues are found, say "LGTM" briefly.
+
+            Output a concise PR review comment in Markdown.
 
   # Manual trigger via /oc or /opencode comments
   opencode:
     if: |
       github.event_name == 'issue_comment' &&
-      (contains(github.event.comment.body, '/oc') || contains(github.event.comment.body, '/opencode'))
+      (contains(github.event.comment.body, '/oc') || contains(github.event.comment.body, '/opencode')) &&
+      contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       id-token: write
       contents: write
@@ -66,8 +85,10 @@ jobs:
   review-comment:
     if: |
       github.event_name == 'pull_request_review_comment' &&
-      (contains(github.event.comment.body, '/oc') || contains(github.event.comment.body, '/opencode'))
+      (contains(github.event.comment.body, '/oc') || contains(github.event.comment.body, '/opencode')) &&
+      contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association)
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       id-token: write
       contents: read
