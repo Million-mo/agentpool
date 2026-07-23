@@ -26,6 +26,7 @@ jobs:
       - uses: anomalyco/opencode/github@latest
         env:
           KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           model: kimi-for-coding/kimi-for-coding
           use_github_token: true
@@ -56,6 +57,7 @@ jobs:
       - uses: anomalyco/opencode/github@latest
         env:
           KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           model: kimi-for-coding/kimi-for-coding
           use_github_token: true
@@ -79,6 +81,7 @@ jobs:
       - uses: anomalyco/opencode/github@latest
         env:
           KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           model: kimi-for-coding/kimi-for-coding
           use_github_token: true
