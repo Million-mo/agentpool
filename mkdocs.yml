@@ -1,15 +1,15 @@
-site_name: "AgentPool"
-site_description: "Pydantic-AI based Multi-Agent Framework with YAML-based Agents, Teams, Workflows & Extended ACP / AGUI integration"
-repo_url: "https://github.com/Leoyzen/wolfharness/"
+site_name: "WolfHarness"
+site_description: "One YAML, every protocol. PydanticAI-based framework for orchestrating multi-agent teams and workflows — ACP, OpenCode, MCP, AG-UI, and OpenAI-compatible APIs."
+repo_url: "https://github.com/wolf1069b/wolfharness/"
 site_url: https://leoyzen.github.io/wolfharness/
 site_author: "Leoyzen"
-copyright: Copyright &copy; 2025 Leoyzen (forked from phil65/wolfharness)
+copyright: Copyright &copy; 2025 Leoyzen (forked from phil65/agentpool)
 edit_uri: edit/main/docs/
 
 theme:
   name: material
-  icon:
-    logo: material/robot-outline
+  logo: assets/logo.png
+  favicon: assets/favicon.png
   font:
     text: Inter
     code: JetBrains Mono
@@ -56,6 +56,9 @@ theme:
     - search.highlight
     - search.suggest
   # - search.share
+
+extra_css:
+  - stylesheets/extra.css
 
 extra_javascript: # for code blocks with { .interactive }
   - js/run_code_config.js
@@ -302,3 +305,4 @@ nav:
           - Status Index: rfcs/STATUS.md
       - Meta:
           - Documentation Guide: meta/documentation-guide.md
+  - Examples: examples.md
