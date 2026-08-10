@@ -5,13 +5,13 @@
 <h1 align="center">WolfHarness</h1>
 
 <p align="center">
-  <a href="https://github.com/wolf1069b/agentpool/actions/workflows/pytest.yml"><img src="https://img.shields.io/github/actions/workflow/status/wolf1069b/agentpool/pytest.yml?branch=main&label=Tests" alt="Tests"></a>
-  <a href="https://codecov.io/gh/wolf1069b/agentpool"><img src="https://img.shields.io/codecov/c/github/wolf1069b/agentpool" alt="codecov"></a>
-  <a href="https://leoyzen.github.io/wolfharness/"><img src="https://img.shields.io/github/actions/workflow/status/wolf1069b/agentpool/documentation.yml?branch=main&label=Docs" alt="Docs"></a>
-  <a href="https://github.com/wolf1069b/agentpool/blob/main/LICENSE"><img src="https://img.shields.io/github/license/wolf1069b/agentpool" alt="License"></a>
+  <a href="https://github.com/wolf1069b/wolfharness/actions/workflows/pytest.yml"><img src="https://img.shields.io/github/actions/workflow/status/wolf1069b/wolfharness/pytest.yml?branch=main&label=Tests" alt="Tests"></a>
+  <a href="https://codecov.io/gh/wolf1069b/wolfharness"><img src="https://img.shields.io/codecov/c/github/wolf1069b/wolfharness" alt="codecov"></a>
+  <a href="https://leoyzen.github.io/wolfharness/"><img src="https://img.shields.io/github/actions/workflow/status/wolf1069b/wolfharness/documentation.yml?branch=main&label=Docs" alt="Docs"></a>
+  <a href="https://github.com/wolf1069b/wolfharness/blob/main/LICENSE"><img src="https://img.shields.io/github/license/wolf1069b/wolfharness" alt="License"></a>
 </p>
 
-> **PydanticAI-based multi-agent orchestration framework** — define heterogeneous agents in one YAML file, compose them into teams and workflows, and expose them through ACP, OpenCode, MCP, and AG-UI protocols.
+> One YAML, every protocol. WolfHarness is a PydanticAI-based framework for orchestrating multi-agent teams and workflows — define agents once, expose them through ACP, OpenCode, MCP, AG-UI, and OpenAI-compatible APIs.
 
 [Documentation](https://leoyzen.github.io/wolfharness/) · [Getting Started](https://leoyzen.github.io/wolfharness/tutorials/) · [API Reference](https://leoyzen.github.io/wolfharness/reference/)
 
@@ -65,12 +65,16 @@ teams:
 ```
 
 ```python
-async with AgentPool("agents.yml") as pool:
+from wolfharness import WolfHarness
+
+async with WolfHarness("agents.yml") as pool:
     # Parallel execution
     results = await (analyzer & reviewer).run("Review this code")
     # Sequential pipeline
     result = await (analyzer | reviewer | formatter).run("Process this")
 ```
+
+> **Note:** `AgentPool` remains available as a backward-compatible alias for `WolfHarness`.
 
 ### 3. 🎯 Rich YAML configuration
 
@@ -178,15 +182,21 @@ wolfharness serve-opencode agents.yml
 
 # MCP server — expose tools to other agents
 wolfharness serve-mcp agents.yml
+
+# AG-UI server — for web frontends
+wolfharness serve-agui agents.yml
+
+# OpenAI-compatible API server
+wolfharness serve-api agents.yml
 ```
 
 ## Programmatic Usage
 
 ```python
-from wolfharness import AgentPool
+from wolfharness import WolfHarness
 from pathlib import Path
 
-async with AgentPool("agents.yml") as pool:
+async with WolfHarness("agents.yml") as pool:
     agent = pool.get_agent("assistant")
 
     # Simple run
@@ -216,28 +226,30 @@ wolfharness task <agent_name> "description"  # Create a background task
 
 ## Roadmap
 
-| Status | Feature |
-|--------|---------|
-| ✅ | v2.9.5 — Multi-protocol server (ACP, OpenCode, MCP, AG-UI, OpenAI API) |
-| ✅ | YAML-based agent configuration with fallback models |
-| ✅ | Teams (parallel) & chains (sequential) orchestration |
-| ✅ | Skill commands across all protocols |
-| ✅ | Storage & analytics (SQLite, PostgreSQL) |
-| ✅ | MCP server integration for agents |
-| 🔄 | Enhanced tool confirmation UI in ACP |
-| 🔄 | Remote filesystem abstraction (UPath) |
-| 📋 | Team-mode (dynamic LLM-driven team formation) |
-| 📋 | Agent evaluation & benchmarking framework |
-| 📋 | Lifecycle hooks system (M2) |
-| 📋 | Capability discovery protocol (M3) |
+### 🎯 Project History
+
+| Milestone | Description |
+|-----------|-------------|
+| **Fork & Rebuild** (2025-12) | Forked from `phil65/agentpool`. Major refactoring: unified SessionPool architecture, EventBus event system, PydanticAI thin wrappers, structured concurrency (anyio), V2 message ID infrastructure, ACP streaming HTTP + WebSocket transport |
+| **Feature Expansion** (2026-04) | Pydantic-Graph workflow engine (DAG + conditional branching), M3 capability system with entry-point discovery, M2 lifecycle dimensions (RunLoop/CommChannel/Journal/SnapshotStore), dynamic team mode (RFC-0055), multi-protocol serving (ACP/OpenCode/MCP/AG-UI/OpenAI API) |
+| **WolfHarness v4.0** (2026-08) | After extensive testing and stabilization, renamed to WolfHarness — current stable release |
+
+### 📋 Future Plans
+
+The next development phase is under planning. Key candidates include:
+
+- Dynamic workflow capability (RFC-0058) — LLM-authored script-driven multi-agent orchestration
+- Agent evaluation & benchmarking framework
+- ACP v2 protocol support
+- Polyglot agent support (M6)
 
 ## Development
 
 ### Setup
 
 ```bash
-git clone https://github.com/wolf1069b/agentpool
-cd agentpool
+git clone https://github.com/wolf1069b/wolfharness
+cd wolfharness
 uv sync --all-extras
 ```
 
@@ -278,7 +290,7 @@ Full docs, tutorials, and API reference at **[leoyzen.github.io/wolfharness](htt
 
 Thanks to everyone who has contributed to WolfHarness!
 
-[![Contributors](https://contrib.rocks/image?repo=wolf1069b/agentpool)](https://github.com/wolf1069b/agentpool/graphs/contributors)
+[![Contributors](https://contrib.rocks/image?repo=wolf1069b/wolfharness)](https://github.com/wolf1069b/wolfharness/graphs/contributors)
 
 **Key contributors:** [Philipp Temminghoff](https://github.com/phil65) (original author), [Leoyzen](https://github.com/Leoyzen) (maintainer), [Million](https://github.com/Million-mo), [yankaifeng](https://github.com/yankaifeng), [tasia](https://github.com/tasiawang), and the broader iroot-llm team.
 
@@ -291,7 +303,7 @@ If you use WolfHarness in your research or project, please cite:
   author  = {{WolfHarness Contributors}},
   title   = {WolfHarness: PydanticAI-based Multi-Agent Orchestration Framework},
   year    = {2025},
-  url     = {https://github.com/wolf1069b/agentpool},
+  url     = {https://github.com/wolf1069b/wolfharness},
   license = {MIT}
 }
 ```
