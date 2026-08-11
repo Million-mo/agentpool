@@ -3098,14 +3098,14 @@ wheels = [
 
 [[package]]
 name = "openviking-sdk"
-version = "0.1.5"
+version = "0.1.7"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e4/9c/b75da8d956bbfaf39288dd3cf7c734ba9225fba34e44362d02fbdb9a871d/openviking_sdk-0.1.5.tar.gz", hash = "sha256:f017dec938267aaea659122165f2872e189933a5604ba6d9ec0ae867b558ecaf", size = 33652 }
+sdist = { url = "https://files.pythonhosted.org/packages/c2/4b/cbd1a866deb35f9b8986904260d8fb99d769e7f47b91bbb2ca85b8e36341/openviking_sdk-0.1.7.tar.gz", hash = "sha256:90b1c3025c9b1192e549421b8d181855bb722e57e14f785a1a31a5eec4151bed", size = 43934 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/53/c0/481ec44e2f98cf1afd47d4c115756dd4b1fa674caa4b99b0f72723d6fc33/openviking_sdk-0.1.5-py3-none-any.whl", hash = "sha256:f29af1c56e1a4477c881d584fa5178b5a34600847926cfe21fddd333ccb576ec", size = 21740 },
+    { url = "https://files.pythonhosted.org/packages/ba/15/78fe7434da25b3327cea1e7682cb20a8532e9a94faf33832b5560ae7d8f6/openviking_sdk-0.1.7-py3-none-any.whl", hash = "sha256:f4bc373ce2f4ebf93216b3fbc8c33b8e3c39e852e451ade1b95b102886652847", size = 26350 },
 ]
 
 [[package]]
@@ -5587,7 +5587,7 @@ requires-dist = [
     { name = "markitdown", marker = "python_full_version < '3.14' and extra == 'markitdown'" },
     { name = "mcp", specifier = ">=1.2.0" },
     { name = "mcpx-py", marker = "extra == 'mcp-run'", specifier = ">=0.7.0" },
-    { name = "openviking-sdk", marker = "extra == 'viking'", specifier = ">=0.1.0" },
+    { name = "openviking-sdk", marker = "extra == 'viking'", specifier = ">=0.1.6" },
     { name = "pillow", specifier = ">=11.3.0" },
     { name = "platformdirs" },
     { name = "promptantic", specifier = ">=0.4.5" },
