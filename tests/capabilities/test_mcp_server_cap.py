@@ -167,6 +167,7 @@ def _make_resource(
     res = MagicMock()
     res.uri = uri
     res.name = name
+    res.title = None
     res.description = description
     res.mimeType = mime_type
     return res
@@ -350,6 +351,23 @@ async def test_list_resources_delegation() -> None:
     assert result[0].name == "res1"
     assert result[0].description == "Resource 1"
     assert result[0].mime_type == "text/plain"
+
+
+@pytest.mark.anyio
+async def test_list_resources_prefers_title() -> None:
+    """Title is used as the ResourceEntry name when present."""
+    titled = MagicMock()
+    titled.uri = "file:///titled"
+    titled.name = "get_titled"
+    titled.title = "Human Readable Title"
+    titled.description = ""
+    titled.mimeType = "text/plain"
+    client = FakeMCPClient(_resources=[titled])
+    cap = McpServerCap(config=_make_config(), session_pool=FakeSessionPool(client))
+
+    result = await cap.list_resources()
+
+    assert result[0].name == "Human Readable Title"
 
 
 @pytest.mark.anyio
