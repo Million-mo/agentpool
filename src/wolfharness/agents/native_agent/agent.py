@@ -1119,14 +1119,25 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
         )
 
         tool_capabilities.append(create_approval_bridge_capability(self, input_provider))
-        # 4. MCP servers
+        # 4. MCP servers.
+        #    Top-level (non-ACP) providers are injected directly — their tools
+        #    come from McpServerCap.get_toolset(). ACP providers continue via
+        #    the aggregating provider (Path C). Session-scoped configs (session
+        #    + skill) still use get_capabilities() with global configs excluded.
+        from wolfharness.capabilities.mcp_server_cap import McpServerCap
+
+        pool = self._agent_pool
+        if pool is not None:
+            tool_capabilities.extend(
+                provider for provider in pool.mcp.providers if isinstance(provider, McpServerCap)
+            )
         mcp_capabilities = await self.mcp.get_capabilities(
-            session_id=run_ctx.session_id if run_ctx else None
+            session_id=run_ctx.session_id if run_ctx else None,
+            exclude_global=True,
         )
         tool_capabilities.extend(mcp_capabilities)
         # 5. Skill capabilities — from pool-scoped instances created during __aenter__.
         #    Each SkillManagerCap provides tools and MCP servers.
-        pool = self._agent_pool
         if pool is not None:
             pool_capabilities = pool.skill_capabilities
             if pool_capabilities:
