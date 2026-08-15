@@ -91,6 +91,7 @@ class McpServerCap(
         *,
         name: str | None = None,
         client: MCPClient | None = None,
+        tool_prefix: str | None = None,
     ) -> None:
         """Initialize the capability.
 
@@ -101,10 +102,14 @@ class McpServerCap(
             name: Optional name override. Defaults to ``config.client_id``.
             client: Optional pre-created ``MCPClient``. When provided,
                 bypasses the session pool and uses this client directly.
+            tool_prefix: Optional model-visible tool namespace derived from
+                the server's ``display_name``. When ``None``, falls back to
+                ``config.display_name``.
         """
         self._config = config
         self._session_pool = session_pool
         self._name = name or config.client_id
+        self._tool_prefix = tool_prefix or config.display_name
         self._client: MCPClient | None = client
         self._change_queues: set[asyncio.Queue[ChangeEvent]] = set()
 
@@ -114,6 +119,11 @@ class McpServerCap(
     def name(self) -> str:
         """Return the capability name."""
         return self._name
+
+    @property
+    def tool_prefix(self) -> str:
+        """Return the model-visible tool namespace for this server."""
+        return self._tool_prefix
 
     @property
     def config(self) -> MCPServerConfig:
@@ -242,7 +252,7 @@ class McpServerCap(
             tools = await client.list_tools()
             if not tools:
                 return None
-            from pydantic_ai.toolsets import CombinedToolset, FunctionToolset
+            from pydantic_ai.toolsets import CombinedToolset, FunctionToolset, PrefixedToolset
 
             from wolfharness.tools.tool_wrapping import wrap_tool_for_pydantic_ai
 
@@ -253,7 +263,11 @@ class McpServerCap(
             ]
             if not toolsets:
                 return None
-            return CombinedToolset(toolsets)
+            combined = CombinedToolset(toolsets)
+            prefix = self._tool_prefix
+            if not prefix:
+                return combined
+            return PrefixedToolset(wrapped=combined, prefix=prefix)
 
         return _build_toolset
 
@@ -351,7 +365,7 @@ class McpServerCap(
         return [
             ResourceEntry(
                 uri=str(r.uri),
-                name=r.name,
+                name=r.title or r.name,
                 description=r.description or "",
                 mime_type=r.mimeType if r.mimeType else "",
             )
