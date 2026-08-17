@@ -1119,14 +1119,33 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
         )
 
         tool_capabilities.append(create_approval_bridge_capability(self, input_provider))
-        # 4. MCP servers
+        # 4. MCP servers.
+        #    Top-level (non-ACP) providers are injected directly — their tools
+        #    come from McpServerCap.get_toolset(). ACP providers continue via
+        #    the aggregating provider (Path C). Session-scoped configs (session
+        #    + skill) still use get_capabilities() with global configs excluded.
+        from wolfharness.capabilities.mcp_server_cap import McpServerCap
+
+        pool = self._agent_pool
+        if pool is not None:
+            tool_capabilities.extend(
+                provider for provider in pool.mcp.providers if isinstance(provider, McpServerCap)
+            )
+        # Top-level providers are injected directly above. When the agent
+        # shares the pool's MCPManager (no agent-level MCP servers), its
+        # global configs are already covered by ``pool.mcp.providers`` and
+        # must not be re-added via an MCP capability. But an agent with its
+        # own dedicated MCPManager owns its servers exclusively — those
+        # global configs are NOT in ``pool.mcp.providers`` and must still be
+        # processed (RFC-0058 exclude path only dedups the pool-shared case).
+        shares_pool_mcp = pool is not None and self.mcp is pool.mcp
         mcp_capabilities = await self.mcp.get_capabilities(
-            session_id=run_ctx.session_id if run_ctx else None
+            session_id=run_ctx.session_id if run_ctx else None,
+            exclude_global=shares_pool_mcp,
         )
         tool_capabilities.extend(mcp_capabilities)
         # 5. Skill capabilities — from pool-scoped instances created during __aenter__.
         #    Each SkillManagerCap provides tools and MCP servers.
-        pool = self._agent_pool
         if pool is not None:
             pool_capabilities = pool.skill_capabilities
             if pool_capabilities:
