@@ -1,7 +1,7 @@
 """Example: Knowledge Base MCP server backed by real files.
 
 This demo shows how to build a standalone MCP server that exposes files
-(such as ``intro.md``, ``logo.png``, ``diagram.png``) from the ``kb_data/``
+(such as ``intro.md``, ``logo.png``, ``structure.png``) from the ``kb_data/``
 directory through the MCP Resource protocol. It demonstrates:
 
 1. **Real files on disk** — Markdown documents and PNG images live in ``kb_data/``.
@@ -89,6 +89,24 @@ for _suffix, _mime in _MIME_BY_SUFFIX.items():
 def _mime_for(path: Path) -> str:
     """Return the MIME type for a file, falling back to ``application/octet-stream``."""
     return _mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+
+
+def _resource_description(path: Path, uri: str) -> str:
+    """Return a short human-readable description for a resource.
+
+    Descriptions surface in MCP ``resources/list`` and become the subtitle
+    shown next to a resource in ``@`` mention menus, so they should be
+    succinct and file-type aware.
+    """
+    kind = {
+        ".md": "Markdown document",
+        ".txt": "Text document",
+        ".markdown": "Markdown document",
+        ".png": "PNG image",
+        ".jpg": "JPEG image",
+        ".jpeg": "JPEG image",
+    }.get(path.suffix, "File")
+    return f"{kind} at {uri}"
 
 
 def _kbs_files() -> list[Path]:
@@ -280,6 +298,7 @@ def sync_static_resources() -> bool:
                 is_binary=is_binary,
                 mime_type=_mime_for(path),
                 title=f"{path.stem} ({path.parent.name})",
+                description=_resource_description(path, uri),
                 annotations=mcp_types.Annotations(
                     lastModified=datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat()
                 ),
@@ -341,7 +360,7 @@ def get_image(name: str) -> list[ResourceContent]:
 
     Args:
         name: Image path under the images namespace, without the ``.png`` suffix,
-            e.g. "logo", "diagram".
+            e.g. "logo", "structure".
 
     Raises:
         KeyError: If the image does not exist or resolves outside the images
