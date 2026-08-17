@@ -253,7 +253,7 @@ class MCPClient:
         session = self._client.session
         handler = self._get_message_handler()
         if getattr(session, "_message_handler", None) is not handler:
-            session._message_handler = handler  # type: ignore[attr-defined]
+            session._message_handler = handler
 
     def get_resource_fs(self) -> MCPFileSystem:
         """Get a filesystem for accessing MCP resources."""

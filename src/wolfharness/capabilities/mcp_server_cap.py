@@ -124,7 +124,7 @@ class McpServerCap(
         return self._name
 
     @property
-    def tool_prefix(self) -> str:
+    def tool_prefix(self) -> str | None:
         """Return the model-visible tool namespace for this server."""
         return self._tool_prefix
 
