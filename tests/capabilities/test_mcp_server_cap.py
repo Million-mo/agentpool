@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -115,6 +116,20 @@ class FakeMCPClient:
 
     def convert_tool(self, tool: Any) -> Any:
         return tool
+
+    def set_notification_callbacks(
+        self,
+        *,
+        tool_change_callback: Any = None,
+        prompt_change_callback: Any = None,
+        resource_list_changed_callback: Any = None,
+        resource_updated_callback: Any = None,
+    ) -> None:
+        """Mirror MCPClient.set_notification_callbacks."""
+        self._tool_change_callback = tool_change_callback
+        self._prompt_change_callback = prompt_change_callback
+        self._resource_list_changed_callback = resource_list_changed_callback
+        self._resource_updated_callback = resource_updated_callback
 
     async def trigger_tool_change(self) -> None:
         """Simulate MCP server sending notifications/tools/list_changed."""
@@ -792,7 +807,7 @@ async def test_message_handler_resource_updated_calls_callback_with_uri() -> Non
 @pytest.mark.anyio
 async def test_message_handler_resource_list_changed_no_callback() -> None:
     """on_resource_list_changed does not raise when callback is None."""
-    handler = MCPMessageHandler(client=MagicMock())
+    handler = MCPMessageHandler(client=SimpleNamespace(_resource_list_changed_callback=None))
 
     notification = mcp.types.ResourceListChangedNotification()
     await handler.on_resource_list_changed(notification)
@@ -801,7 +816,7 @@ async def test_message_handler_resource_list_changed_no_callback() -> None:
 @pytest.mark.anyio
 async def test_message_handler_resource_updated_no_callback() -> None:
     """on_resource_updated does not raise when callback is None."""
-    handler = MCPMessageHandler(client=MagicMock())
+    handler = MCPMessageHandler(client=SimpleNamespace(_resource_updated_callback=None))
 
     notification = mcp.types.ResourceUpdatedNotification(
         params=mcp.types.ResourceUpdatedNotificationParams(
