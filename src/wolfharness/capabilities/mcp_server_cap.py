@@ -102,14 +102,17 @@ class McpServerCap(
             name: Optional name override. Defaults to ``config.client_id``.
             client: Optional pre-created ``MCPClient``. When provided,
                 bypasses the session pool and uses this client directly.
-            tool_prefix: Optional model-visible tool namespace derived from
-                the server's ``display_name``. When ``None``, falls back to
-                ``config.display_name``.
+            tool_prefix: Optional model-visible tool namespace for MCP tools.
+                Passed by ``MCPManager`` for POOL-scope servers so prefixed tool
+                names never collide across servers sharing a ``display_name``
+                (RFC-0058). When ``None`` (direct-construction paths such as
+                ``NativeAgentConfig(mcp_servers=[...])``), tools keep their raw
+                MCP names for backward compatibility.
         """
         self._config = config
         self._session_pool = session_pool
         self._name = name or config.client_id
-        self._tool_prefix = tool_prefix or config.display_name
+        self._tool_prefix = tool_prefix
         self._client: MCPClient | None = client
         self._change_queues: set[asyncio.Queue[ChangeEvent]] = set()
 
@@ -220,10 +223,12 @@ class McpServerCap(
                 for q in list(self._change_queues):
                     await q.put(event)
 
-            client._tool_change_callback = _on_tools_changed
-            client._resource_list_changed_callback = _on_resource_list_changed
-            client._resource_updated_callback = _on_resource_updated
-            client._prompt_change_callback = _on_prompts_changed
+            client.set_notification_callbacks(
+                tool_change_callback=_on_tools_changed,
+                resource_list_changed_callback=_on_resource_list_changed,
+                resource_updated_callback=_on_resource_updated,
+                prompt_change_callback=_on_prompts_changed,
+            )
             self._client = client
             return client
 
