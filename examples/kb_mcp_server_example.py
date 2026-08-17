@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+from datetime import UTC, datetime
 import json
 import logging
 import mimetypes
@@ -46,6 +47,8 @@ from fastmcp import FastMCP
 from fastmcp.resources import FileResource
 from fastmcp.resources.base import ResourceContent
 from fastmcp.server.lifespan import Lifespan
+from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
+import mcp.types as mcp_types
 from pydantic import Field
 
 
@@ -55,15 +58,26 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("kb-mcp-demo")
 
-KB_DIR = Path(__file__).parent / "kb_data"
+# Root of the knowledge base on disk. Defaults to ``examples/kb_data/``; the
+# ``--kb-dir`` CLI flag overrides it, which lets tests point the server at a
+# temporary directory. Kept mutable (not ``Final``) so tests can also re-point
+# it before registering resources.
+KB_DIR: Path = Path(__file__).parent / "kb_data"
 
-# Namespace → filesystem directory. The ``kb://`` scheme uses the URI host as a
-# namespace: ``kb://docs/intro.md`` reads ``kb_data/docs/intro.md`` (or, when
-# the directory mirrors the host, ``kb_data/docs/intro.md``).
-_NAMESPACE_DIRS = {
-    "docs": KB_DIR / "docs",
-    "images": KB_DIR / "images",
-}
+
+def _namespace_dirs(kb_dir: Path = KB_DIR) -> dict[str, Path]:
+    """Map URI hosts (``kb://docs``, ``kb://images``) to filesystem dirs.
+
+    The ``kb://`` scheme uses the URI host as a namespace: ``kb://docs/intro.md``
+    reads ``<kb_dir>/docs/intro.md``.
+    """
+    return {
+        "docs": kb_dir / "docs",
+        "images": kb_dir / "images",
+    }
+
+
+_NAMESPACE_DIRS = _namespace_dirs()
 
 # MIME types that ``mimetypes`` does not resolve from a bare filename.
 _MIME_BY_SUFFIX = {".md": "text/markdown"}
@@ -126,11 +140,41 @@ class _KBServer(FastMCP):
 
     A background task re-scans the KB directory every ``scan_interval``
     seconds so newly added files appear in ``resources/list`` (hence in
-    ``@`` mention) without a server restart.
+    ``@`` mention) without a server restart. When the list changes, a
+    ``notifications/resources/list_changed`` broadcast goes to every client
+    session the server has seen (see ``_SessionRegistryMiddleware``).
     """
 
     def __init__(self, scan_interval: float = 5.0, **kwargs: Any) -> None:
         super().__init__(lifespan=Lifespan(_kb_lifespan(scan_interval)), **kwargs)
+        # Auto-register every client session that makes a request so the
+        # scan loop can broadcast list_changed without client cooperation.
+        self.add_middleware(_SessionRegistryMiddleware())
+
+
+class _SessionRegistryMiddleware(Middleware):
+    """Register every client session with the live-session registry.
+
+    FastMCP 3.4.4 has no broadcast API; notifications are per-session. This
+    middleware captures each client's session on inbound requests, so the
+    background scan loop can reach all connected clients without requiring
+    them to call a registration tool first.
+    """
+
+    async def on_message(
+        self,
+        context: MiddlewareContext[Any],
+        call_next: CallNext[Any, Any],
+    ) -> Any:
+        ctx = context.fastmcp_context
+        if ctx is not None:
+            try:
+                session = ctx.session
+            except RuntimeError:
+                session = None
+            if session is not None:
+                _active_sessions.add(session)
+        return await call_next(context)
 
 
 def _kb_lifespan(scan_interval: float):
@@ -151,12 +195,26 @@ async def _scan_loop(interval: float) -> None:
     while True:
         await asyncio.sleep(interval)
         try:
-            sync_static_resources()
+            if sync_static_resources():
+                await _broadcast_resources_list_changed()
         except Exception:
             logger.warning("kb_data/ sync failed; will retry next scan", exc_info=True)
 
 
 _registered_uris: set[str] = set()
+
+# --- Dynamic change notification (best-practice demo) ------------------------
+#
+# FastMCP (3.4.4) has no FastMCP-level broadcast API: notifications are
+# per-session, sent through ``Context.send_notification()``. Since the
+# background scan loop created inside the lifespan only holds the ``FastMCP``
+# server (not any session), we keep a registry of live client sessions here.
+# ``_SessionRegistryMiddleware`` fills it automatically on every inbound
+# request; the scan loop iterates it when ``resources/list`` changes and
+# pushes ``notifications/resources/list_changed`` to each registered client.
+
+_active_sessions: set[Any] = set()
+_session_lock = asyncio.Lock()
 
 
 def _remove_resource(uri: str) -> None:
@@ -174,18 +232,42 @@ def _remove_resource(uri: str) -> None:
         return
 
 
-def sync_static_resources() -> int:
+async def _broadcast_resources_list_changed() -> None:
+    """Push ``notifications/resources/list_changed`` to registered clients.
+
+    Iterates the registry of live sessions (filled automatically by
+    ``_SessionRegistryMiddleware``) and sends the notification to each
+    still-connected one, dropping dead sessions as they are found.
+    """
+    async with _session_lock:
+        snapshot = list(_active_sessions)
+    for session in snapshot:
+        try:
+            await session.send_notification(
+                mcp_types.ServerNotification(mcp_types.ResourceListChangedNotification())
+            )
+        except (ConnectionError, OSError, ValueError):
+            # Client disconnected mid-broadcast: drop it so the next scan
+            # doesn't try again. This is deliberate best-effort broadcasting.
+            async with _session_lock:
+                _active_sessions.discard(session)
+
+
+def sync_static_resources() -> bool:
     """Sync the static resource list with the KB directory.
 
-    Returns the number of resources now registered. Scans ``kb_data/`` and
-    adds/removes ``FileResource`` entries so ``resources/list`` reflects the
-    current directory contents without restarting the server. Deleted or
-    renamed files are removed; new files are added.
+    Returns ``True`` if the resource set changed (added or removed). Scans
+    ``kb_data/`` and adds/removes ``FileResource`` entries so
+    ``resources/list`` reflects the current directory contents without
+    restarting the server. Deleted or renamed files are removed; new files
+    are added.
     """
+    changed = False
     current = {_uri_for(path) for path in _kbs_files()}
     for uri in _registered_uris - current:
         _remove_resource(uri)
         _registered_uris.discard(uri)
+        changed = True
     for path in _kbs_files():
         uri = _uri_for(path)
         if uri in _registered_uris:
@@ -198,10 +280,14 @@ def sync_static_resources() -> int:
                 is_binary=is_binary,
                 mime_type=_mime_for(path),
                 title=f"{path.stem} ({path.parent.name})",
+                annotations=mcp_types.Annotations(
+                    lastModified=datetime.fromtimestamp(path.stat().st_mtime, UTC).isoformat()
+                ),
             )
         )
         _registered_uris.add(uri)
-    return len(_registered_uris)
+        changed = True
+    return changed
 
 
 mcp = _KBServer(
@@ -223,7 +309,12 @@ mcp = _KBServer(
 # --- Resource templates (dynamic URIs) ---------------------------------------
 
 
-@mcp.resource("kb://docs/{name*}.md", mime_type="text/markdown")
+@mcp.resource(
+    "kb://docs/{name*}.md",
+    name="Document",
+    description="A Markdown document in the docs namespace",
+    mime_type="text/markdown",
+)
 def get_document(name: str) -> list[ResourceContent]:
     """Read a Markdown document from the knowledge base.
 
@@ -239,7 +330,12 @@ def get_document(name: str) -> list[ResourceContent]:
     return [ResourceContent(content, mime_type="text/markdown")]
 
 
-@mcp.resource("kb://images/{name*}.png", mime_type="image/png")
+@mcp.resource(
+    "kb://images/{name*}.png",
+    name="Image",
+    description="A PNG image in the images namespace",
+    mime_type="image/png",
+)
 def get_image(name: str) -> list[ResourceContent]:
     """Read a PNG image from the knowledge base.
 
@@ -255,7 +351,33 @@ def get_image(name: str) -> list[ResourceContent]:
     return [ResourceContent(content, mime_type="image/png")]
 
 
-@mcp.resource("kb://search{?q}")
+@mcp.resource(
+    "kb://docs/",
+    name="Docs index",
+    description="JSON listing of all documents in the docs namespace",
+    mime_type="application/json",
+)
+def list_docs() -> str:
+    """Return a JSON listing of every document under ``kb://docs/``.
+
+    Directory reads return a single JSON listing content (not one content per
+    file), because the MCP spec intends each ``contents[].uri`` to identify a
+    concrete resource. Clients then read each file through the
+    ``kb://docs/{name*}.md`` template.
+    """
+    files = [
+        {"uri": _uri_for(p), "name": p.name, "size": p.stat().st_size}
+        for p in _kbs_files()
+        if p.parent == _NAMESPACE_DIRS["docs"]
+    ]
+    return json.dumps({"namespace": "docs", "files": files}, indent=2)
+
+
+@mcp.resource(
+    "kb://search{?q}",
+    name="Search",
+    description="Search the knowledge base by query string",
+)
 def search_resource(q: str = "") -> str:
     """Search the knowledge base, returning matches as a JSON snippet list.
 
@@ -361,7 +483,18 @@ def main() -> None:
         default=5.0,
         help="Seconds between kb_data/ re-scans for dynamic resources/list (default: 5.0)",
     )
+    parser.add_argument(
+        "--kb-dir",
+        type=Path,
+        default=None,
+        help="Knowledge base directory (defaults to examples/kb_data)",
+    )
     args = parser.parse_args()
+
+    if args.kb_dir is not None:
+        global KB_DIR, _NAMESPACE_DIRS  # noqa: PLW0603
+        KB_DIR = args.kb_dir
+        _NAMESPACE_DIRS = _namespace_dirs(KB_DIR)
 
     print(f"Starting KB MCP Server (transport={args.transport})")
     print(f"  KB directory: {KB_DIR}")
