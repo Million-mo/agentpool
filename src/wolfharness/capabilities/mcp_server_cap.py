@@ -259,9 +259,19 @@ class McpServerCap(
                 return None
             from pydantic_ai.toolsets import CombinedToolset, FunctionToolset, PrefixedToolset
 
+            from wolfharness.capabilities.tool_schema_overlap_config import (
+                ORIGINAL_TOOL_NAME_METADATA_KEY,
+                SERVER_NAME_METADATA_KEY,
+            )
             from wolfharness.tools.tool_wrapping import wrap_tool_for_pydantic_ai
 
             converted = [client.convert_tool(t) for t in tools]
+            # Stamp source identity so capability-level toolset wrappers can
+            # resolve each tool back to its server and raw MCP name without
+            # parsing (possibly prefixed) tool names.
+            for raw_tool, tool in zip(tools, converted, strict=True):
+                tool.metadata[SERVER_NAME_METADATA_KEY] = self._name
+                tool.metadata[ORIGINAL_TOOL_NAME_METADATA_KEY] = raw_tool.name
             pydantic_tools = [wrap_tool_for_pydantic_ai(tool) for tool in converted]
             toolsets: list[AbstractToolset[Any]] = [
                 FunctionToolset[Any]([tool]) for tool in pydantic_tools
