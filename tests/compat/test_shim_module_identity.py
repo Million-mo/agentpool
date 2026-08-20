@@ -24,6 +24,7 @@ import sys
 
 import pytest
 
+
 pytestmark = pytest.mark.unit
 
 _TARGET_ALIAS_PAIRS = [

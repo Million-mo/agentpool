@@ -416,6 +416,7 @@ async def test_dict_config_normalized_at_init() -> None:
 async def test_dict_config_ensure_client_creates_mcpclient() -> None:
     """_ensure_client() works with dict config (normalized at init)."""
     from unittest.mock import AsyncMock, patch
+
     from wolfharness_config.mcp_server import StreamableHTTPMCPServerConfig
 
     raw_dict = {

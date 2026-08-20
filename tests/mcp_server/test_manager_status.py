@@ -473,8 +473,10 @@ async def test_agent_mcp_info_disconnected_config_defined_cap() -> None:
 
 
 async def test_agent_mcp_info_mcpmanager_takes_precedence() -> None:
-    """When both MCPManager and _all_capabilities report the same display_name,
-    the MCPManager result takes precedence (it was already in the result dict)."""
+    """When MCPManager and _all_capabilities report the same display_name.
+
+    The MCPManager result takes precedence (it was already in the result dict).
+    """
     agent_mcp = await _mock_server_status({
         "shared": MCPServerStatus(name="shared", status="connected", server_name="from_manager"),
     })
