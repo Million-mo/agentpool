@@ -63,7 +63,6 @@ if TYPE_CHECKING:
     from wolfharness.common_types import (
         AgentName,
         AnyEventHandlerType,
-        MCPServerStatus,
         ProcessorCallback,
         PromptCompatible,
         StrPath,
@@ -577,20 +576,18 @@ class BaseAgent[TDeps = None, TResult = str](MessageNode[TDeps, TResult]):
             # Only check cap.client (no lazy connection) to avoid
             # triggering _ensure_client() during status reporting.
             if cap.client is not None:
-                status = "connected"
                 tool_entries = await cap.list_tools()
                 tools = [t.name for t in tool_entries]
                 info = cap.client.server_info
                 server_name = info.get("name") if info else None
                 server_version = info.get("version") if info else None
             else:
-                status = "disconnected"
                 tools = []
                 server_name = None
                 server_version = None
             result[display_name] = MCPServerStatus(
                 name=display_name,
-                status=status,
+                status="connected" if cap.client is not None else "disconnected",
                 display_name=display_name,
                 server_type=cap.config.type,
                 server_name=server_name,

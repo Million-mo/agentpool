@@ -84,6 +84,8 @@ class McpServerCap(
         - ``ChangeObservable``: Change events for tool/resource list changes
     """
 
+    _config: MCPServerConfig
+
     def __init__(
         self,
         config: MCPServerConfig,
