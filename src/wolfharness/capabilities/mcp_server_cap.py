@@ -98,7 +98,9 @@ class McpServerCap(
         Args:
             config: MCP server configuration.
             session_pool: Pool for obtaining a shared ``MCPClient``.
-                Required if ``client`` is not provided.
+                When omitted and ``client`` is also omitted, a direct
+                ``MCPClient`` is created from ``config`` on first use
+                (see ``_ensure_client()``).
             name: Optional name override. Defaults to ``config.client_id``.
             client: Optional pre-created ``MCPClient``. When provided,
                 bypasses the session pool and uses this client directly.
@@ -109,9 +111,21 @@ class McpServerCap(
                 ``NativeAgentConfig(mcp_servers=[...])``), tools keep their raw
                 MCP names for backward compatibility.
         """
-        self._config = config
+        # Normalize raw dict config to an MCPServerConfig model.
+        # EntryPointCapabilityConfig.build() passes the raw dict from YAML
+        # args directly (capabilities.py:395), so we must validate here.
+        # MCPServerConfig is a pydantic TypeAlias (Annotated union), so we
+        # use pydantic.TypeAdapter for validation.
+        if isinstance(config, dict):
+            from pydantic import TypeAdapter
+
+            from wolfharness_config.mcp_server import MCPServerConfig as _MCPServerConfig
+
+            self._config = TypeAdapter(_MCPServerConfig).validate_python(config)
+        else:
+            self._config = config
         self._session_pool = session_pool
-        self._name = name or config.client_id
+        self._name = name or self._config.client_id
         self._tool_prefix = tool_prefix
         self._client: MCPClient | None = client
         self._change_queues: set[asyncio.Queue[ChangeEvent]] = set()
@@ -141,27 +155,44 @@ class McpServerCap(
     # ---- Lazy client initialization ----
 
     async def _ensure_client(self) -> MCPClient:
-        """Lazily obtain and cache the MCPClient from the session pool.
+        """Lazily obtain and cache the MCPClient.
 
-        Retries with exponential backoff (3 attempts, base delay 1s)
-        on connection failures. Retry logic migrated from
-        ``SkillMcpManager`` (Phase 2, task 2.6b).
+        Connection strategy (in priority order):
+        1. If a cached client exists, return it.
+        2. If a session pool is available, connect via the pool with
+           exponential backoff retry (3 attempts, base delay 1s).
+        3. Otherwise, create a direct ``MCPClient`` from config — this
+           mirrors how ``MCPManager.setup_server()`` creates clients for
+           pool-level providers (manager.py:428-439). This fallback
+           supports config-defined ``type: mcp`` capabilities that don't
+           have a session pool.
 
         Returns:
             The cached ``MCPClient`` instance.
 
         Raises:
-            RuntimeError: If the session pool is ``None`` or connection
-                fails after all retries.
+            RuntimeError: If connection fails after all retries.
         """
         if self._client is not None:
             return self._client
 
-        if self._session_pool is None:
-            raise RuntimeError(
-                f"Cannot connect MCP server {self._name!r}: no session pool configured"
-            )
+        if self._session_pool is not None:
+            return await self._connect_via_pool()
 
+        # No session pool and no pre-created client — create a direct
+        # MCPClient from config. This mirrors how
+        # MCPManager.setup_server() creates the client for pool-level
+        # providers (manager.py:428-439).
+        from wolfharness.mcp_server.client import MCPClient
+
+        client = MCPClient(config=self._config)
+        await client.__aenter__()
+        self._client = client
+        return client
+
+    async def _connect_via_pool(self) -> MCPClient:
+        """Connect using the session pool with retry logic."""
+        assert self._session_pool is not None
         last_error: Exception | None = None
         for attempt in range(1, _DEFAULT_MAX_RETRIES + 1):
             try:
