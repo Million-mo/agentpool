@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import TYPE_CHECKING, Any
 
 from pydantic_ai.capabilities import AbstractCapability
@@ -58,6 +59,10 @@ logger = logging.getLogger(__name__)
 # Retry constants (migrated from SkillMcpManager).
 _DEFAULT_MAX_RETRIES = 3
 _RETRY_BASE_DELAY = 1  # seconds
+
+# Cooldown after a failed connection attempt: a dead server is not retried
+# for this long, so every listing call does not re-pay the retry backoff.
+_CONNECT_COOLDOWN = 30.0  # seconds
 
 
 class McpServerCap(
@@ -131,6 +136,9 @@ class McpServerCap(
         self._tool_prefix = tool_prefix
         self._client: MCPClient | None = client
         self._change_queues: set[asyncio.Queue[ChangeEvent]] = set()
+        self._resources_cache: list[ResourceEntry] | None = None
+        self._resource_templates_cache: list[ResourceTemplateEntry] | None = None
+        self._connect_cooldown_until: float = 0.0
 
     # ---- Properties ----
 
@@ -162,7 +170,8 @@ class McpServerCap(
         Connection strategy (in priority order):
         1. If a cached client exists, return it.
         2. If a session pool is available, connect via the pool with
-           exponential backoff retry (3 attempts, base delay 1s).
+           exponential backoff retry (3 attempts, base delay 1s). A
+           30-second cooldown is enforced after exhausted retries.
         3. Otherwise, create a direct ``MCPClient`` from config — this
            mirrors how ``MCPManager.setup_server()`` creates clients for
            pool-level providers (manager.py:428-439). This fallback
@@ -173,7 +182,8 @@ class McpServerCap(
             The cached ``MCPClient`` instance.
 
         Raises:
-            RuntimeError: If connection fails after all retries.
+            RuntimeError: If connection is in cooldown or fails after all
+                retries.
         """
         if self._client is not None:
             return self._client
@@ -193,8 +203,20 @@ class McpServerCap(
         return client
 
     async def _connect_via_pool(self) -> MCPClient:
-        """Connect using the session pool with retry logic."""
+        """Connect using the session pool with retry logic.
+
+        Enforces a cooldown period after exhausted retries to avoid
+        hammering a failing server on every tool access.
+        """
         assert self._session_pool is not None
+
+        now = time.monotonic()
+        if now < self._connect_cooldown_until:
+            raise RuntimeError(
+                f"MCP server {self._name!r} connection is in cooldown "
+                f"({self._connect_cooldown_until - now:.0f}s remaining)"
+            )
+
         last_error: Exception | None = None
         for attempt in range(1, _DEFAULT_MAX_RETRIES + 1):
             try:
@@ -230,6 +252,8 @@ class McpServerCap(
                     await q.put(event)
 
             async def _on_resource_list_changed() -> None:
+                self._resources_cache = None
+                self._resource_templates_cache = None
                 event = ChangeEvent(
                     capability_name=self._name,
                     kind="resource_list_changed",
@@ -262,9 +286,16 @@ class McpServerCap(
                 resource_updated_callback=_on_resource_updated,
                 prompt_change_callback=_on_prompts_changed,
             )
+            # A reconnected server is a different process state — any cached
+            # listings belong to the old connection and are stale. Many
+            # servers never send resources/list_changed, so failures must be
+            # the invalidation trigger, not the notification.
+            self._resources_cache = None
+            self._resource_templates_cache = None
             self._client = client
             return client
 
+        self._connect_cooldown_until = time.monotonic() + _CONNECT_COOLDOWN
         raise RuntimeError(
             f"Failed to connect MCP server {self._name!r} after {_DEFAULT_MAX_RETRIES} attempts"
         ) from last_error
@@ -405,12 +436,16 @@ class McpServerCap(
     async def list_resources(self) -> Sequence[ResourceEntry]:
         """List available MCP resources.
 
-        Returns:
-            Sequence of ``ResourceEntry`` descriptors.
+        Results are cached and invalidated by ``resources/list_changed``
+        notifications. ponytail: no TTL — relies on the server sending the
+        change notification per protocol. Add a TTL if a server never
+        notifies but its resource list changes.
         """
+        if self._resources_cache is not None:
+            return self._resources_cache
         client = await self._ensure_client()
         resources = await client.list_resources()
-        return [
+        self._resources_cache = [
             ResourceEntry(
                 uri=str(r.uri),
                 name=r.title or r.name,
@@ -419,6 +454,7 @@ class McpServerCap(
             )
             for r in resources
         ]
+        return self._resources_cache
 
     async def read_resource(
         self, uri: str
@@ -475,9 +511,8 @@ class McpServerCap(
         Returns:
             ``True`` if the resource exists, ``False`` otherwise.
         """
-        client = await self._ensure_client()
         try:
-            resources = await client.list_resources()
+            resources = await self.list_resources()
         except Exception:  # noqa: BLE001
             return False
         return any(str(r.uri) == uri for r in resources)
@@ -487,12 +522,14 @@ class McpServerCap(
     async def list_resource_templates(self) -> Sequence[ResourceTemplateEntry]:
         """List available MCP resource templates.
 
-        Returns:
-            Sequence of ``ResourceTemplateEntry`` descriptors.
+        Cached like ``list_resources``, invalidated by the same
+        ``resources/list_changed`` notification.
         """
+        if self._resource_templates_cache is not None:
+            return self._resource_templates_cache
         client = await self._ensure_client()
         templates = await client.list_resource_templates()
-        return [
+        self._resource_templates_cache = [
             ResourceTemplateEntry(
                 uri_template=str(t.uriTemplate),
                 name=t.name or "",
@@ -503,6 +540,7 @@ class McpServerCap(
             )
             for t in templates
         ]
+        return self._resource_templates_cache
 
     async def complete_resource_template(
         self,
@@ -733,4 +771,6 @@ class McpServerCap(
         if self._session_pool is None and self._client is not None:
             await self._client.__aexit__(exc_type, exc_val, exc_tb)
         self._client = None
+        self._resources_cache = None
+        self._resource_templates_cache = None
         self._change_queues.clear()
