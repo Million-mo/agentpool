@@ -335,6 +335,12 @@ class McpServerCap(
             tools = await client.list_tools()
             if not tools:
                 return None
+            # Apply enabled_tools/disabled_tools filtering from config.
+            # _config is a BaseMCPServerConfig (or subclass) which provides
+            # is_tool_allowed() and needs_tool_filtering().
+            config = self._config
+            if config.needs_tool_filtering():
+                tools = [t for t in tools if config.is_tool_allowed(t.name)]
             from pydantic_ai.toolsets import CombinedToolset, FunctionToolset, PrefixedToolset
 
             from wolfharness.capabilities.tool_schema_overlap_config import (

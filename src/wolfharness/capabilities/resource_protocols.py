@@ -395,6 +395,46 @@ class ToolAccess(Protocol):
         ...
 
 
+class UriSchemeMismatchError(ValueError):
+    """Raised when a provider receives a URI whose scheme it does not own.
+
+    Attributes:
+        scheme: The URI scheme that was not recognized.
+        provider_name: The name of the provider that rejected the URI.
+        uri: The full URI that was rejected.
+    """
+
+    def __init__(self, scheme: str, provider_name: str, uri: str) -> None:
+        self.scheme = scheme
+        self.provider_name = provider_name
+        self.uri = uri
+        super().__init__(
+            f"Provider '{provider_name}' does not own URI scheme '{scheme}' "
+            f"for URI: {uri}"
+        )
+
+
+class UriSchemeConflictError(ValueError):
+    """Raised when two providers claim the same URI scheme.
+
+    Attributes:
+        scheme: The URI scheme with conflicting claims.
+        existing_provider: The provider already registered for this scheme.
+        conflicting_provider: The provider attempting to register.
+    """
+
+    def __init__(
+        self, scheme: str, existing_provider: str, conflicting_provider: str
+    ) -> None:
+        self.scheme = scheme
+        self.existing_provider = existing_provider
+        self.conflicting_provider = conflicting_provider
+        super().__init__(
+            f"URI scheme '{scheme}' is already claimed by "
+            f"'{existing_provider}'; cannot register '{conflicting_provider}'"
+        )
+
+
 @runtime_checkable
 class ResourceAccess(Protocol):
     """Protocol for accessing MCP resources.
@@ -403,6 +443,17 @@ class ResourceAccess(Protocol):
     Capabilities implementing this protocol provide resource listing, reading,
     and existence checking.
     """
+
+    @property
+    def owned_schemes(self) -> frozenset[str]:
+        """URI schemes this provider authoritatively handles.
+
+        Returns:
+            ``frozenset`` of URI scheme strings (e.g., ``{"viking"}``).
+            An empty set (default) means the provider handles opaque
+            URIs and is consulted for unregistered schemes.
+        """
+        return frozenset()
 
     async def list_resources(self) -> Sequence[ResourceEntry]:
         """List available MCP resources.

@@ -206,6 +206,15 @@ class AgentFactory:
             agent_scope = Scope(level=ScopeLevel.AGENT, agent_name=agent_name)
             for cap in config_caps:
                 self._pool.extension_registry.register(cap, agent_scope)
+                # Register config-defined capability's owned schemes in the
+                # URI scheme registry (e.g. VikingCapability owns "viking").
+                owned: frozenset[str] = getattr(cap, "owned_schemes", frozenset())
+                if owned:
+                    self._pool.extension_registry.scheme_registry.register(
+                        provider_name=type(cap).__name__,
+                        schemes=owned,
+                        provider=cap,
+                    )
 
     @staticmethod
     def _build_agent_descriptions(

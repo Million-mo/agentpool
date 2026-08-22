@@ -43,6 +43,10 @@ pytestmark = pytest.mark.unit
 class FakeResourceAccess:
     """Minimal ResourceAccess implementation for testing."""
 
+    @property
+    def owned_schemes(self) -> frozenset[str]:
+        return frozenset()
+
     def __init__(
         self,
         *,

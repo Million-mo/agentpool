@@ -15,6 +15,7 @@ from pydantic_ai import BinaryContent
 from wolfharness.capabilities.resource_protocols import (
     BlobResourceContent,
     TextResourceContent,
+    UriSchemeMismatchError,
 )
 from wolfharness.skills.uri_resolver import ResolvedSkillURI, _name_alternatives
 
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
     from pydantic_ai.messages import UserContent
 
     from wolfharness.capabilities.resource_protocols import ResourceAccess, SkillResource
+    from wolfharness.capabilities.uri_scheme_registry import UriSchemeRegistry
 
 
 def _truncate_text(text: str, max_chars: int) -> str:
@@ -131,6 +133,7 @@ async def resolve_resource_content(
     *,
     max_text_chars: int = 10_000,
     client_name: str | None = None,
+    scheme_registry: UriSchemeRegistry | None = None,
 ) -> list[UserContent] | None:
     """Resolve a resource URI and return its content as ``UserContent`` items.
 
@@ -140,12 +143,19 @@ async def resolve_resource_content(
           from the skill's filesystem directory
         - Other URIs → ``ResourceAccess`` providers (``read_resource()``)
 
+    When ``scheme_registry`` is provided, URIs with a registered scheme are
+    routed directly to the authoritative provider (deterministic, O(1)).
+    Unregistered schemes fall back to opaque providers (empty ``owned_schemes``).
+    When ``scheme_registry`` is ``None``, falls back to the legacy iteration
+    over all providers.
+
     Args:
         uri: The resource URI to resolve.
         resource_caps: List of ``ResourceAccess`` providers to query for non-skill URIs.
         skill_caps: List of ``SkillResource`` providers to query for ``skill://`` URIs.
         max_text_chars: Maximum text characters before truncation.
         client_name: Optional exact MCP server identifier for host-injected resources.
+        scheme_registry: Optional ``UriSchemeRegistry`` for scheme-based routing.
 
     Returns:
         A list of ``UserContent`` items (strings and/or ``BinaryContent``) if the
@@ -193,7 +203,7 @@ async def resolve_resource_content(
             return [f'<resource uri="{uri}">\n{truncated}\n</resource>']
         return None
 
-    # ---- Other URI schemes → ResourceAccess providers ----
+    # ---- Base provider filtering ----
     # A connected MCP capability can still provide tools when its initialize
     # handshake explicitly omitted ``resources``.  Keep that server out of
     # Host ResourceSource routing while leaving generic legacy providers
@@ -203,6 +213,8 @@ async def resolve_resource_content(
         for resource_cap in resource_caps
         if getattr(resource_cap, "resources_supported", None) is not False
     ]
+
+    # ---- client_name filtering ----
     if client_name is not None:
         identified_caps = [
             resource_cap
@@ -218,6 +230,49 @@ async def resolve_resource_content(
             if not selected_caps:
                 return None
 
+    # ---- Scheme-based routing (via UriSchemeRegistry) ----
+    from urllib.parse import urlparse
+
+    parsed = urlparse(uri)
+    scheme = parsed.scheme
+
+    if scheme and scheme_registry is not None:
+        provider = scheme_registry.lookup(scheme)
+        if provider is not None:
+            # Route directly to the authoritative provider for this scheme.
+            # If client_name is set, verify the provider is in selected_caps.
+            if client_name is None or provider in selected_caps:
+                try:
+                    contents = await provider.read_resource(uri)
+                except UriSchemeMismatchError:
+                    logfire.warning(
+                        "Provider '{name}' rejected URI '{uri}' (scheme mismatch)",
+                        name=getattr(provider, "server_name", type(provider).__name__),
+                        uri=uri,
+                    )
+                    return None
+                except Exception:  # noqa: BLE001
+                    logfire.exception(
+                        "Failed to read resource '{uri}' from {cap}",
+                        uri=uri,
+                        cap=type(provider).__name__,
+                    )
+                    return None
+                if contents:
+                    return _convert_resource_parts(uri, contents, max_text_chars)
+                return None
+
+    # ---- Fallback for unregistered schemes ----
+    # If the URI has a scheme but no registered owner, try only opaque
+    # providers (those with empty owned_schemes).  If the URI has no scheme
+    # at all, try all providers (backward-compatible behavior).
+    if scheme:
+        selected_caps = [
+            cap for cap in selected_caps
+            if not cap.owned_schemes
+        ]
+
+    # ---- Legacy iteration over remaining providers ----
     for resource_cap in selected_caps:
         try:
             contents = await resource_cap.read_resource(uri)
@@ -232,19 +287,37 @@ async def resolve_resource_content(
             continue
         if not contents:
             continue
-
-        parts: list[UserContent] = []
-        for c in contents:
-            if isinstance(c, TextResourceContent):
-                truncated = _truncate_text(c.text, max_text_chars)
-                parts.append(f'<resource uri="{uri}">\n{truncated}\n</resource>')
-            elif isinstance(c, BlobResourceContent):
-                decoded = base64.b64decode(c.blob)
-                media_type = c.mime_type or "application/octet-stream"
-                parts.append(f'<resource uri="{uri}">\n')
-                parts.append(BinaryContent(data=decoded, media_type=media_type))
-                parts.append("\n</resource>")
+        parts = _convert_resource_parts(uri, contents, max_text_chars)
         if parts:
             return parts
 
     return None
+
+
+def _convert_resource_parts(
+    uri: str,
+    contents: list[TextResourceContent | BlobResourceContent],
+    max_text_chars: int,
+) -> list[UserContent] | None:
+    """Convert resource content blocks to ``UserContent`` items.
+
+    Args:
+        uri: The resource URI (for attribution in text wrappers).
+        contents: List of resource content blocks.
+        max_text_chars: Maximum text characters before truncation.
+
+    Returns:
+        A list of ``UserContent`` items, or ``None`` if empty.
+    """
+    parts: list[UserContent] = []
+    for c in contents:
+        if isinstance(c, TextResourceContent):
+            truncated = _truncate_text(c.text, max_text_chars)
+            parts.append(f'<resource uri="{uri}">\n{truncated}\n</resource>')
+        elif isinstance(c, BlobResourceContent):
+            decoded = base64.b64decode(c.blob)
+            media_type = c.mime_type or "application/octet-stream"
+            parts.append(f'<resource uri="{uri}">\n')
+            parts.append(BinaryContent(data=decoded, media_type=media_type))
+            parts.append("\n</resource>")
+    return parts or None

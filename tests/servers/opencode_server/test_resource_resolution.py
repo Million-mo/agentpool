@@ -47,6 +47,10 @@ class FakeResourceAccess:
     protocol: ``list_resources``, ``read_resource``, ``resource_exists``.
     """
 
+    @property
+    def owned_schemes(self) -> frozenset[str]:
+        return frozenset()
+
     def __init__(
         self,
         read_result: list[TextResourceContent | BlobResourceContent] | None = None,

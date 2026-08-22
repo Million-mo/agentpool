@@ -916,6 +916,8 @@ class ResourceCapability(AbstractCapability[AgentDepsT]):
             return_exceptions=True,
         )
 
+        # Aggregate, deduplicate by URI, and identify sources.
+        seen_uris: set[str] = set()
         source_entries: list[tuple[str, ResourceEntry]] = []
         for cap, result in zip(provider_caps, gathered, strict=True):
             if isinstance(result, BaseException):
@@ -924,8 +926,27 @@ class ResourceCapability(AbstractCapability[AgentDepsT]):
                     source=type(cap).__name__,
                 )
                 continue
-            source = type(cap).__name__
-            source_entries.extend((source, entry) for entry in result)
+            # Use server_name if available, otherwise fall back to the
+            # first owned scheme or the class name.
+            source = (
+                getattr(cap, "server_name", None)
+                or (
+                    next(iter(cap.owned_schemes))
+                    if cap.owned_schemes
+                    else ""
+                )
+                or type(cap).__name__
+            )
+            for entry in result:
+                if entry.uri in seen_uris:
+                    logfire.warning(
+                        "Duplicate resource URI '{uri}' from {source} (skipped)",
+                        uri=entry.uri,
+                        source=source,
+                    )
+                    continue
+                seen_uris.add(entry.uri)
+                source_entries.append((source, entry))
 
         total = len(source_entries)
         page = source_entries[offset : offset + limit]
@@ -986,7 +1007,9 @@ class ResourceCapability(AbstractCapability[AgentDepsT]):
         resource_caps = registry.get_resource_access(scope)
         skill_caps = registry.get_skill_resources(scope)
 
-        content = await resolve_resource_content(uri, resource_caps, skill_caps)
+        content = await resolve_resource_content(
+                uri, resource_caps, skill_caps, scheme_registry=registry.scheme_registry
+            )
         if content is None:
             return ToolReturn(return_value=f"Resource not found: {uri}")
 
