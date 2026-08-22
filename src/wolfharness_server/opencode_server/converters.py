@@ -168,7 +168,12 @@ async def _resolve_resource(
     )
     if content is None:
         logger.warning("Resource not found", client_name=source.client_name, uri=source.uri)
-    return content
+        return None
+
+    # Prepend the server source so the agent knows which MCP server to use
+    # for follow-up operations on URIs in this resource content.
+    header = f"[Resource from {source.client_name} server] {source.uri}"
+    return [header, *content]
 
 
 async def extract_user_prompt_from_parts(

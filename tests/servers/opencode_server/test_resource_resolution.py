@@ -510,12 +510,13 @@ async def test_extract_user_prompt_with_binary_resource() -> None:
 
     result = await extract_user_prompt_from_parts([part], "test-session", agent=agent)
     result_list = list(result)
-    assert len(result_list) == 3
-    assert result_list[0] == '<resource uri="viking://img.png">\n'
-    assert isinstance(result_list[1], BinaryContent)
-    assert result_list[1].data == b"img"
-    assert result_list[1].media_type == "image/png"
-    assert result_list[2] == "\n</resource>"
+    assert len(result_list) == 4
+    assert result_list[0] == "[Resource from viking server] viking://img.png"
+    assert result_list[1] == '<resource uri="viking://img.png">\n'
+    assert isinstance(result_list[2], BinaryContent)
+    assert result_list[2].data == b"img"
+    assert result_list[2].media_type == "image/png"
+    assert result_list[3] == "\n</resource>"
 
 
 async def test_extract_user_prompt_resource_no_agent() -> None:
@@ -572,11 +573,12 @@ async def test_extract_user_prompt_mixed_parts() -> None:
         [text_part, resource_part, agent_part], "test-session", agent=agent
     )
     result_list = list(result)
-    # 1 text + 1 resource (XML-wrapped) + 1 agent instruction
-    assert len(result_list) == 3
+    # 1 text + 1 header + 1 resource (XML-wrapped) + 1 agent instruction
+    assert len(result_list) == 4
     assert result_list[0] == "prefix text"
-    assert result_list[1] == '<resource uri="viking://doc">\nresource content\n</resource>'
-    assert "researcher" in result_list[2]
+    assert result_list[1] == "[Resource from viking server] viking://doc"
+    assert result_list[2] == '<resource uri="viking://doc">\nresource content\n</resource>'
+    assert "researcher" in result_list[3]
 
 
 # =============================================================================
@@ -678,9 +680,10 @@ async def test_resolve_resource_timing_bug() -> None:
         result = await extract_user_prompt_from_parts([part], "test-session", agent=agent)
         result_list = list(result)
 
-        # Should resolve the resource content — not drop it silently.
-        assert len(result_list) == 1
-        assert result_list[0] == '<resource uri="test://doc.md">\nhello world\n</resource>'
+        # Should prepend a server-source header and resolve the resource content.
+        assert len(result_list) == 2
+        assert result_list[0] == "[Resource from test server] test://doc.md"
+        assert result_list[1] == '<resource uri="test://doc.md">\nhello world\n</resource>'
 
 
 # =============================================================================
@@ -758,8 +761,9 @@ async def test_e2e_at_mention_resolves_resource() -> None:
         result = await extract_user_prompt_from_parts([part], "test-session", agent=agent)
         result_list = list(result)
 
-        assert len(result_list) == 1
-        assert result_list[0] == '<resource uri="test://doc.md">\nhello world\n</resource>'
+        assert len(result_list) == 2
+        assert result_list[0] == "[Resource from test server] test://doc.md"
+        assert result_list[1] == '<resource uri="test://doc.md">\nhello world\n</resource>'
 
 
 async def test_e2e_at_mention_wrong_uri_returns_empty() -> None:
@@ -896,8 +900,9 @@ async def test_e2e_skill_resource_resolution() -> None:
         result = await extract_user_prompt_from_parts([part], "test-session", agent=agent)
         result_list = list(result)
 
-        assert len(result_list) == 1
-        assert "skill body" in result_list[0]
+        assert len(result_list) == 2
+        assert result_list[0] == "[Resource from test server] skill://test-skill"
+        assert "skill body" in result_list[1]
 
 
 # =============================================================================
