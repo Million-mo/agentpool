@@ -239,9 +239,10 @@ async def resolve_resource_content(
 
     # ---- client_name filtering ----
     if client_name is not None:
-        selected_caps = _filter_by_client_name(resource_caps, client_name)
-        if selected_caps is None:
+        filtered = _filter_by_client_name(selected_caps, client_name)
+        if filtered is None:
             return None
+        selected_caps = filtered
 
     # ---- Scheme-based routing (via UriSchemeRegistry) ----
     from urllib.parse import urlparse
