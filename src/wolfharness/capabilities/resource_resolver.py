@@ -139,7 +139,7 @@ def _filter_by_client_name(
         if getattr(resource_cap, "server_name", None) is not None
     ]
     if not identified_caps:
-        return None
+        return resource_caps
     selected_caps = [
         resource_cap
         for resource_cap in identified_caps
