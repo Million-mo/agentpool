@@ -148,6 +148,67 @@ def _filter_by_client_name(
     return selected_caps or None
 
 
+async def _resolve_skill_uri(
+    uri: str,
+    skill_caps: list[SkillResource],
+    max_text_chars: int,
+) -> list[UserContent] | None:
+    """Resolve a ``skill://`` URI and return its content.
+
+    Handles both reference files (``skill://name/path/to/file.md``) and
+    main skill content (``skill://name``, which reads SKILL.md).
+
+    Args:
+        uri: The ``skill://`` URI to resolve.
+        skill_caps: List of ``SkillResource`` providers.
+        max_text_chars: Maximum text characters before truncation.
+
+    Returns:
+        Content items if the skill was found, or ``None`` if not.
+    """
+    if not uri.startswith("skill://"):
+        return None
+    resolved = ResolvedSkillURI.parse(uri)
+    skill_name = resolved.skill_name
+
+    # If the URI contains a reference path, read the reference file.
+    # Exception: "SKILL.md" (case-insensitive) is the skill's main file —
+    # use read_skill() for backward compatibility and virtual skill support.
+    if resolved.reference_path is not None and resolved.reference_path.upper() != "SKILL.MD":
+        try:
+            ref_content = await _resolve_skill_reference(
+                skill_caps, skill_name, resolved.reference_path
+            )
+        except Exception:  # noqa: BLE001
+            logfire.exception(
+                "Failed to read skill reference '{skill_name}/{ref}'",
+                skill_name=skill_name,
+                ref=resolved.reference_path,
+            )
+            return None
+        if ref_content is not None:
+            truncated = _truncate_text(ref_content, max_text_chars)
+            return [f'<resource uri="{uri}">\n{truncated}\n</resource>']
+        return None
+
+    # No reference path — read SKILL.md content
+    for skill_cap in skill_caps:
+        try:
+            content = await skill_cap.read_skill(skill_name)
+        except Exception:  # noqa: BLE001
+            logfire.exception(
+                "Failed to read skill '{skill_name}' from {cap}",
+                skill_name=skill_name,
+                cap=type(skill_cap).__name__,
+            )
+            continue
+        if content is None:
+            continue
+        truncated = _truncate_text(content, max_text_chars)
+        return [f'<resource uri="{uri}">\n{truncated}\n</resource>']
+    return None
+
+
 @logfire.instrument("capability.resource_resolver.resolve")
 async def resolve_resource_content(
     uri: str,
@@ -185,45 +246,10 @@ async def resolve_resource_content(
         resource was found, or ``None`` if no provider could resolve the URI.
     """
     # ---- skill:// routing ----
+    skill_result = await _resolve_skill_uri(uri, skill_caps, max_text_chars)
+    if skill_result is not None:
+        return skill_result
     if uri.startswith("skill://"):
-        resolved = ResolvedSkillURI.parse(uri)
-        skill_name = resolved.skill_name
-
-        # If the URI contains a reference path, read the reference file.
-        # Exception: "SKILL.md" (case-insensitive) is the skill's main file —
-        # use read_skill() for backward compatibility and virtual skill support.
-        if resolved.reference_path is not None and resolved.reference_path.upper() != "SKILL.MD":
-            try:
-                ref_content = await _resolve_skill_reference(
-                    skill_caps, skill_name, resolved.reference_path
-                )
-            except Exception:  # noqa: BLE001
-                logfire.exception(
-                    "Failed to read skill reference '{skill_name}/{ref}'",
-                    skill_name=skill_name,
-                    ref=resolved.reference_path,
-                )
-                return None
-            if ref_content is not None:
-                truncated = _truncate_text(ref_content, max_text_chars)
-                return [f'<resource uri="{uri}">\n{truncated}\n</resource>']
-            return None
-
-        # No reference path — read SKILL.md content
-        for skill_cap in skill_caps:
-            try:
-                content = await skill_cap.read_skill(skill_name)
-            except Exception:  # noqa: BLE001
-                logfire.exception(
-                    "Failed to read skill '{skill_name}' from {cap}",
-                    skill_name=skill_name,
-                    cap=type(skill_cap).__name__,
-                )
-                continue
-            if content is None:
-                continue
-            truncated = _truncate_text(content, max_text_chars)
-            return [f'<resource uri="{uri}">\n{truncated}\n</resource>']
         return None
 
     # ---- Base provider filtering ----
