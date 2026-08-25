@@ -125,6 +125,29 @@ async def _resolve_skill_reference(
     return None
 
 
+def _filter_by_client_name(
+    resource_caps: list[ResourceAccess],
+    client_name: str,
+) -> list[ResourceAccess] | None:
+    """Filter resource caps to only those matching ``client_name``.
+
+    Returns a filtered list, or ``None`` if no caps matched.
+    """
+    identified_caps = [
+        resource_cap
+        for resource_cap in resource_caps
+        if getattr(resource_cap, "server_name", None) is not None
+    ]
+    if not identified_caps:
+        return None
+    selected_caps = [
+        resource_cap
+        for resource_cap in identified_caps
+        if getattr(resource_cap, "server_name", None) == client_name
+    ]
+    return selected_caps or None
+
+
 @logfire.instrument("capability.resource_resolver.resolve")
 async def resolve_resource_content(
     uri: str,
@@ -216,19 +239,9 @@ async def resolve_resource_content(
 
     # ---- client_name filtering ----
     if client_name is not None:
-        identified_caps = [
-            resource_cap
-            for resource_cap in resource_caps
-            if getattr(resource_cap, "server_name", None) is not None
-        ]
-        if identified_caps:
-            selected_caps = [
-                resource_cap
-                for resource_cap in identified_caps
-                if getattr(resource_cap, "server_name", None) == client_name
-            ]
-            if not selected_caps:
-                return None
+        selected_caps = _filter_by_client_name(resource_caps, client_name)
+        if selected_caps is None:
+            return None
 
     # ---- Scheme-based routing (via UriSchemeRegistry) ----
     from urllib.parse import urlparse
@@ -238,39 +251,33 @@ async def resolve_resource_content(
 
     if scheme and scheme_registry is not None:
         provider = scheme_registry.lookup(scheme)
-        if provider is not None:
-            # Route directly to the authoritative provider for this scheme.
-            # If client_name is set, verify the provider is in selected_caps.
-            if client_name is None or provider in selected_caps:
-                try:
-                    contents = await provider.read_resource(uri)
-                except UriSchemeMismatchError:
-                    logfire.warning(
-                        "Provider '{name}' rejected URI '{uri}' (scheme mismatch)",
-                        name=getattr(provider, "server_name", type(provider).__name__),
-                        uri=uri,
-                    )
-                    return None
-                except Exception:  # noqa: BLE001
-                    logfire.exception(
-                        "Failed to read resource '{uri}' from {cap}",
-                        uri=uri,
-                        cap=type(provider).__name__,
-                    )
-                    return None
-                if contents:
-                    return _convert_resource_parts(uri, contents, max_text_chars)
+        if provider is not None and (client_name is None or provider in selected_caps):
+            try:
+                contents = await provider.read_resource(uri)
+            except UriSchemeMismatchError:
+                logfire.warning(
+                    "Provider '{name}' rejected URI '{uri}' (scheme mismatch)",
+                    name=getattr(provider, "server_name", type(provider).__name__),
+                    uri=uri,
+                )
                 return None
+            except Exception:  # noqa: BLE001
+                logfire.exception(
+                    "Failed to read resource '{uri}' from {cap}",
+                    uri=uri,
+                    cap=type(provider).__name__,
+                )
+                return None
+            if contents:
+                return _convert_resource_parts(uri, contents, max_text_chars)
+            return None
 
     # ---- Fallback for unregistered schemes ----
     # If the URI has a scheme but no registered owner, try only opaque
     # providers (those with empty owned_schemes).  If the URI has no scheme
     # at all, try all providers (backward-compatible behavior).
     if scheme:
-        selected_caps = [
-            cap for cap in selected_caps
-            if not cap.owned_schemes
-        ]
+        selected_caps = [cap for cap in selected_caps if not cap.owned_schemes]
 
     # ---- Legacy iteration over remaining providers ----
     for resource_cap in selected_caps:

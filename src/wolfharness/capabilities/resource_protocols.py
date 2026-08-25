@@ -409,8 +409,7 @@ class UriSchemeMismatchError(ValueError):
         self.provider_name = provider_name
         self.uri = uri
         super().__init__(
-            f"Provider '{provider_name}' does not own URI scheme '{scheme}' "
-            f"for URI: {uri}"
+            f"Provider '{provider_name}' does not own URI scheme '{scheme}' for URI: {uri}"
         )
 
 
@@ -423,9 +422,7 @@ class UriSchemeConflictError(ValueError):
         conflicting_provider: The provider attempting to register.
     """
 
-    def __init__(
-        self, scheme: str, existing_provider: str, conflicting_provider: str
-    ) -> None:
+    def __init__(self, scheme: str, existing_provider: str, conflicting_provider: str) -> None:
         self.scheme = scheme
         self.existing_provider = existing_provider
         self.conflicting_provider = conflicting_provider

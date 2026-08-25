@@ -457,7 +457,7 @@ class VikingCapability(AbstractCapability[Any]):
         from wolfharness.capabilities.resource_protocols import UriSchemeMismatchError
 
         if not uri.startswith("viking://"):
-            scheme = uri.split(":")[0] if ":" in uri else ""
+            scheme = uri.split(":", maxsplit=1)[0] if ":" in uri else ""
             raise UriSchemeMismatchError(
                 scheme=scheme,
                 provider_name="VikingCapability",

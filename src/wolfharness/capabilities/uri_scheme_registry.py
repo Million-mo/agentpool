@@ -105,9 +105,7 @@ class UriSchemeRegistry:
             provider: The provider to unregister.
         """
         schemes_to_remove = [
-            scheme
-            for scheme, p in self._scheme_to_provider.items()
-            if p is provider
+            scheme for scheme, p in self._scheme_to_provider.items() if p is provider
         ]
         for scheme in schemes_to_remove:
             del self._scheme_to_provider[scheme]

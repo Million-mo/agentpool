@@ -930,11 +930,7 @@ class ResourceCapability(AbstractCapability[AgentDepsT]):
             # first owned scheme or the class name.
             source = (
                 getattr(cap, "server_name", None)
-                or (
-                    next(iter(cap.owned_schemes))
-                    if cap.owned_schemes
-                    else ""
-                )
+                or (next(iter(cap.owned_schemes)) if cap.owned_schemes else "")
                 or type(cap).__name__
             )
             for entry in result:
@@ -1008,8 +1004,8 @@ class ResourceCapability(AbstractCapability[AgentDepsT]):
         skill_caps = registry.get_skill_resources(scope)
 
         content = await resolve_resource_content(
-                uri, resource_caps, skill_caps, scheme_registry=registry.scheme_registry
-            )
+            uri, resource_caps, skill_caps, scheme_registry=registry.scheme_registry
+        )
         if content is None:
             return ToolReturn(return_value=f"Resource not found: {uri}")
 
