@@ -434,6 +434,9 @@ class TestTopLevelMcpPoolRegistration:
             async def __aexit__(self, *args: object) -> None:
                 return None
 
+            async def supports_resources(self) -> bool:
+                return False
+
         monkeypatch.setattr(
             "wolfharness.mcp_server.client.MCPClient",
             _FakeClient,

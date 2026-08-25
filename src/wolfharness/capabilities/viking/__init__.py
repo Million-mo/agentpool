@@ -91,6 +91,17 @@ class VikingCapability(AbstractCapability[Any]):
         public_download_base_url: Base URL for public download links.
     """
 
+    @property
+    def owned_schemes(self) -> frozenset[str]:
+        """URI schemes this provider authoritatively handles.
+
+        VikingCapability owns the ``viking`` URI scheme exclusively.
+
+        Returns:
+            ``frozenset({"viking"})``.
+        """
+        return frozenset({"viking"})
+
     mode: Literal["retrieve", "write", "graph", "all"] = "all"
     url: str | None = None
     api_key: str | None = None
@@ -430,6 +441,28 @@ class VikingCapability(AbstractCapability[Any]):
             return self.skills_uri
         user_id = self._identity.user_id if self._identity is not None else (self.user or "default")
         return f"viking://user/{user_id}/skills/"
+
+    def _check_uri_scheme(self, uri: str) -> None:
+        """Raise ``UriSchemeMismatchError`` if ``uri`` is not a ``viking://`` URI.
+
+        This is defense-in-depth: even if a caller bypasses the
+        ``UriSchemeRegistry``, this provider rejects URIs it does not own.
+
+        Args:
+            uri: The URI to validate.
+
+        Raises:
+            UriSchemeMismatchError: If the URI scheme is not ``viking``.
+        """
+        from wolfharness.capabilities.resource_protocols import UriSchemeMismatchError
+
+        if not uri.startswith("viking://"):
+            scheme = uri.split(":", maxsplit=1)[0] if ":" in uri else ""
+            raise UriSchemeMismatchError(
+                scheme=scheme,
+                provider_name="VikingCapability",
+                uri=uri,
+            )
 
     def _check_uri_allowed(self, uri: str, *, tool_name: str = "") -> str | None:
         """Return an error message if ``uri`` is outside the allowed prefixes.
