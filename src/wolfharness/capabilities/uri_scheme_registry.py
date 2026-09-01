@@ -25,8 +25,11 @@ if TYPE_CHECKING:
 class UriSchemeRegistry:
     """Maps URI schemes to authorized resource providers.
 
-    Every scheme is owned by at most one provider. Registration
-    detects conflicting claims and raises ``UriSchemeConflictError``.
+    Every scheme is owned by at most one provider type. Registration
+    detects conflicting claims and raises ``UriSchemeConflictError`` when a
+    different provider type claims an already-owned scheme. Re-registering
+    a scheme with another instance of the same provider type (per-agent
+    capability configs) is idempotent — the first instance keeps ownership.
     Lookup returns the registered provider for a scheme, or ``None``
     for unregistered schemes.
 
@@ -47,25 +50,36 @@ class UriSchemeRegistry:
     ) -> None:
         """Register a provider as the authoritative owner of URI schemes.
 
+        A URI scheme is owned by at most one provider *type*. Re-registering
+        a scheme with another instance of the same provider type (e.g. a
+        capability configured per-agent, like ``VikingCapability``) is
+        idempotent: the first instance keeps ownership and later same-type
+        instances are ignored. Only a genuinely different provider type
+        claiming an already-owned scheme raises ``UriSchemeConflictError``.
+
         Args:
             provider_name: Human-readable name of the provider.
             schemes: Set of URI scheme strings this provider owns.
             provider: The ``ResourceAccess`` instance to route to.
 
         Raises:
-            UriSchemeConflictError: If any scheme is already claimed.
+            UriSchemeConflictError: If a scheme is already owned by a
+                different provider type.
         """
         for scheme in schemes:
-            existing = self._scheme_to_name.get(scheme)
-            if existing is not None:
+            existing_provider = self._scheme_to_provider.get(scheme)
+            if existing_provider is not None and type(existing_provider) is not type(provider):
                 raise UriSchemeConflictError(
                     scheme=scheme,
-                    existing_provider=existing,
+                    existing_provider=self._scheme_to_name[scheme],
                     conflicting_provider=provider_name,
                 )
         for scheme in schemes:
-            self._scheme_to_provider[scheme] = provider
-            self._scheme_to_name[scheme] = provider_name
+            # Scheme already claimed by a same-type instance — keep the
+            # first claimant as owner and ignore the duplicate.
+            if scheme not in self._scheme_to_provider:
+                self._scheme_to_provider[scheme] = provider
+                self._scheme_to_name[scheme] = provider_name
 
     def lookup(self, scheme: str) -> ResourceAccess | None:
         """Return the provider authorized for a URI scheme.
