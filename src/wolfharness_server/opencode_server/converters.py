@@ -160,10 +160,20 @@ async def _resolve_resource(
     resource_caps = registry.get_resource_access(scope)
     skill_caps = registry.get_skill_resources(scope)
 
-    content = await resolve_resource_content(source.uri, resource_caps, skill_caps)
+    content = await resolve_resource_content(
+        source.uri,
+        resource_caps,
+        skill_caps,
+        client_name=source.client_name,
+    )
     if content is None:
         logger.warning("Resource not found", client_name=source.client_name, uri=source.uri)
-    return content
+        return None
+
+    # Prepend the server source so the agent knows which MCP server to use
+    # for follow-up operations on URIs in this resource content.
+    header = f"[Resource from {source.client_name} server] {source.uri}"
+    return [header, *content]
 
 
 async def extract_user_prompt_from_parts(
@@ -171,6 +181,7 @@ async def extract_user_prompt_from_parts(
     session_id: str,
     fs: AsyncFileSystem | None = None,
     agent: BaseAgent[Any, Any] | None = None,
+    normalizer: Any | None = None,
 ) -> Sequence[UserContent | PathReference]:
     """Extract user prompt from OpenCode message input parts.
 
@@ -188,6 +199,10 @@ async def extract_user_prompt_from_parts(
         agent: Optional agent for resolving MCP resources
         session_id: Session ID for scoped resource resolution via
             ExtensionRegistry.
+        normalizer: Optional ``ImageNormalizer`` for normalizing oversized
+            ``image/*`` data-URI attachments (RFC-0059). When provided,
+            oversized image data URIs are resized/re-encoded before being
+            converted to pydantic-ai content.
 
     Returns:
         Either a simple string (text-only) or a list of UserContent/PathReference items
@@ -204,6 +219,8 @@ async def extract_user_prompt_from_parts(
                 if content is not None:
                     result.extend(content)
             case FilePartInput(mime=mime, url=url, filename=filename):
+                if normalizer is not None and mime.startswith("image/"):
+                    url, mime = normalizer.normalize(url, mime)
                 file_content = to_user_content_or_path_ref(mime, url, filename, fs=fs)
                 result.append(file_content)
             case AgentPartInput(name=agent_name):

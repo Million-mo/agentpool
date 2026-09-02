@@ -20,6 +20,13 @@ from pydantic_ai import BinaryContent, RunContext, ToolReturn
 from schemez import FunctionSchema
 
 from wolfharness.agents.context import AgentContext
+from wolfharness.capabilities.resource_protocols import (
+    McpResourceListPage,
+    McpResourceTemplateListPage,
+    ResourceEntry,
+    ResourceTemplateEntry,
+    normalize_mcp_json_object,
+)
 from wolfharness.log import get_logger
 from wolfharness.mcp_server.constants import MCP_TO_LOGGING
 from wolfharness.mcp_server.helpers import extract_text_content, mcp_tool_to_fn_schema
@@ -91,6 +98,8 @@ class MCPClient:
         self._sampling_callback = sampling_callback
         # Store message handler or mark for lazy creation
         self._message_handler = message_handler
+        # Lazily-created wolfharness message handler (see _get_message_handler).
+        self._wolfharness_message_handler: MCPMessageHandler | None = None
         self._accessible_roots = accessible_roots or []
         self._tool_change_callback = tool_change_callback
         self._prompt_change_callback = prompt_change_callback
@@ -113,6 +122,53 @@ class MCPClient:
     def connected(self) -> bool:
         """Check if client is connected by examining session state."""
         return self._client.is_connected()
+
+    def set_notification_callbacks(
+        self,
+        *,
+        tool_change_callback: Callable[[], Awaitable[None]] | None = None,
+        prompt_change_callback: Callable[[], Awaitable[None]] | None = None,
+        resource_list_changed_callback: Callable[[], Awaitable[None]] | None = None,
+        resource_updated_callback: Callable[[str], Awaitable[None]] | None = None,
+    ) -> None:
+        """Set server-notification callbacks after the client is connected.
+
+        The ``MCPMessageHandler`` reads these callbacks dynamically from the
+        client on each notification (rather than snapshotting them at
+        construction), so callbacks set here apply immediately even if the
+        message handler was already created.
+        """
+        self._tool_change_callback = tool_change_callback
+        self._prompt_change_callback = prompt_change_callback
+        self._resource_list_changed_callback = resource_list_changed_callback
+        self._resource_updated_callback = resource_updated_callback
+
+    def _get_message_handler(self) -> MessageHandlerT | MessageHandler:
+        """Return the wolfharness message handler for this client.
+
+        The handler reads notification callbacks dynamically from the client
+        (see ``set_notification_callbacks``), so it can be created any time
+        after construction and still see the latest callbacks.
+        """
+        if self._message_handler is not None:
+            return self._message_handler
+        if self._wolfharness_message_handler is None:
+            self._wolfharness_message_handler = MCPMessageHandler(
+                self,
+                self._tool_change_callback,
+                self._prompt_change_callback,
+                self._resource_list_changed_callback,
+                self._resource_updated_callback,
+            )
+        return self._wolfharness_message_handler
+
+    @property
+    def client_name(self) -> str:
+        """Return the configured display name used for Resource identity."""
+        display_name = getattr(self.config, "display_name", None)
+        if isinstance(display_name, str) and display_name.strip():
+            return display_name.strip()
+        return self.config.client_id
 
     @property
     def server_info(self) -> dict[str, str] | None:
@@ -184,6 +240,11 @@ class MCPClient:
             else:
                 raise
 
+        # When a shared transport (e.g. SessionConnectionPool's stdio
+        # owner-task) pre-connects before this MCPClient exists, fastmcp
+        # reuses that session and our MCPMessageHandler is never bound.
+        # Rebind so server notifications reach wolfharness callbacks.
+        self._rebind_session_message_handler()
         return self
 
     async def __aexit__(self, *args: object) -> None:
@@ -192,6 +253,22 @@ class MCPClient:
             await self._client.__aexit__(None, None, None)  # type: ignore[no-untyped-call]
         except Exception as e:  # noqa: BLE001
             logger.warning("Error during FastMCP client cleanup", error=e)
+
+    def _rebind_session_message_handler(self) -> None:
+        """Rebind the underlying session's message handler to wolfharness's.
+
+        ``SessionConnectionPool`` pre-connects stdio transports inside an
+        owner task *before* this ``MCPClient`` exists, so fastmcp reuses
+        that session and our ``MCPMessageHandler`` would otherwise never be
+        bound. mcp SDK sessions read ``_message_handler`` dynamically for
+        each notification, so setting it here takes effect immediately.
+        """
+        if not self._client.is_connected():
+            return
+        session = self._client.session
+        handler = self._get_message_handler()
+        if getattr(session, "_message_handler", None) is not handler:
+            session._message_handler = handler
 
     def get_resource_fs(self) -> MCPFileSystem:
         """Get a filesystem for accessing MCP resources."""
@@ -283,13 +360,7 @@ class MCPClient:
             oauth = config.auth.oauth
 
         # Create message handler if needed
-        msg_handler = self._message_handler or MCPMessageHandler(
-            self,
-            self._tool_change_callback,
-            self._prompt_change_callback,
-            self._resource_list_changed_callback,
-            self._resource_updated_callback,
-        )
+        msg_handler = self._get_message_handler()
 
         # Build client_info if client_name is provided
         client_info: Implementation | None = None
@@ -326,13 +397,7 @@ class MCPClient:
         import fastmcp
         from mcp.types import Icon, Implementation
 
-        msg_handler = self._message_handler or MCPMessageHandler(
-            self,
-            self._tool_change_callback,
-            self._prompt_change_callback,
-            self._resource_list_changed_callback,
-            self._resource_updated_callback,
-        )
+        msg_handler = self._get_message_handler()
 
         client_info: Implementation | None = None
         if self._client_name:
@@ -370,6 +435,60 @@ class MCPClient:
             return []
         else:
             return filtered
+
+    async def supports_resources(self) -> bool:
+        """Return whether the connected server declared MCP Resource support."""
+        self._ensure_connected()
+        return self._has_server_capability("resources")
+
+    async def list_resources_mcp(self, cursor: str | None = None) -> McpResourceListPage:
+        """Read one raw MCP resources/list page without auto-pagination."""
+        self._ensure_connected()
+        if not self._has_server_capability("resources"):
+            return McpResourceListPage()
+        result = await self._client.list_resources_mcp(cursor=cursor)
+        entries = [
+            ResourceEntry(
+                uri=str(resource.uri),
+                server=self.client_name,
+                name=resource.name or "",
+                title=getattr(resource, "title", "") or "",
+                description=resource.description or "",
+                mime_type=getattr(resource, "mimeType", "") or "",
+                size=getattr(resource, "size", None),
+                annotations=normalize_mcp_json_object(getattr(resource, "annotations", None)),
+                meta=normalize_mcp_json_object(
+                    getattr(resource, "meta", getattr(resource, "_meta", None))
+                ),
+            )
+            for resource in result.resources
+        ]
+        return McpResourceListPage(entries=entries, next_cursor=result.nextCursor)
+
+    async def list_resource_templates_mcp(
+        self, cursor: str | None = None
+    ) -> McpResourceTemplateListPage:
+        """Read one raw MCP resources/templates/list page."""
+        self._ensure_connected()
+        if not self._has_server_capability("resources"):
+            return McpResourceTemplateListPage()
+        result = await self._client.list_resource_templates_mcp(cursor=cursor)
+        entries = [
+            ResourceTemplateEntry(
+                uri_template=str(template.uriTemplate),
+                server=self.client_name,
+                name=template.name or "",
+                title=getattr(template, "title", "") or "",
+                description=template.description or "",
+                mime_type=getattr(template, "mimeType", "") or "",
+                annotations=normalize_mcp_json_object(getattr(template, "annotations", None)),
+                meta=normalize_mcp_json_object(
+                    getattr(template, "meta", getattr(template, "_meta", None))
+                ),
+            )
+            for template in result.resourceTemplates
+        ]
+        return McpResourceTemplateListPage(entries=entries, next_cursor=result.nextCursor)
 
     async def list_prompts(self) -> list[MCPPrompt]:
         """Get available prompts from the server."""
@@ -425,6 +544,8 @@ class MCPClient:
         self._ensure_connected()
         try:
             return await self._client.read_resource(uri)
+        except (OSError, PermissionError, TimeoutError):
+            raise
         except Exception as e:
             raise RuntimeError(f"Failed to read resource {uri!r}: {e}") from e
 

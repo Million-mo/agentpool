@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from pydantic_ai import BinaryContent, BinaryImage
@@ -9,16 +11,20 @@ from pydantic_ai.capabilities import CapabilityOrdering
 from pydantic_ai.messages import (
     AudioUrl,
     ImageUrl,
+    ModelMessage,
     ModelRequest,
     ModelResponse,
+    TextPart,
     ToolReturnPart,
     UserPromptPart,
     VideoUrl,
 )
 from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 import pytest
 
+from wolfharness.agents.context import AgentRunContext
 from wolfharness.capabilities.modality_filter import ModalityFilterCapability
 from wolfharness_config.model_capabilities import ModelCapabilities
 
@@ -119,7 +125,8 @@ async def test_wrap_tool_image_describe_strategy() -> None:
         args={},
         handler=_handler(img),
     )
-    assert result == "[image/png]"
+    assert "image/png" in result
+    assert "unsupported" in result
 
 
 @pytest.mark.unit
@@ -164,7 +171,8 @@ async def test_wrap_tool_audio_describe() -> None:
         args={},
         handler=_handler(audio),
     )
-    assert result == "[audio/wav]"
+    assert "audio/wav" in result
+    assert "unsupported" in result
 
 
 @pytest.mark.unit
@@ -179,7 +187,8 @@ async def test_wrap_tool_video_describe() -> None:
         args={},
         handler=_handler(video),
     )
-    assert result == "[video/mp4]"
+    assert "video/mp4" in result
+    assert "unsupported" in result
 
 
 @pytest.mark.unit
@@ -194,7 +203,8 @@ async def test_wrap_tool_document_describe() -> None:
         args={},
         handler=_handler(pdf),
     )
-    assert result == "[application/pdf]"
+    assert "application/pdf" in result
+    assert "unsupported" in result
 
 
 @pytest.mark.unit
@@ -218,7 +228,8 @@ async def test_wrap_tool_mixed_content_list() -> None:
     assert isinstance(result, list)
     assert result[0] is img  # image is supported, passes through
     assert result[1] == text
-    assert result[2] == "[audio/wav]"  # audio is unsupported, described
+    assert "audio/wav" in result[2]  # audio is unsupported, described
+    assert "unsupported" in result[2]
 
 
 @pytest.mark.unit
@@ -268,7 +279,8 @@ async def test_wrap_tool_binary_content_audio_wav() -> None:
         args={},
         handler=_handler(audio),
     )
-    assert result == "[audio/wav]"
+    assert "audio/wav" in result
+    assert "unsupported" in result
 
 
 @pytest.mark.unit
@@ -283,7 +295,8 @@ async def test_wrap_tool_binary_content_video_mp4() -> None:
         args={},
         handler=_handler(video),
     )
-    assert result == "[video/mp4]"
+    assert "video/mp4" in result
+    assert "unsupported" in result
 
 
 @pytest.mark.unit
@@ -298,7 +311,8 @@ async def test_wrap_tool_binary_content_pdf() -> None:
         args={},
         handler=_handler(pdf),
     )
-    assert result == "[application/pdf]"
+    assert "application/pdf" in result
+    assert "unsupported" in result
 
 
 @pytest.mark.unit
@@ -319,7 +333,8 @@ async def test_wrap_tool_binary_image_always_image() -> None:
         handler=_handler(img),
     )
     # Should use image strategy, not audio strategy.
-    assert result == "[image/png]"
+    assert "image/png" in result
+    assert "unsupported" in result
 
 
 @pytest.mark.unit
@@ -405,7 +420,8 @@ async def test_before_model_request_tool_return_image_degraded() -> None:
     assert isinstance(new_msg, ModelResponse)
     new_part = new_msg.parts[0]
     assert isinstance(new_part, ToolReturnPart)
-    assert new_part.content == "[image/png]"
+    assert "image/png" in new_part.content
+    assert "unsupported" in new_part.content
 
 
 @pytest.mark.unit
@@ -425,7 +441,8 @@ async def test_before_model_request_user_prompt_image_degraded() -> None:
     assert isinstance(new_part, UserPromptPart)
     assert isinstance(new_part.content, list)
     assert new_part.content[0] == "Describe this"
-    assert new_part.content[1] == "[image/png]"
+    assert "image/png" in new_part.content[1]
+    assert "unsupported" in new_part.content[1]
 
 
 @pytest.mark.unit
@@ -492,13 +509,15 @@ async def test_before_model_request_mixed_message_types() -> None:
     new_user_part = new_req.parts[0]
     assert isinstance(new_user_part, UserPromptPart)
     assert isinstance(new_user_part.content, list)
-    assert new_user_part.content[1] == "[image/png]"
+    assert "image/png" in new_user_part.content[1]
+    assert "unsupported" in new_user_part.content[1]
 
     new_resp = result.messages[1]
     assert isinstance(new_resp, ModelResponse)
     new_tool_part = new_resp.parts[0]
     assert isinstance(new_tool_part, ToolReturnPart)
-    assert new_tool_part.content == "[audio/wav]"
+    assert "audio/wav" in new_tool_part.content
+    assert "unsupported" in new_tool_part.content
 
 
 @pytest.mark.unit
@@ -560,3 +579,345 @@ async def test_for_run_returns_new_instance() -> None:
     assert new_cap.image_strategy == "drop"
     assert new_cap.audio_strategy == "pass"
     assert new_cap.capabilities == cap.capabilities
+
+
+# ---------------------------------------------------------------------------
+# 4.8 — reference strategy (RFC-0061 Phase 2)
+# ---------------------------------------------------------------------------
+
+
+def _run_ctx(session_id: str = "test-session") -> Any:
+    """Build a minimal RunContext-like object with a session id."""
+    return SimpleNamespace(
+        deps=SimpleNamespace(run_ctx=AgentRunContext(session_id=session_id, run_id="run-1"))
+    )
+
+
+@pytest.mark.unit
+async def test_wrap_tool_image_reference_strategy() -> None:
+    """Image with 'reference' strategy persists bytes and returns a file path."""
+    cap = ModalityFilterCapability(capabilities=_text_only_caps(), image_strategy="reference")
+    img = _binary_image()
+    ctx = _run_ctx()
+    result = await cap.wrap_tool_execute(
+        ctx=ctx,
+        call=None,  # type: ignore[arg-type]
+        tool_def=None,  # type: ignore[arg-type]
+        args={},
+        handler=_handler(img),
+    )
+    assert isinstance(result, str)
+    assert result.startswith("[file: ")
+    path = Path(result.removeprefix("[file: ").removesuffix("]"))
+    assert path.exists()
+    assert path.read_bytes() == img.data
+
+
+@pytest.mark.unit
+async def test_reference_url_falls_back_to_describe() -> None:
+    """URL content with 'reference' strategy falls back to describe (no bytes)."""
+    cap = ModalityFilterCapability(capabilities=_text_only_caps(), image_strategy="reference")
+    url_img = ImageUrl(url="https://example.com/img.png")
+    result = await cap.wrap_tool_execute(
+        ctx=_run_ctx(),
+        call=None,  # type: ignore[arg-type]
+        tool_def=None,  # type: ignore[arg-type]
+        args={},
+        handler=_handler(url_img),
+    )
+    assert result == "[image: https://example.com/img.png]"
+
+
+@pytest.mark.unit
+async def test_reference_after_node_run_cleans_scratch() -> None:
+    """after_node_run removes scratch directories written this run."""
+    cap = ModalityFilterCapability(capabilities=_text_only_caps(), image_strategy="reference")
+    img = _binary_image()
+    ctx = _run_ctx()
+    result = await cap.wrap_tool_execute(
+        ctx=ctx,
+        call=None,  # type: ignore[arg-type]
+        tool_def=None,  # type: ignore[arg-type]
+        args={},
+        handler=_handler(img),
+    )
+    path = Path(result.removeprefix("[file: ").removesuffix("]"))  # type: ignore[arg-type]
+    assert path.exists()
+
+    await cap.after_node_run(
+        ctx=ctx,  # type: ignore[arg-type]
+        node=None,  # type: ignore[arg-type]
+        result=None,  # type: ignore[arg-type]
+    )
+    assert not path.parent.exists()
+
+
+@pytest.mark.unit
+async def test_reference_session_id_scoped_paths() -> None:
+    """Scratch paths differ per session id."""
+    cap = ModalityFilterCapability(capabilities=_text_only_caps(), image_strategy="reference")
+    img = _binary_image()
+    r1 = await cap.wrap_tool_execute(
+        ctx=_run_ctx("sess-a"),  # type: ignore[arg-type]
+        call=None,  # type: ignore[arg-type]
+        tool_def=None,  # type: ignore[arg-type]
+        args={},
+        handler=_handler(img),
+    )
+    r2 = await cap.wrap_tool_execute(
+        ctx=_run_ctx("sess-b"),
+        call=None,  # type: ignore[arg-type]
+        tool_def=None,  # type: ignore[arg-type]
+        args={},
+        handler=_handler(img),
+    )
+    assert isinstance(r1, str)
+    assert isinstance(r2, str)
+    assert r1 != r2
+    await cap.after_node_run(
+        ctx=_run_ctx(),
+        node=None,  # type: ignore[arg-type]
+        result=None,  # type: ignore[arg-type]
+    )
+
+
+# ---------------------------------------------------------------------------
+# 4.9 — understand strategy (vision LLM description)
+# ---------------------------------------------------------------------------
+
+
+def _vision_model(monkeypatch: pytest.MonkeyPatch, calls: list[int]) -> None:
+    """Patch ``infer_model`` to return a counting vision model.
+
+    ``_understand_image`` resolves the model via manifest first, then
+    ``infer_model``; patching ``infer_model`` exercises the standalone
+    fallback path without needing a full manifest.
+    """
+
+    async def _vision_handler(messages: list[ModelMessage], agent_info: AgentInfo) -> ModelResponse:
+        calls.append(1)
+        return ModelResponse(parts=[TextPart("A photo of a circuit board")])
+
+    monkeypatch.setattr(
+        "wolfharness.utils.model_helpers.infer_model",
+        lambda name: FunctionModel(_vision_handler),
+    )
+
+
+@pytest.mark.unit
+async def test_wrap_tool_image_understand_strategy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Image with 'understand' strategy is replaced by a vision LLM description."""
+    calls: list[int] = []
+    monkeypatch.setattr(
+        "wolfharness.utils.model_helpers.infer_model",
+        lambda name: TestModel(custom_output_text="A photo of a circuit board"),
+    )
+    cap = ModalityFilterCapability(
+        capabilities=_text_only_caps(),
+        image_strategy="understand",
+        vision_model="test",
+    )
+    img = _binary_image()
+    result = await cap.wrap_tool_execute(
+        ctx=_run_ctx(),
+        call=None,  # type: ignore[arg-type]
+        tool_def=None,  # type: ignore[arg-type]
+        args={},
+        handler=_handler(img),
+    )
+    assert result == "[Image analysis: A photo of a circuit board]"
+    assert len(calls) == 0
+
+
+@pytest.mark.unit
+async def test_understand_strategy_dedup_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Identical image bytes in two tool results trigger only one vision LLM call."""
+    calls: list[int] = []
+    _vision_model(monkeypatch, calls)
+    cap = ModalityFilterCapability(
+        capabilities=_text_only_caps(),
+        image_strategy="understand",
+        vision_model="test",
+    )
+    img = _binary_image()
+    ctx = _run_ctx()
+    r1 = await cap.wrap_tool_execute(
+        ctx=ctx,  # type: ignore[arg-type]
+        call=None,  # type: ignore[arg-type]
+        tool_def=None,  # type: ignore[arg-type]
+        args={},
+        handler=_handler(img),
+    )
+    r2 = await cap.wrap_tool_execute(
+        ctx=ctx,
+        call=None,  # type: ignore[arg-type]
+        tool_def=None,  # type: ignore[arg-type]
+        args={},
+        handler=_handler(img),
+    )
+    assert r1 == r2 == "[Image analysis: A photo of a circuit board]"
+    assert len(calls) == 1
+
+
+@pytest.mark.unit
+async def test_understand_strategy_no_vision_model_falls_back_to_describe() -> None:
+    """'understand' without a configured vision_model falls back to describe."""
+    cap = ModalityFilterCapability(capabilities=_text_only_caps(), image_strategy="understand")
+    img = _binary_image()
+    result = await cap.wrap_tool_execute(
+        ctx=_run_ctx(),
+        call=None,  # type: ignore[arg-type]
+        tool_def=None,  # type: ignore[arg-type]
+        args={},
+        handler=_handler(img),
+    )
+    assert "image/png" in result
+    assert "unsupported" in result
+    assert "Image analysis" not in result
+
+
+@pytest.mark.unit
+async def test_understand_strategy_model_error_falls_back_to_describe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A raising vision model falls back to the describe placeholder."""
+
+    async def _failing_handler(
+        messages: list[ModelMessage], agent_info: AgentInfo
+    ) -> ModelResponse:
+        raise RuntimeError("vision model exploded")
+
+    monkeypatch.setattr(
+        "wolfharness.utils.model_helpers.infer_model",
+        lambda name: FunctionModel(_failing_handler),
+    )
+    cap = ModalityFilterCapability(
+        capabilities=_text_only_caps(),
+        image_strategy="understand",
+        vision_model="test",
+    )
+    img = _binary_image()
+    result = await cap.wrap_tool_execute(
+        ctx=_run_ctx(),
+        call=None,  # type: ignore[arg-type]
+        tool_def=None,  # type: ignore[arg-type]
+        args={},
+        handler=_handler(img),
+    )
+    assert "image/png" in result
+    assert "unsupported" in result
+    assert "Image analysis" not in result
+
+
+@pytest.mark.unit
+async def test_before_model_request_understand_is_deterministic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """before_model_request never calls the vision LLM — 'understand' degrades to describe."""
+    calls: list[int] = []
+    _vision_model(monkeypatch, calls)
+    cap = ModalityFilterCapability(
+        capabilities=_text_only_caps(),
+        image_strategy="understand",
+        vision_model="test",
+    )
+    img = _binary_image()
+    tool_return = ToolReturnPart(
+        tool_name="screenshot",
+        content=img,
+        tool_call_id="tc_1",
+    )
+    msg = ModelResponse(parts=[tool_return])
+    ctx = _make_ctx([msg])
+
+    result = await cap.before_model_request(ctx=None, request_context=ctx)  # type: ignore[arg-type]
+
+    new_msg = result.messages[0]
+    assert isinstance(new_msg, ModelResponse)
+    new_part = new_msg.parts[0]
+    assert isinstance(new_part, ToolReturnPart)
+    assert "image/png" in new_part.content
+    assert "unsupported" in new_part.content
+    assert "Image analysis" not in new_part.content
+    assert calls == []
+
+
+@pytest.mark.unit
+async def test_understand_strategy_audio_falls_back_to_describe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """'understand' on a non-image modality falls back to describe (vision is image-only)."""
+    calls: list[int] = []
+    _vision_model(monkeypatch, calls)
+    cap = ModalityFilterCapability(
+        capabilities=_text_only_caps(),
+        audio_strategy="understand",
+        vision_model="test",
+    )
+    audio = _binary_audio()
+    result = await cap.wrap_tool_execute(
+        ctx=_run_ctx(),
+        call=None,  # type: ignore[arg-type]
+        tool_def=None,  # type: ignore[arg-type]
+        args={},
+        handler=_handler(audio),
+    )
+    assert "audio/wav" in result
+    assert "unsupported" in result
+    assert "Image analysis" not in result
+    assert calls == []
+
+
+@pytest.mark.unit
+async def test_understand_strategy_large_image_falls_back_to_reference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Images over 10MB fall back to reference (saved to disk) instead of a vision call."""
+    calls: list[int] = []
+    _vision_model(monkeypatch, calls)
+    cap = ModalityFilterCapability(
+        capabilities=_text_only_caps(),
+        image_strategy="understand",
+        vision_model="test",
+    )
+    big = BinaryImage(data=b"\x89PNG" + b"\x00" * 10_000_000, media_type="image/png")
+    ctx = _run_ctx()
+    result = await cap.wrap_tool_execute(
+        ctx=ctx,
+        call=None,  # type: ignore[arg-type]
+        tool_def=None,  # type: ignore[arg-type]
+        args={},
+        handler=_handler(big),
+    )
+    assert isinstance(result, str)
+    assert result.startswith("[file: ")
+    assert calls == []
+    await cap.after_node_run(
+        ctx=ctx,
+        node=None,  # type: ignore[arg-type]
+        result=None,  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.unit
+async def test_understand_strategy_image_url_falls_back_to_describe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ImageUrl content cannot be understood — falls back to describe."""
+    calls: list[int] = []
+    _vision_model(monkeypatch, calls)
+    cap = ModalityFilterCapability(
+        capabilities=_text_only_caps(),
+        image_strategy="understand",
+        vision_model="test",
+    )
+    url_img = ImageUrl(url="https://example.com/img.png")
+    result = await cap.wrap_tool_execute(
+        ctx=_run_ctx(),
+        call=None,  # type: ignore[arg-type]
+        tool_def=None,  # type: ignore[arg-type]
+        args={},
+        handler=_handler(url_img),
+    )
+    assert result == "[image: https://example.com/img.png]"
+    assert calls == []

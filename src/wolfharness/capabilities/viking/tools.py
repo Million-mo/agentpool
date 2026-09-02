@@ -9,11 +9,17 @@ never raise exceptions to the caller.
 from __future__ import annotations
 
 import asyncio
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic_ai.messages import ToolReturn
+from pydantic_ai.messages import BinaryImage, ToolReturn
 from pydantic_ai.tools import RunContext  # noqa: TC002 - needed at runtime for get_type_hints()
 
+from wolfharness.capabilities.viking.constants import (
+    IMAGE_BLOB_MAX_BYTES,
+    IMAGE_EXTENSIONS,
+    IMAGE_MIME_TYPES,
+)
 from wolfharness.capabilities.viking.utils import (
     add_line_numbers,
     format_glob_results,
@@ -36,6 +42,29 @@ def _get_session_id(ctx: RunContext[Any]) -> str | None:
     if deps is not None and hasattr(deps, "session_id"):
         return str(deps.session_id)
     return None
+
+
+def _is_image_resource(uri: str) -> bool:
+    """Whether a URI points to an image resource by its file extension.
+
+    Matches the openviking server's extension-based image detection
+    (``IMAGE_EXTENSIONS``). SVG is deliberately excluded — it is a vector
+    format most vision APIs reject, so it never enters the byte path.
+    """
+    return PurePosixPath(uri).suffix.lower() in IMAGE_EXTENSIONS
+
+
+def _image_uri_hint(uri: str) -> str:
+    """Text hint for an image URI when image bytes are not returned.
+
+    Used when the model cannot consume image bytes (text-only) or bytes
+    are forced off. Mentions the URI so the model can still reference it.
+    """
+    return (
+        f"[Image resource: {uri}]\n"
+        f"The file is an image and cannot be shown as text. The image is "
+        f"stored at the URI above — reference it when discussing the content."
+    )
 
 
 def build_tools(cap: VikingCapability) -> list[Callable[..., Any]]:
@@ -68,7 +97,7 @@ def build_tools(cap: VikingCapability) -> list[Callable[..., Any]]:
             limit: int = 10,
             min_score: float = 0.35,
             level: list[int] | None = None,
-            target_uri: str = "",
+            target_uri: str | list[str] = "",
         ) -> ToolReturn:
             """Search the Viking knowledge graph semantically.
 
@@ -80,7 +109,8 @@ def build_tools(cap: VikingCapability) -> list[Callable[..., Any]]:
                 limit: Maximum number of results to return.
                 min_score: Minimum relevance score (0.0 to 1.0).
                 level: Filter by content level (e.g. [0, 1, 2] for L0-L2).
-                target_uri: Restrict search to a specific URI subtree.
+                target_uri: Restrict search to specific URI subtrees — a
+                    single ``viking://`` URI or a list of them.
 
             Returns:
                 Formatted search results grouped by context type.
@@ -89,6 +119,23 @@ def build_tools(cap: VikingCapability) -> list[Callable[..., Any]]:
                 client = await cap._ensure_client()
                 sid = _get_session_id(ctx)
                 sdk_filter: dict[str, Any] | None = {"level": level} if level else None
+                if cap.allowed_uri_prefixes:
+                    if isinstance(target_uri, str):
+                        if target_uri:
+                            err = cap._check_uri_allowed(target_uri, tool_name="viking_search")
+                            if err:
+                                return ToolReturn(return_value=err)
+                    else:
+                        for u in target_uri:
+                            err = cap._check_uri_allowed(u, tool_name="viking_search")
+                            if err:
+                                return ToolReturn(return_value=err)
+                    if not target_uri:
+                        # SDK target_uri accepts a list — the server searches
+                        # every allowed prefix. The old default used only the
+                        # first prefix, silently dropping the other allowed
+                        # trees.
+                        target_uri = cap.allowed_uri_prefixes
                 result = await client.search(
                     query,
                     target_uri=target_uri,
@@ -99,7 +146,7 @@ def build_tools(cap: VikingCapability) -> list[Callable[..., Any]]:
                 )
                 return ToolReturn(return_value=format_search_results(result))
             except Exception as e:
-                return ToolReturn(return_value=f"viking_search error: {e}")
+                return ToolReturn(return_value=f"viking_search error ({type(e).__name__}): {e}")
 
         async def viking_find(
             ctx: RunContext[Any],
@@ -107,7 +154,7 @@ def build_tools(cap: VikingCapability) -> list[Callable[..., Any]]:
             limit: int = 10,
             min_score: float = 0.35,
             level: list[int] | None = None,
-            target_uri: str = "",
+            target_uri: str | list[str] = "",
         ) -> ToolReturn:
             """Find content in Viking, deduplicating results.
 
@@ -119,7 +166,8 @@ def build_tools(cap: VikingCapability) -> list[Callable[..., Any]]:
                 limit: Maximum number of results to return.
                 min_score: Minimum relevance score (0.0 to 1.0).
                 level: Filter by content level (e.g. [0, 1, 2] for L0-L2).
-                target_uri: Restrict search to a specific URI subtree.
+                target_uri: Restrict search to specific URI subtrees — a
+                    single ``viking://`` URI or a list of them.
 
             Returns:
                 Formatted search results grouped by context type.
@@ -127,6 +175,21 @@ def build_tools(cap: VikingCapability) -> list[Callable[..., Any]]:
             try:
                 client = await cap._ensure_client()
                 sdk_filter: dict[str, Any] | None = {"level": level} if level else None
+                if cap.allowed_uri_prefixes:
+                    if isinstance(target_uri, str):
+                        if target_uri:
+                            err = cap._check_uri_allowed(target_uri, tool_name="viking_find")
+                            if err:
+                                return ToolReturn(return_value=err)
+                    else:
+                        for u in target_uri:
+                            err = cap._check_uri_allowed(u, tool_name="viking_find")
+                            if err:
+                                return ToolReturn(return_value=err)
+                    if not target_uri:
+                        # See viking_search: SDK target_uri accepts a list so we
+                        # search every allowed prefix, not just the first.
+                        target_uri = cap.allowed_uri_prefixes
                 result = await client.find(
                     query,
                     target_uri=target_uri,
@@ -136,7 +199,7 @@ def build_tools(cap: VikingCapability) -> list[Callable[..., Any]]:
                 )
                 return ToolReturn(return_value=format_search_results(result))
             except Exception as e:
-                return ToolReturn(return_value=f"viking_find error: {e}")
+                return ToolReturn(return_value=f"viking_find error ({type(e).__name__}): {e}")
 
         async def viking_recall(
             ctx: RunContext[Any],
@@ -204,7 +267,7 @@ def build_tools(cap: VikingCapability) -> list[Callable[..., Any]]:
                 merged = "\n\n".join(sections)
                 return ToolReturn(return_value=truncate_text(merged, max_chars))
             except Exception as e:
-                return ToolReturn(return_value=f"viking_recall error: {e}")
+                return ToolReturn(return_value=f"viking_recall error ({type(e).__name__}): {e}")
 
         async def viking_grep(
             ctx: RunContext[Any],
@@ -230,6 +293,8 @@ def build_tools(cap: VikingCapability) -> list[Callable[..., Any]]:
             """
             try:
                 client = await cap._ensure_client()
+                if err := cap._check_uri_allowed(uri, tool_name="viking_grep"):
+                    return ToolReturn(return_value=err)
                 patterns = [pattern] if isinstance(pattern, str) else pattern
 
                 async def _grep_one(p: str) -> list[dict[str, Any]]:
@@ -259,7 +324,7 @@ def build_tools(cap: VikingCapability) -> list[Callable[..., Any]]:
 
                 return ToolReturn(return_value=format_grep_results(all_matches, patterns))
             except Exception as e:
-                return ToolReturn(return_value=f"viking_grep error: {e}")
+                return ToolReturn(return_value=f"viking_grep error ({type(e).__name__}): {e}")
 
         async def viking_glob(
             ctx: RunContext[Any],
@@ -279,6 +344,8 @@ def build_tools(cap: VikingCapability) -> list[Callable[..., Any]]:
             """
             try:
                 client = await cap._ensure_client()
+                if err := cap._check_uri_allowed(uri, tool_name="viking_glob"):
+                    return ToolReturn(return_value=err)
                 result = await client.glob(
                     pattern,
                     uri=uri,
@@ -290,7 +357,7 @@ def build_tools(cap: VikingCapability) -> list[Callable[..., Any]]:
                     uris = result if isinstance(result, list) else []
                 return ToolReturn(return_value=format_glob_results([str(u) for u in uris], pattern))
             except Exception as e:
-                return ToolReturn(return_value=f"viking_glob error: {e}")
+                return ToolReturn(return_value=f"viking_glob error ({type(e).__name__}): {e}")
 
         async def viking_ls(
             ctx: RunContext[Any],
@@ -314,6 +381,8 @@ def build_tools(cap: VikingCapability) -> list[Callable[..., Any]]:
             """
             try:
                 client = await cap._ensure_client()
+                if err := cap._check_uri_allowed(uri, tool_name="viking_ls"):
+                    return ToolReturn(return_value=err)
                 entries = await client.ls(uri, simple=False, recursive=recursive)
                 entry_list = entries if isinstance(entries, list) else []
 
@@ -371,7 +440,7 @@ def build_tools(cap: VikingCapability) -> list[Callable[..., Any]]:
 
                 return ToolReturn(return_value=format_ls_entries(entry_list))
             except Exception as e:
-                return ToolReturn(return_value=f"viking_ls error: {e}")
+                return ToolReturn(return_value=f"viking_ls error ({type(e).__name__}): {e}")
 
         async def viking_read(
             ctx: RunContext[Any],
@@ -401,8 +470,46 @@ def build_tools(cap: VikingCapability) -> list[Callable[..., Any]]:
             try:
                 client = await cap._ensure_client()
                 uri_list = [uris] if isinstance(uris, str) else uris
-                sections: list[str] = []
                 for u in uri_list:
+                    if err := cap._check_uri_allowed(u, tool_name="viking_read"):
+                        return ToolReturn(return_value=err)
+                sections: list[str] = []
+                image_parts: list[BinaryImage] = []
+                for u in uri_list:
+                    is_image = _is_image_resource(u)
+                    suffix = PurePosixPath(u).suffix.lower()
+                    # SVG is a vector format most vision APIs reject — it
+                    # never enters the byte path, always degrades to a text
+                    # hint, regardless of the support_vision / model caps.
+                    if is_image and (not cap._should_return_image_bytes() or suffix == ".svg"):
+                        # Image resource but the model can't consume image
+                        # bytes (or forced text / vector SVG) — text URI hint.
+                        if len(uri_list) > 1:
+                            sections.append(f"=== {u} ===\n{_image_uri_hint(u)}")
+                        else:
+                            sections.append(_image_uri_hint(u))
+                        continue
+
+                    if is_image:
+                        # Image resource and the model accepts image bytes.
+                        data = await client.download_bytes(u)
+                        if len(data) > IMAGE_BLOB_MAX_BYTES:
+                            if len(uri_list) > 1:
+                                sections.append(f"=== {u} ===\n{_image_uri_hint(u)}")
+                            else:
+                                sections.append(_image_uri_hint(u))
+                            continue
+                        media_type = IMAGE_MIME_TYPES.get(
+                            PurePosixPath(u).suffix.lower(), "application/octet-stream"
+                        )
+                        image_idx = len(image_parts) + 1  # 1-based, matches content order
+                        image_parts.append(BinaryImage(data=data, media_type=media_type))
+                        if len(uri_list) > 1:
+                            sections.append(f"=== {u} ===\n[Image #{image_idx}: {media_type}]")
+                        else:
+                            sections.append(f"[Image #{image_idx}: {media_type}]")
+                        continue
+
                     if level == "abstract":
                         content = await client.abstract(u)
                     elif level == "overview":
@@ -421,9 +528,19 @@ def build_tools(cap: VikingCapability) -> list[Callable[..., Any]]:
                         sections.append(f"=== {u} ===\n{numbered}")
                     else:
                         sections.append(numbered)
+
+                if image_parts:
+                    # Mixed content: text sections describe each file; image
+                    # bytes follow as BinaryImage parts the model can view.
+                    tool_content: list[Any] = ["\n\n".join(sections)]
+                    tool_content.extend(image_parts)
+                    return ToolReturn(
+                        return_value="\n\n".join(sections),
+                        content=tool_content,
+                    )
                 return ToolReturn(return_value="\n\n".join(sections))
             except Exception as e:
-                return ToolReturn(return_value=f"viking_read error: {e}")
+                return ToolReturn(return_value=f"viking_read error ({type(e).__name__}): {e}")
 
         async def viking_expand(
             ctx: RunContext[Any],
@@ -445,12 +562,14 @@ def build_tools(cap: VikingCapability) -> list[Callable[..., Any]]:
             """
             try:
                 client = await cap._ensure_client()
+                if err := cap._check_uri_allowed(uri, tool_name="viking_expand"):
+                    return ToolReturn(return_value=err)
                 content = await client.read(uri)
                 return ToolReturn(
                     return_value=str(content) if content else "No content found at URI."
                 )
             except Exception as e:
-                return ToolReturn(return_value=f"viking_expand error: {e}")
+                return ToolReturn(return_value=f"viking_expand error ({type(e).__name__}): {e}")
 
         retrieve_tools: list[Callable[..., Awaitable[ToolReturn]]] = [
             viking_search,
@@ -522,12 +641,14 @@ def build_tools(cap: VikingCapability) -> list[Callable[..., Any]]:
             """
             try:
                 client = await cap._ensure_client()
+                if err := cap._check_uri_allowed(uri, tool_name="viking_write"):
+                    return ToolReturn(return_value=err)
                 await client.write(uri, content, mode=mode)
                 return ToolReturn(
                     return_value=f"Wrote {len(content)} chars to {uri} (mode={mode})."
                 )
             except Exception as e:
-                return ToolReturn(return_value=f"viking_write error: {e}")
+                return ToolReturn(return_value=f"viking_write error ({type(e).__name__}): {e}")
 
         async def viking_edit(
             ctx: RunContext[Any],
@@ -556,6 +677,8 @@ def build_tools(cap: VikingCapability) -> list[Callable[..., Any]]:
             """
             try:
                 client = await cap._ensure_client()
+                if err := cap._check_uri_allowed(uri, tool_name="viking_edit"):
+                    return ToolReturn(return_value=err)
                 current = await client.read(uri)
                 count = current.count(old_string)
                 if count == 0:
@@ -576,7 +699,7 @@ def build_tools(cap: VikingCapability) -> list[Callable[..., Any]]:
                 await client.write(uri, modified, mode="replace")
                 return ToolReturn(return_value=f"Replaced {count} occurrence(s) in {uri}.")
             except Exception as e:
-                return ToolReturn(return_value=f"viking_edit error: {e}")
+                return ToolReturn(return_value=f"viking_edit error ({type(e).__name__}): {e}")
 
         async def viking_mkdir(
             ctx: RunContext[Any],
@@ -594,10 +717,12 @@ def build_tools(cap: VikingCapability) -> list[Callable[..., Any]]:
             """
             try:
                 client = await cap._ensure_client()
+                if err := cap._check_uri_allowed(uri, tool_name="viking_mkdir"):
+                    return ToolReturn(return_value=err)
                 await client.mkdir(uri, description=description)
                 return ToolReturn(return_value=f"Created directory {uri}.")
             except Exception as e:
-                return ToolReturn(return_value=f"viking_mkdir error: {e}")
+                return ToolReturn(return_value=f"viking_mkdir error ({type(e).__name__}): {e}")
 
         async def viking_add_resource(
             ctx: RunContext[Any],
@@ -626,6 +751,11 @@ def build_tools(cap: VikingCapability) -> list[Callable[..., Any]]:
             """
             try:
                 client = await cap._ensure_client()
+                for target, label in ((to, "to"), (parent, "parent")):
+                    if target and (
+                        err := cap._check_uri_allowed(target, tool_name="viking_add_resource")
+                    ):
+                        return ToolReturn(return_value=f"{err} ({label})")
                 # SDK add_resource() does not accept processing_mode;
                 # pass only supported kwargs.
                 result = await client.add_resource(
@@ -636,7 +766,9 @@ def build_tools(cap: VikingCapability) -> list[Callable[..., Any]]:
                 )
                 return ToolReturn(return_value=f"Added resource {path} to Viking. Result: {result}")
             except Exception as e:
-                return ToolReturn(return_value=f"viking_add_resource error: {e}")
+                return ToolReturn(
+                    return_value=f"viking_add_resource error ({type(e).__name__}): {e}"
+                )
 
         async def viking_forget(
             ctx: RunContext[Any],
@@ -654,10 +786,12 @@ def build_tools(cap: VikingCapability) -> list[Callable[..., Any]]:
             """
             try:
                 client = await cap._ensure_client()
+                if err := cap._check_uri_allowed(uri, tool_name="viking_forget"):
+                    return ToolReturn(return_value=err)
                 await client.rm(uri, recursive=recursive)
                 return ToolReturn(return_value=f"Removed {uri}.")
             except Exception as e:
-                return ToolReturn(return_value=f"viking_forget error: {e}")
+                return ToolReturn(return_value=f"viking_forget error ({type(e).__name__}): {e}")
 
         write_tools: list[Callable[..., Awaitable[ToolReturn]]] = [
             viking_write,
@@ -696,13 +830,18 @@ def build_tools(cap: VikingCapability) -> list[Callable[..., Any]]:
             """
             try:
                 client = await cap._ensure_client()
-                await client.link(from_uri, to_uris, reason=reason)
+                if err := cap._check_uri_allowed(from_uri, tool_name="viking_link"):
+                    return ToolReturn(return_value=f"{err} (from_uri)")
                 targets = to_uris if isinstance(to_uris, list) else [to_uris]
+                for t in targets:
+                    if err := cap._check_uri_allowed(t, tool_name="viking_link"):
+                        return ToolReturn(return_value=f"{err} (to_uris)")
+                await client.link(from_uri, to_uris, reason=reason)
                 return ToolReturn(
                     return_value=f"Linked {from_uri} -> {', '.join(targets)} (reason: {reason!r})."
                 )
             except Exception as e:
-                return ToolReturn(return_value=f"viking_link error: {e}")
+                return ToolReturn(return_value=f"viking_link error ({type(e).__name__}): {e}")
 
         async def viking_set_tags(
             ctx: RunContext[Any],
@@ -722,14 +861,23 @@ def build_tools(cap: VikingCapability) -> list[Callable[..., Any]]:
             """
             try:
                 client = await cap._ensure_client()
+                if err := cap._check_uri_allowed(uri, tool_name="viking_set_tags"):
+                    return ToolReturn(return_value=err)
                 await client.set_tags(uri, tags, mode="replace", recursive=recursive)
                 return ToolReturn(return_value=f"Set {len(tags)} tag(s) on {uri}.")
             except Exception as e:
-                return ToolReturn(return_value=f"viking_set_tags error: {e}")
+                return ToolReturn(return_value=f"viking_set_tags error ({type(e).__name__}): {e}")
 
         graph_tools: list[Callable[..., Awaitable[ToolReturn]]] = [viking_set_tags]
         if cap.enable_link:
             graph_tools.append(viking_link)
         tools.extend(graph_tools)
+
+    if cap.enabled_tools is not None:
+        names = {getattr(fn, "__name__", "") for fn in tools}
+        allowed = {n for n in cap.enabled_tools if n in names}
+        tools = [fn for fn in tools if getattr(fn, "__name__", "") in allowed]
+    elif cap.disabled_tools is not None:
+        tools = [fn for fn in tools if getattr(fn, "__name__", "") not in set(cap.disabled_tools)]
 
     return tools

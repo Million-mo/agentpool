@@ -16,9 +16,9 @@ Three resolution paths:
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, Literal, Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 KNOWN_CAPABILITY_TYPES: frozenset[str] = frozenset({
@@ -30,6 +30,7 @@ KNOWN_CAPABILITY_TYPES: frozenset[str] = frozenset({
     "memory",
     "modality_filter",
     "viking",
+    "tool_arg_sanitize",
 })
 
 IMPORT_MAP: dict[str, str] = {
@@ -43,6 +44,7 @@ IMPORT_MAP: dict[str, str] = {
     "memory": "wolfharness.capabilities.memory.MemoryCapability",
     "modality_filter": "wolfharness.capabilities.modality_filter.ModalityFilterCapability",
     "viking": "wolfharness.capabilities.viking.VikingCapability",
+    "tool_arg_sanitize": ("wolfharness.capabilities.tool_arg_sanitize.ToolArgSanitizeCapability"),
 }
 
 
@@ -151,14 +153,43 @@ class ModalityFilterCapabilityConfig(BaseModel):
     """
 
     type: Literal["modality_filter"] = "modality_filter"
-    image_strategy: Literal["describe", "drop", "pass"] = "describe"
-    """Degradation strategy for unsupported image content."""
-    audio_strategy: Literal["describe", "drop", "pass"] = "describe"
+    image_strategy: Literal["describe", "reference", "drop", "pass", "understand"] = "describe"
+    """Degradation strategy for unsupported image content.
+
+    ``"understand"`` replaces the image with a real text description
+    produced by a vision LLM (see ``vision_model``). When no
+    ``vision_model`` is configured, ``"understand"`` falls back to
+    ``"describe"`` at runtime.
+    """
+    audio_strategy: Literal["describe", "reference", "drop", "pass"] = "describe"
     """Degradation strategy for unsupported audio content."""
-    video_strategy: Literal["describe", "drop", "pass"] = "describe"
+    video_strategy: Literal["describe", "reference", "drop", "pass"] = "describe"
     """Degradation strategy for unsupported video content."""
-    document_strategy: Literal["describe", "drop", "pass"] = "describe"
+    document_strategy: Literal["describe", "reference", "drop", "pass"] = "describe"
     """Degradation strategy for unsupported document content."""
+    vision_model: str | None = None
+    """Vision model used by the ``"understand"`` image strategy.
+
+    Either a model variant name (resolved via the manifest) or a
+    namespaced string such as ``"openai:gpt-4o"`` (resolved via
+    ``infer_model``). When ``None`` and ``image_strategy ==
+    "understand"``, the strategy falls back to ``"describe"`` at runtime.
+    """
+
+
+class ToolArgSanitizeCapabilityConfig(BaseModel):
+    """Config for ``ToolArgSanitizeCapability``.
+
+    Sanitizes invalid-JSON tool call arguments in message history before
+    every model request. Some models (e.g. deepseek-v4-flash) occasionally
+    emit tool call arguments that are not valid JSON; the provider rejects
+    the poisoned history with HTTP 400 on the next request. This capability
+    replaces such arguments with ``{}`` so bad JSON never reaches the provider.
+    """
+
+    type: Literal["tool_arg_sanitize"] = "tool_arg_sanitize"
+    enabled: bool = True
+    """Master switch. Set to ``false`` to observe without sanitizing."""
 
 
 class VikingCapabilityConfig(BaseModel):
@@ -186,6 +217,20 @@ class VikingCapabilityConfig(BaseModel):
     """Override for sessions URI. Default: viking://user/{user}/sessions/"""
     multimodal_bridge: bool = False
     """Enable multimodal bridge (Phase 6, not yet implemented)."""
+    support_vision: bool | None = None
+    """Result of viking_read for image URIs.
+
+    Tri-state control over how image resources are returned to the model:
+
+    - ``True`` — return image bytes (``BinaryImage``) regardless of model.
+    - ``False`` — return a text URI description, never image bytes.
+    - ``None`` (default) — auto-detect from resolved model capabilities
+      (``image_input``); text-only when unknown.
+
+    When forcing ``True`` on a model that does not actually accept image
+    input, configure ``type: modality_filter`` as a safety net so the
+    image is degraded before reaching the model API.
+    """
     uploads_uri: str | None = None
     """Override for uploads URI."""
     public_download_base_url: str | None = None
@@ -271,6 +316,19 @@ class VikingCapabilityConfig(BaseModel):
     """Tool names protected by the URI guard. When uri_guard_enabled is True,
     these tools are blocked from accessing viking:// URIs. Customize to add
     or remove tools from the protected list."""
+    allowed_uri_prefixes: list[str] = Field(default_factory=list)
+    """URI prefix allowlist covering all viking:// namespaces. When
+    non-empty:
+    - knowledge-base access (all ``viking_*`` tools + the @-mention flow)
+      rejects URIs outside the listed prefixes;
+    - memory paths — auto-recall, profile injection, compaction, and
+      multimodal-bridge uploads — are only active when their target URI
+      (e.g. ``viking://user/{user}/memories/``) is inside the list;
+    - skill discovery (``list_skills``/``read_skill``/``skill_exists``) is
+      only active when the skills URI is inside the list.
+    Since one list governs everything, include both the intended resource
+    prefixes and the memory/skill prefixes when those features are needed.
+    Empty list (default) means unrestricted — backward compatible."""
     compaction_enabled: bool = False
     """When True, archive old conversation messages to Viking before context
     overflow. Disabled by default."""
@@ -296,6 +354,30 @@ class VikingCapabilityConfig(BaseModel):
     """When True (default), profile injection runs only on the first turn
     of a session (message count <= 2). When False, injection runs on every
     before_model_request call where _profile_injected is False."""
+    enabled_tools: list[str] | None = Field(
+        default=None,
+        examples=[["viking_ls", "viking_read", "viking_grep"]],
+        title="Enabled tools",
+    )
+    """If set, only these tools will be available (whitelist).
+    Mutually exclusive with disabled_tools."""
+
+    disabled_tools: list[str] | None = Field(
+        default=None,
+        examples=[["viking_search", "viking_find"]],
+        title="Disabled tools",
+    )
+    """Tools to exclude from this capability (blacklist). Mutually exclusive
+    with enabled_tools. For example, disable a slow knowledge-graph semantic
+    search backend while keeping the deterministic tools:
+    ``disabled_tools: ["viking_search", "viking_find"]``."""
+
+    @model_validator(mode="after")
+    def _validate_tool_filters(self) -> Self:
+        """Validate that enabled_tools and disabled_tools are mutually exclusive."""
+        if self.enabled_tools is not None and self.disabled_tools is not None:
+            raise ValueError("Cannot specify both 'enabled_tools' and 'disabled_tools'")
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -413,6 +495,7 @@ BuiltinCapabilityConfig = Annotated[
     | SkillActivationCapabilityConfig
     | MemoryCapabilityConfig
     | ModalityFilterCapabilityConfig
+    | ToolArgSanitizeCapabilityConfig
     | VikingCapabilityConfig,
     Field(discriminator="type"),
 ]
@@ -510,6 +593,8 @@ def build_capability(config: CapabilityConfig) -> Any:  # noqa: PLR0911, RET503
             return _import_and_instantiate(IMPORT_MAP["memory"], config)
         case ModalityFilterCapabilityConfig():
             return _import_and_instantiate(IMPORT_MAP["modality_filter"], config)
+        case ToolArgSanitizeCapabilityConfig():
+            return _import_and_instantiate(IMPORT_MAP["tool_arg_sanitize"], config)
         case VikingCapabilityConfig():
             return _import_and_instantiate(IMPORT_MAP["viking"], config)
         case _ as unreachable:

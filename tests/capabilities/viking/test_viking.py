@@ -13,6 +13,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 from pydantic import ValidationError
+from pydantic_ai.messages import BinaryImage
 from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
 from pydantic_ai.models.test import TestModel
 import pytest
@@ -37,7 +38,7 @@ from wolfharness.capabilities.viking.utils import (
     is_viking_uri,
     truncate_text,
 )
-from wolfharness_config.capabilities import VikingCapabilityConfig
+from wolfharness_config.capabilities import VikingCapabilityConfig, build_capability
 
 
 pytestmark = pytest.mark.unit
@@ -98,6 +99,32 @@ class TestVikingCapabilityConfig:
         assert cfg.uploads_uri is None
         assert cfg.public_download_base_url is None
         assert cfg.resource_read_level == "overview"
+
+    def test_default_support_vision_none(self) -> None:
+        """support_vision defaults to None (auto-detect from model capabilities)."""
+        cfg = VikingCapabilityConfig()
+        assert cfg.support_vision is None
+
+    def test_support_vision_true(self) -> None:
+        """support_vision=True forces image bytes for image URIs."""
+        cfg = VikingCapabilityConfig(support_vision=True)
+        assert cfg.support_vision is True
+
+    def test_support_vision_false(self) -> None:
+        """support_vision=False forces text URI descriptions for image URIs."""
+        cfg = VikingCapabilityConfig(support_vision=False)
+        assert cfg.support_vision is False
+
+    def test_support_vision_build_passthrough(self) -> None:
+        """build_capability passes support_vision=... to VikingCapability.
+
+        Explicit False must reach the capability (only None is filtered by
+        _import_and_instantiate), so forced-text mode survives the build.
+        """
+        cap = build_capability(VikingCapabilityConfig(support_vision=False))
+        assert cap.support_vision is False
+        cap_none = build_capability(VikingCapabilityConfig())
+        assert cap_none.support_vision is None
 
     def test_mode_retrieve(self) -> None:
         """Mode 'retrieve' is accepted."""
@@ -163,6 +190,71 @@ class TestVikingCapabilityConfig:
         union_type = typing.get_args(BuiltinCapabilityConfig)[0]
         member_types = typing.get_args(union_type)
         assert VikingCapabilityConfig in member_types
+
+
+# ---------------------------------------------------------------------------
+# support_vision — _should_return_image_bytes tri-state matrix
+# ---------------------------------------------------------------------------
+
+
+class TestShouldReturnImageBytes:
+    """Tri-state matrix for ``_should_return_image_bytes``."""
+
+    @staticmethod
+    def _cap(
+        support_vision: bool | None = None, image_input: bool | None = None
+    ) -> VikingCapability:
+        from wolfharness_config.model_capabilities import ModelCapabilities
+
+        cap = VikingCapability(mode="all", support_vision=support_vision)
+        cap.model_capabilities = ModelCapabilities(image_input=image_input)
+        return cap
+
+    @pytest.mark.parametrize(
+        "image_input",
+        [None, False, True],
+        ids=["unknown", "false", "true"],
+    )
+    def test_explicit_true_overrides_all(self, image_input: bool | None) -> None:
+        """support_vision=True forces bytes regardless of model capabilities."""
+        cap = self._cap(support_vision=True, image_input=image_input)
+        assert cap._should_return_image_bytes() is True
+
+    @pytest.mark.parametrize(
+        "image_input",
+        [None, False, True],
+        ids=["unknown", "false", "true"],
+    )
+    def test_explicit_false_overrides_all(self, image_input: bool | None) -> None:
+        """support_vision=False forces text regardless of model capabilities."""
+        cap = self._cap(support_vision=False, image_input=image_input)
+        assert cap._should_return_image_bytes() is False
+
+    def test_auto_vision_model(self) -> None:
+        """support_vision=None + image_input=True auto-detects vision."""
+        cap = self._cap(support_vision=None, image_input=True)
+        assert cap._should_return_image_bytes() is True
+
+    def test_auto_text_only_model(self) -> None:
+        """support_vision=None + image_input=False auto-detects text-only."""
+        cap = self._cap(support_vision=None, image_input=False)
+        assert cap._should_return_image_bytes() is False
+
+    def test_auto_unknown_capability_field(self) -> None:
+        """support_vision=None + image_input=None (cache miss) degrades to text."""
+        cap = self._cap(support_vision=None, image_input=None)
+        assert cap._should_return_image_bytes() is False
+
+    def test_auto_uninjected_capabilities(self) -> None:
+        """support_vision=None + model_capabilities=None (not injected) → text.
+
+        Safe degradation: the capability *produces* image content and must
+        not emit BinaryImage it cannot guarantee the model accepts (unlike
+        ModalityFilterCapability which passes through on None).
+        """
+        cap = VikingCapability(mode="all", support_vision=None)
+        cap.model_capabilities = None
+        assert cap._should_return_image_bytes() is False
 
 
 # ---------------------------------------------------------------------------
@@ -612,6 +704,238 @@ class TestRetrieveTools:
         result = await read_tool(ctx, uris="viking://single.md")
 
         assert "===" not in result.return_value
+
+    # ------------------------------------------------------------------
+    # viking_read image branch (support_vision)
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_viking_read_image_support_vision_true(
+        self, viking_cap: VikingCapability, mock_client: AsyncMock
+    ) -> None:
+        """support_vision=True returns BinaryImage with correct data & mime."""
+        viking_cap.support_vision = True
+        mock_client.download_bytes = AsyncMock(return_value=b"\x89PNG-fake-image-bytes")
+        tools = build_tools(viking_cap)
+        read_tool = _get_tool(tools, "viking_read")
+
+        ctx = _make_ctx()
+        result = await read_tool(ctx, uris="viking://photo.png")
+
+        mock_client.download_bytes.assert_called_once_with("viking://photo.png")
+        mock_client.read.assert_not_called()
+        assert result.content is not None
+        parts = list(result.content)
+        assert any(isinstance(p, BinaryImage) for p in parts)
+        img = next(p for p in parts if isinstance(p, BinaryImage))
+        assert img.data == b"\x89PNG-fake-image-bytes"
+        assert img.media_type == "image/png"
+
+    @pytest.mark.asyncio
+    async def test_viking_read_image_oversize_degrades_to_hint(
+        self, viking_cap: VikingCapability, mock_client: AsyncMock
+    ) -> None:
+        """Oversize image degrades to a text hint, no BinaryImage emitted."""
+        from wolfharness.capabilities.viking.constants import IMAGE_BLOB_MAX_BYTES
+
+        viking_cap.support_vision = True
+        mock_client.download_bytes = AsyncMock(return_value=b"\x00" * (IMAGE_BLOB_MAX_BYTES + 1))
+        tools = build_tools(viking_cap)
+        read_tool = _get_tool(tools, "viking_read")
+
+        ctx = _make_ctx()
+        result = await read_tool(ctx, uris="viking://huge.jpg")
+
+        mock_client.download_bytes.assert_called_once_with("viking://huge.jpg")
+        assert result.content is None
+        assert "Image resource" in result.return_value
+
+    @pytest.mark.asyncio
+    async def test_viking_read_image_support_vision_false(
+        self, viking_cap: VikingCapability, mock_client: AsyncMock
+    ) -> None:
+        """support_vision=False returns text URI hint, no download."""
+        viking_cap.support_vision = False
+        tools = build_tools(viking_cap)
+        read_tool = _get_tool(tools, "viking_read")
+
+        ctx = _make_ctx()
+        result = await read_tool(ctx, uris="viking://photo.png")
+
+        mock_client.download_bytes.assert_not_called()
+        mock_client.read.assert_not_called()
+        assert result.content is None
+        assert "viking://photo.png" in result.return_value
+        assert "Image resource" in result.return_value
+
+    @pytest.mark.asyncio
+    async def test_viking_read_image_auto_vision_model(
+        self, viking_cap: VikingCapability, mock_client: AsyncMock
+    ) -> None:
+        """support_vision=None + image_input=True returns image bytes."""
+        from wolfharness_config.model_capabilities import ModelCapabilities
+
+        viking_cap.support_vision = None
+        viking_cap.model_capabilities = ModelCapabilities(image_input=True)
+        mock_client.download_bytes = AsyncMock(return_value=b"webp-data")
+        tools = build_tools(viking_cap)
+        read_tool = _get_tool(tools, "viking_read")
+
+        ctx = _make_ctx()
+        result = await read_tool(ctx, uris="viking://pic.webp")
+
+        parts = list(result.content) if result.content is not None else []
+        assert any(isinstance(p, BinaryImage) for p in parts)
+        img = next(p for p in parts if isinstance(p, BinaryImage))
+        assert img.media_type == "image/webp"
+
+    @pytest.mark.asyncio
+    async def test_viking_read_image_auto_text_only_model(
+        self, viking_cap: VikingCapability, mock_client: AsyncMock
+    ) -> None:
+        """support_vision=None + image_input=False returns text URI hint."""
+        from wolfharness_config.model_capabilities import ModelCapabilities
+
+        viking_cap.support_vision = None
+        viking_cap.model_capabilities = ModelCapabilities(image_input=False)
+        tools = build_tools(viking_cap)
+        read_tool = _get_tool(tools, "viking_read")
+
+        ctx = _make_ctx()
+        result = await read_tool(ctx, uris="viking://photo.png")
+
+        assert result.content is None
+        assert "Image resource" in result.return_value
+        mock_client.download_bytes.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_viking_read_non_image_ignores_support_vision(
+        self, viking_cap: VikingCapability, mock_client: AsyncMock
+    ) -> None:
+        """Non-image URIs keep the text path regardless of the switch."""
+        viking_cap.support_vision = True
+        mock_client.read = AsyncMock(return_value="text content")
+        tools = build_tools(viking_cap)
+        read_tool = _get_tool(tools, "viking_read")
+
+        ctx = _make_ctx()
+        result = await read_tool(ctx, uris="viking://doc.md")
+
+        mock_client.download_bytes.assert_not_called()
+        mock_client.read.assert_called_once()
+        assert result.content is None
+        assert "text content" in result.return_value
+
+    @pytest.mark.asyncio
+    async def test_viking_read_image_download_error(
+        self, viking_cap: VikingCapability, mock_client: AsyncMock
+    ) -> None:
+        """download_bytes failure returns viking_read error text, no raise."""
+        viking_cap.support_vision = True
+        mock_client.download_bytes = AsyncMock(side_effect=RuntimeError("boom"))
+        tools = build_tools(viking_cap)
+        read_tool = _get_tool(tools, "viking_read")
+
+        ctx = _make_ctx()
+        result = await read_tool(ctx, uris="viking://photo.png")
+
+        assert "viking_read error" in result.return_value
+        assert "boom" in result.return_value
+
+    @pytest.mark.asyncio
+    async def test_viking_read_image_mixed_uris(
+        self, viking_cap: VikingCapability, mock_client: AsyncMock
+    ) -> None:
+        """Mixed image + text URIs: image bytes + text sections, order kept."""
+        viking_cap.support_vision = True
+        mock_client.read = AsyncMock(return_value="doc body")
+        mock_client.download_bytes = AsyncMock(return_value=b"img-bytes")
+        tools = build_tools(viking_cap)
+        read_tool = _get_tool(tools, "viking_read")
+
+        ctx = _make_ctx()
+        result = await read_tool(ctx, uris=["viking://a.md", "viking://photo.jpg", "viking://b.md"])
+
+        assert mock_client.read.call_count == 2
+        mock_client.download_bytes.assert_called_once_with("viking://photo.jpg")
+        assert "=== viking://photo.jpg ===" in result.return_value
+        parts = list(result.content) if result.content is not None else []
+        assert any(isinstance(p, BinaryImage) for p in parts)
+
+    @pytest.mark.asyncio
+    async def test_viking_read_multi_image_index_maps_to_content_order(
+        self, viking_cap: VikingCapability, mock_client: AsyncMock
+    ) -> None:
+        """Multi-image reads: #N markers in return_value map to content order.
+
+        The text return_value must carry indexed markers ([Image #1], [#2], ...)
+        in URIs order, and the BinaryImage parts in ToolReturn.content must
+        follow the same order — so the model can disambiguate which image
+        belongs to which URI.
+        """
+        viking_cap.support_vision = True
+        mock_client.download_bytes = AsyncMock(side_effect=[b"a-bytes", b"b-bytes", b"c-bytes"])
+        tools = build_tools(viking_cap)
+        read_tool = _get_tool(tools, "viking_read")
+
+        ctx = _make_ctx()
+        result = await read_tool(
+            ctx,
+            uris=[
+                "viking://one.png",
+                "viking://two.png",
+                "viking://three.png",
+            ],
+        )
+
+        # Markers appear in URI order, 1-based.
+        rv = result.return_value
+        i1, i2, i3 = rv.index("[Image #1"), rv.index("[Image #2"), rv.index("[Image #3")
+        assert i1 < i2 < i3
+        # Content mirrors the same order.
+        imgs = [p for p in (result.content or []) if isinstance(p, BinaryImage)]
+        assert [p.data for p in imgs] == [b"a-bytes", b"b-bytes", b"c-bytes"]
+        assert [p.media_type for p in imgs] == ["image/png"] * 3
+
+    @pytest.mark.asyncio
+    async def test_viking_read_image_svg_never_returns_bytes(
+        self, viking_cap: VikingCapability, mock_client: AsyncMock
+    ) -> None:
+        """SVG images degrade to text URI hint even with support_vision=True."""
+        viking_cap.support_vision = True
+        tools = build_tools(viking_cap)
+        read_tool = _get_tool(tools, "viking_read")
+
+        ctx = _make_ctx()
+        result = await read_tool(ctx, uris="viking://diagram.svg")
+
+        mock_client.download_bytes.assert_not_called()
+        assert result.content is None
+        assert "Image resource" in result.return_value
+
+    @pytest.mark.asyncio
+    async def test_viking_read_image_jpeg_mime_extension_map(
+        self, viking_cap: VikingCapability, mock_client: AsyncMock
+    ) -> None:
+        """Unknown image extension falls back to application/octet-stream."""
+        viking_cap.support_vision = True
+        mock_client.download_bytes = AsyncMock(return_value=b"raw-bytes")
+        tools = build_tools(viking_cap)
+        read_tool = _get_tool(tools, "viking_read")
+
+        ctx = _make_ctx()
+        await read_tool(ctx, uris="viking://data.xyz")
+
+        # .xyz is not a known image extension → text path untouched.
+        mock_client.read = AsyncMock(return_value="content")
+        result2 = await read_tool(ctx, uris="viking://data.xyz")
+        assert result2.content is None
+
+        # .jpeg maps to image/jpeg.
+        result3 = await read_tool(ctx, uris="viking://pic.jpeg")
+        parts = list(result3.content) if result3.content is not None else []
+        img = next(p for p in parts if isinstance(p, BinaryImage))
+        assert img.media_type == "image/jpeg"
 
 
 # ---------------------------------------------------------------------------
@@ -1522,7 +1846,7 @@ class TestErrorHandling:
         tools = build_tools(viking_cap)
         ctx = _make_ctx()
         result = await _get_tool(tools, "viking_search")(ctx, query="test")
-        assert "viking_search error: connection failed" in result.return_value
+        assert "viking_search error (RuntimeError): connection failed" in result.return_value
 
     @pytest.mark.asyncio
     async def test_find_error(self, viking_cap: VikingCapability, mock_client: AsyncMock) -> None:
@@ -1530,7 +1854,7 @@ class TestErrorHandling:
         tools = build_tools(viking_cap)
         ctx = _make_ctx()
         result = await _get_tool(tools, "viking_find")(ctx, query="test")
-        assert "viking_find error: timeout" in result.return_value
+        assert "viking_find error (RuntimeError): timeout" in result.return_value
 
     @pytest.mark.asyncio
     async def test_recall_error(self, viking_cap: VikingCapability, mock_client: AsyncMock) -> None:
@@ -1538,7 +1862,7 @@ class TestErrorHandling:
         tools = build_tools(viking_cap)
         ctx = _make_ctx()
         result = await _get_tool(tools, "viking_recall")(ctx, query="test")
-        assert "viking_recall error: server error" in result.return_value
+        assert "viking_recall error (RuntimeError): server error" in result.return_value
 
     @pytest.mark.asyncio
     async def test_grep_error(self, viking_cap: VikingCapability, mock_client: AsyncMock) -> None:
@@ -1556,7 +1880,7 @@ class TestErrorHandling:
         tools = build_tools(viking_cap)
         ctx = _make_ctx()
         result = await _get_tool(tools, "viking_glob")(ctx, pattern="**/*.md")
-        assert "viking_glob error: error" in result.return_value
+        assert "viking_glob error (RuntimeError): error" in result.return_value
 
     @pytest.mark.asyncio
     async def test_ls_error(self, viking_cap: VikingCapability, mock_client: AsyncMock) -> None:
@@ -1564,7 +1888,7 @@ class TestErrorHandling:
         tools = build_tools(viking_cap)
         ctx = _make_ctx()
         result = await _get_tool(tools, "viking_ls")(ctx, uri="viking://missing/")
-        assert "viking_ls error: not found" in result.return_value
+        assert "viking_ls error (RuntimeError): not found" in result.return_value
 
     @pytest.mark.asyncio
     async def test_read_error(self, viking_cap: VikingCapability, mock_client: AsyncMock) -> None:
@@ -1572,7 +1896,7 @@ class TestErrorHandling:
         tools = build_tools(viking_cap)
         ctx = _make_ctx()
         result = await _get_tool(tools, "viking_read")(ctx, uris="viking://secret.md")
-        assert "viking_read error: permission denied" in result.return_value
+        assert "viking_read error (RuntimeError): permission denied" in result.return_value
 
     @pytest.mark.asyncio
     async def test_write_error(self, viking_cap: VikingCapability, mock_client: AsyncMock) -> None:
@@ -1580,7 +1904,7 @@ class TestErrorHandling:
         tools = build_tools(viking_cap)
         ctx = _make_ctx()
         result = await _get_tool(tools, "viking_write")(ctx, uri="viking://doc.md", content="data")
-        assert "viking_write error: disk full" in result.return_value
+        assert "viking_write error (RuntimeError): disk full" in result.return_value
 
     @pytest.mark.asyncio
     async def test_edit_error(self, viking_cap: VikingCapability, mock_client: AsyncMock) -> None:
@@ -1590,7 +1914,7 @@ class TestErrorHandling:
         result = await _get_tool(tools, "viking_edit")(
             ctx, uri="viking://doc.md", old_string="a", new_string="b"
         )
-        assert "viking_edit error: network error" in result.return_value
+        assert "viking_edit error (RuntimeError): network error" in result.return_value
 
     @pytest.mark.asyncio
     async def test_mkdir_error(self, viking_cap: VikingCapability, mock_client: AsyncMock) -> None:
@@ -1598,7 +1922,7 @@ class TestErrorHandling:
         tools = build_tools(viking_cap)
         ctx = _make_ctx()
         result = await _get_tool(tools, "viking_mkdir")(ctx, uri="viking://exists/")
-        assert "viking_mkdir error: exists" in result.return_value
+        assert "viking_mkdir error (RuntimeError): exists" in result.return_value
 
     @pytest.mark.asyncio
     async def test_add_resource_error(
@@ -1608,7 +1932,7 @@ class TestErrorHandling:
         tools = build_tools(viking_cap)
         ctx = _make_ctx()
         result = await _get_tool(tools, "viking_add_resource")(ctx, path="/bad/path")
-        assert "viking_add_resource error: invalid path" in result.return_value
+        assert "viking_add_resource error (RuntimeError): invalid path" in result.return_value
 
     @pytest.mark.asyncio
     async def test_forget_error(self, viking_cap: VikingCapability, mock_client: AsyncMock) -> None:
@@ -1616,7 +1940,7 @@ class TestErrorHandling:
         tools = build_tools(viking_cap)
         ctx = _make_ctx()
         result = await _get_tool(tools, "viking_forget")(ctx, uri="viking://protected.md")
-        assert "viking_forget error: protected" in result.return_value
+        assert "viking_forget error (RuntimeError): protected" in result.return_value
 
     @pytest.mark.asyncio
     async def test_link_error(self, viking_cap: VikingCapability, mock_client: AsyncMock) -> None:
@@ -1626,7 +1950,7 @@ class TestErrorHandling:
         result = await _get_tool(tools, "viking_link")(
             ctx, from_uri="viking://a.md", to_uris="viking://b.md"
         )
-        assert "viking_link error: cycle detected" in result.return_value
+        assert "viking_link error (RuntimeError): cycle detected" in result.return_value
 
     @pytest.mark.asyncio
     async def test_set_tags_error(
@@ -1636,7 +1960,7 @@ class TestErrorHandling:
         tools = build_tools(viking_cap)
         ctx = _make_ctx()
         result = await _get_tool(tools, "viking_set_tags")(ctx, uri="viking://doc.md", tags=["bad"])
-        assert "viking_set_tags error: invalid tag" in result.return_value
+        assert "viking_set_tags error (RuntimeError): invalid tag" in result.return_value
 
     @pytest.mark.asyncio
     async def test_ensure_client_lazy_init(self) -> None:
@@ -1930,6 +2254,36 @@ class TestModeFiltering:
         tools = build_tools(cap)
         assert len(tools) == 16
 
+    def test_disabled_tools_excludes_search_find(self) -> None:
+        """disabled_tools blacklist removes viking_search and viking_find."""
+        cap = VikingCapability(
+            mode="retrieve",
+            disabled_tools=["viking_search", "viking_find"],
+        )
+        cap._client = AsyncMock()
+        tools = build_tools(cap)
+        names = {t.__name__ for t in tools}
+        assert "viking_search" not in names
+        assert "viking_find" not in names
+        assert "viking_read" in names
+        assert "viking_grep" in names
+
+    def test_enabled_tools_whitelist(self) -> None:
+        """enabled_tools whitelist keeps only the listed tools."""
+        cap = VikingCapability(mode="retrieve", enabled_tools=["viking_ls", "viking_read"])
+        cap._client = AsyncMock()
+        tools = build_tools(cap)
+        names = {t.__name__ for t in tools}
+        assert names == {"viking_ls", "viking_read"}
+
+    def test_enabled_tools_unknown_names_ignored(self) -> None:
+        """enabled_tools entries that don't match any tool are ignored."""
+        cap = VikingCapability(mode="retrieve", enabled_tools=["viking_ls", "nope_tool"])
+        cap._client = AsyncMock()
+        tools = build_tools(cap)
+        names = {t.__name__ for t in tools}
+        assert names == {"viking_ls"}
+
     def test_get_toolset_retrieve(self) -> None:
         """get_toolset() returns a FunctionToolset with 7 tools for retrieve mode (default)."""
         from pydantic_ai.toolsets import FunctionToolset
@@ -2052,6 +2406,31 @@ class TestGetInstructions:
         cap_all = VikingCapability(mode="all")
         cap_retrieve = VikingCapability(mode="retrieve")
         assert cap_all.get_instructions() == cap_retrieve.get_instructions()
+
+    def test_instructions_no_prefix_block_when_unrestricted(self) -> None:
+        """get_instructions() omits the allowed-prefix block when unrestricted."""
+        cap = VikingCapability(mode="all")
+        instructions = cap.get_instructions()
+        assert instructions is not None
+        assert "Allowed URI Prefixes" not in instructions
+
+    def test_instructions_include_prefix_block_when_restricted(self) -> None:
+        """get_instructions() lists the allowed prefixes.
+
+        So the model can pass a target_uri and skip discovery probing.
+        """
+        cap = VikingCapability(
+            mode="all",
+            allowed_uri_prefixes=[
+                "viking://resources/wiki/",
+                "viking://resources/raw/",
+            ],
+        )
+        instructions = cap.get_instructions()
+        assert instructions is not None
+        assert "Allowed URI Prefixes" in instructions
+        assert "viking://resources/wiki/" in instructions
+        assert "viking://resources/raw/" in instructions
 
     def test_on_change_returns_none(self) -> None:
         """on_change() returns None."""
@@ -2264,6 +2643,77 @@ class TestResourceAccessProtocol:
         mock_client.read = AsyncMock(side_effect=RuntimeError("not found"))
         result = await viking_cap.read_resource("viking://resources/missing.md")
         assert result is None
+
+    async def test_read_resource_image_returns_blob(
+        self, viking_cap: VikingCapability, mock_client: AsyncMock
+    ) -> None:
+        """Image resources are served as base64 blob bytes + MIME for vision models."""
+        import base64
+
+        viking_cap.support_vision = True
+        mock_client.download_bytes = AsyncMock(return_value=b"\x89PNG-fake")
+        result = await viking_cap.read_resource("viking://resources/photo.png")
+        assert result is not None
+        assert result[0].mime_type == "image/png"
+        assert result[0].blob == base64.b64encode(b"\x89PNG-fake").decode("ascii")
+        mock_client.download_bytes.assert_called_once_with("viking://resources/photo.png")
+        mock_client.overview.assert_not_called()
+
+    async def test_read_resource_image_bytes_regardless_of_support_vision(
+        self, viking_cap: VikingCapability, mock_client: AsyncMock
+    ) -> None:
+        """read_resource is programmatic — image bytes even when text-only.
+
+        ``support_vision`` only gates the ``viking_read`` LLM tool (which
+        returns content to the model conversation); ``read_resource`` always
+        returns the actual payload, so programmatic consumers (e.g.
+        AnalyzeImageCapability) receive image bytes regardless of the
+        capability's vision setting.
+        """
+        import base64
+
+        mock_client.download_bytes = AsyncMock(return_value=b"\x89PNG-fake")
+        result = await viking_cap.read_resource("viking://resources/photo.png")
+        assert result is not None
+        assert result[0].mime_type == "image/png"
+        assert result[0].blob == base64.b64encode(b"\x89PNG-fake").decode("ascii")
+        mock_client.download_bytes.assert_called_once_with("viking://resources/photo.png")
+        mock_client.overview.assert_not_called()
+
+    async def test_read_resource_oversize_image_degrades_to_hint(
+        self, viking_cap: VikingCapability, mock_client: AsyncMock
+    ) -> None:
+        """Oversize images degrade to a text hint even for vision models."""
+        from wolfharness.capabilities.viking.constants import IMAGE_BLOB_MAX_BYTES
+
+        viking_cap.support_vision = True
+        mock_client.download_bytes = AsyncMock(return_value=b"\x00" * (IMAGE_BLOB_MAX_BYTES + 1))
+        result = await viking_cap.read_resource("viking://resources/huge.jpg")
+        assert result is not None
+        assert result[0].text is not None
+        assert "Image resource" in result[0].text
+        mock_client.download_bytes.assert_called_once_with("viking://resources/huge.jpg")
+
+    async def test_read_resource_non_viking_scheme_stays_text(
+        self, viking_cap: VikingCapability, mock_client: AsyncMock
+    ) -> None:
+        """http(s) URLs never enter the image byte path even with vision on."""
+        viking_cap.support_vision = True
+        result = await viking_cap.read_resource("https://example.com/photo.png")
+        assert result is not None
+        assert result[0].text is not None
+        mock_client.download_bytes.assert_not_called()
+
+    async def test_read_resource_svg_stays_text(
+        self, viking_cap: VikingCapability, mock_client: AsyncMock
+    ) -> None:
+        """SVG is vector text, not blob bytes — text path with a URI hint kept."""
+        mock_client.overview = AsyncMock(return_value="<svg/>")
+        result = await viking_cap.read_resource("viking://resources/diagram.svg")
+        assert result is not None
+        assert result[0].text == "<svg/>"
+        mock_client.overview.assert_called_once_with("viking://resources/diagram.svg")
+        mock_client.download_bytes.assert_not_called()
 
     async def test_resource_exists_true(
         self, viking_cap: VikingCapability, mock_client: AsyncMock
@@ -2658,7 +3108,7 @@ class TestTieredLoadingVikingRead:
         ctx = _make_ctx()
         result = await read_tool(ctx, uris="viking://doc.md", level="abstract")
 
-        assert "viking_read error: not available" in result.return_value
+        assert "viking_read error (RuntimeError): not available" in result.return_value
 
 
 class TestTieredLoadingReadResource:
@@ -4068,6 +4518,359 @@ class TestURIGuard:
 
 
 # ---------------------------------------------------------------------------
+# 9.0 — allowed_uri_prefixes tests
+# ---------------------------------------------------------------------------
+
+
+class TestAllowedUriPrefixes:
+    """Tests for the allowed_uri_prefixes access restriction."""
+
+    def test_default_unrestricted(self) -> None:
+        """Empty allowed_uri_prefixes means unrestricted."""
+        cap = VikingCapability()
+        assert cap.allowed_uri_prefixes == []
+        assert cap._check_uri_allowed("viking://resources/wiki/Device.md") is None
+        assert cap._check_uri_allowed("viking://user/alice/memories/x.md") is None
+
+    def test_matching_prefix_allowed(self) -> None:
+        """URI under an allowed prefix passes validation."""
+        cap = VikingCapability(allowed_uri_prefixes=["viking://resources/wiki/"])
+        assert cap._check_uri_allowed("viking://resources/wiki/Device/SY215.md") is None
+
+    def test_non_matching_prefix_blocked(self) -> None:
+        """URI outside allowed prefixes returns an error message."""
+        cap = VikingCapability(allowed_uri_prefixes=["viking://resources/wiki/"])
+        err = cap._check_uri_allowed("viking://resources/raw/engine.md")
+        assert err is not None
+        assert "outside the allowed prefixes" in err
+        assert "viking://resources/raw/engine.md" in err
+
+    def test_multiple_prefixes(self) -> None:
+        """Multiple allowed prefixes all pass; others are blocked."""
+        cap = VikingCapability(
+            allowed_uri_prefixes=["viking://resources/wiki/", "viking://resources/raw/"]
+        )
+        assert cap._check_uri_allowed("viking://resources/wiki/a.md") is None
+        assert cap._check_uri_allowed("viking://resources/raw/b.md") is None
+        assert cap._check_uri_allowed("viking://resources/docs/c.md") is not None
+
+    def test_empty_uri_allowed_when_restricted(self) -> None:
+        """Empty URI is allowed (nothing to restrict)."""
+        cap = VikingCapability(allowed_uri_prefixes=["viking://resources/wiki/"])
+        assert cap._check_uri_allowed("") is None
+
+    def test_tool_name_in_error(self) -> None:
+        """Tool name appears in the error message."""
+        cap = VikingCapability(allowed_uri_prefixes=["viking://resources/wiki/"])
+        err = cap._check_uri_allowed("viking://resources/raw/x.md", tool_name="viking_read")
+        assert err is not None
+        assert "viking_read" in err
+
+    def test_non_resources_namespace_always_allowed(self) -> None:
+        """Allowlist only applies to the viking://resources/ namespace."""
+        cap = VikingCapability(allowed_uri_prefixes=["viking://resources/wiki/"])
+        # Own user namespace (memories/sessions/skills) is not resources.
+        assert cap._check_uri_allowed("viking://user/alice/memories/x.md") is None
+        assert cap._check_uri_allowed("viking://user/alice/sessions/y.md") is None
+        assert cap._check_uri_allowed("viking://user/alice/skills/z.md") is None
+        # Other users' namespaces are also not restricted by this allowlist.
+        assert cap._check_uri_allowed("viking://user/bob/memories/x.md") is None
+        assert cap._check_uri_allowed("viking://skills/foo.md") is None
+        assert cap._check_uri_allowed("viking://resources/raw/engine.md") is not None
+
+    def test_prefixed_subtree_matches(self) -> None:
+        """Subtree under an allowed prefix passes validation."""
+        cap = VikingCapability(allowed_uri_prefixes=["viking://resources/wiki/"])
+        assert cap._check_uri_allowed("viking://resources/wiki/Device/SY215.md") is None
+        # A shorter namespace under resources but not in the allowlist is blocked.
+        assert cap._check_uri_allowed("viking://resources/fta-eval/x.md") is not None
+
+    def test_allowed_prefix_for(self) -> None:
+        """_allowed_prefix_for returns matched prefix or None."""
+        cap = VikingCapability(allowed_uri_prefixes=["viking://resources/wiki/"])
+        assert cap._allowed_prefix_for("viking://resources/wiki/a.md") == "viking://resources/wiki/"
+        assert cap._allowed_prefix_for("viking://resources/other/") is None
+
+    def test_allowed_prefix_for_unrestricted(self) -> None:
+        """_allowed_prefix_for returns the URI itself when unrestricted."""
+        cap = VikingCapability()
+        assert (
+            cap._allowed_prefix_for("viking://resources/wiki/a.md")
+            == "viking://resources/wiki/a.md"
+        )
+
+    @pytest.mark.asyncio
+    async def test_viking_read_blocks_outside_prefix(self, mock_client: AsyncMock) -> None:
+        """viking_read rejects URIs outside the allowed prefixes."""
+        cap = VikingCapability(mode="retrieve", allowed_uri_prefixes=["viking://resources/wiki/"])
+        cap._client = mock_client
+        tools = build_tools(cap)
+        read_tool = _get_tool(tools, "viking_read")
+
+        ctx = _make_ctx()
+        result = await read_tool(ctx, uris="viking://resources/raw/engine.md")
+
+        assert "outside the allowed prefixes" in result.return_value
+        mock_client.read.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_viking_read_allows_inside_prefix(self, mock_client: AsyncMock) -> None:
+        """viking_read reads URIs within the allowed prefixes."""
+        mock_client.read = AsyncMock(return_value="content")
+        cap = VikingCapability(mode="retrieve", allowed_uri_prefixes=["viking://resources/wiki/"])
+        cap._client = mock_client
+        tools = build_tools(cap)
+        read_tool = _get_tool(tools, "viking_read")
+
+        ctx = _make_ctx()
+        result = await read_tool(ctx, uris="viking://resources/wiki/Device/SY215.md")
+
+        assert "1\u2502 content" in result.return_value
+        assert mock_client.read.call_args.args[0] == "viking://resources/wiki/Device/SY215.md"
+
+    @pytest.mark.asyncio
+    async def test_viking_read_multi_uri_blocks_first_outside(self, mock_client: AsyncMock) -> None:
+        """viking_read rejects the batch if any URI is outside the prefixes."""
+        cap = VikingCapability(mode="retrieve", allowed_uri_prefixes=["viking://resources/wiki/"])
+        cap._client = mock_client
+        tools = build_tools(cap)
+        read_tool = _get_tool(tools, "viking_read")
+
+        ctx = _make_ctx()
+        result = await read_tool(
+            ctx, uris=["viking://resources/wiki/a.md", "viking://resources/raw/b.md"]
+        )
+
+        assert "outside the allowed prefixes" in result.return_value
+        mock_client.read.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_viking_write_blocks_outside_prefix(self, mock_client: AsyncMock) -> None:
+        """viking_write rejects URIs outside the allowed prefixes."""
+        cap = VikingCapability(mode="all", allowed_uri_prefixes=["viking://resources/wiki/"])
+        cap._client = mock_client
+        tools = build_tools(cap)
+        write_tool = _get_tool(tools, "viking_write")
+
+        ctx = _make_ctx()
+        result = await write_tool(ctx, uri="viking://resources/raw/note.md", content="hi")
+
+        assert "outside the allowed prefixes" in result.return_value
+        mock_client.write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_viking_search_defaults_to_first_prefix(self, mock_client: AsyncMock) -> None:
+        """viking_search passes the single allowed prefix as a one-element list.
+
+        A list is the SDK's multi-prefix scoping contract, so a single
+        prefix is passed as a one-element list rather than a bare string.
+        """
+        cap = VikingCapability(mode="retrieve", allowed_uri_prefixes=["viking://resources/wiki/"])
+        cap._client = mock_client
+        tools = build_tools(cap)
+        search_tool = _get_tool(tools, "viking_search")
+
+        ctx = _make_ctx()
+        await search_tool(ctx, query="hydraulic")
+
+        kwargs = mock_client.search.call_args.kwargs
+        assert kwargs["target_uri"] == ["viking://resources/wiki/"]
+
+    @pytest.mark.asyncio
+    async def test_viking_search_multi_prefix_defaults_to_all(self, mock_client: AsyncMock) -> None:
+        """viking_search without target_uri passes ALL allowed prefixes to the SDK.
+
+        The SDK's target_uri accepts a list and the server searches each
+        prefix — the old behavior of silently using only the first prefix
+        dropped results from the other allowed trees.
+        """
+        cap = VikingCapability(
+            mode="retrieve",
+            allowed_uri_prefixes=["viking://resources/wiki/", "viking://resources/raw/"],
+        )
+        cap._client = mock_client
+        tools = build_tools(cap)
+        search_tool = _get_tool(tools, "viking_search")
+
+        ctx = _make_ctx()
+        await search_tool(ctx, query="hydraulic")
+
+        kwargs = mock_client.search.call_args.kwargs
+        assert kwargs["target_uri"] == [
+            "viking://resources/wiki/",
+            "viking://resources/raw/",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_viking_find_multi_prefix_defaults_to_all(self, mock_client: AsyncMock) -> None:
+        """viking_find without target_uri passes ALL allowed prefixes to the SDK."""
+        cap = VikingCapability(
+            mode="retrieve",
+            allowed_uri_prefixes=["viking://resources/wiki/", "viking://resources/raw/"],
+        )
+        cap._client = mock_client
+        tools = build_tools(cap)
+        find_tool = _get_tool(tools, "viking_find")
+
+        ctx = _make_ctx()
+        await find_tool(ctx, query="hydraulic")
+
+        kwargs = mock_client.find.call_args.kwargs
+        assert kwargs["target_uri"] == [
+            "viking://resources/wiki/",
+            "viking://resources/raw/",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_viking_search_blocks_outside_target(self, mock_client: AsyncMock) -> None:
+        """viking_search rejects a target_uri outside the allowed prefixes."""
+        cap = VikingCapability(mode="retrieve", allowed_uri_prefixes=["viking://resources/wiki/"])
+        cap._client = mock_client
+        tools = build_tools(cap)
+        search_tool = _get_tool(tools, "viking_search")
+
+        ctx = _make_ctx()
+        result = await search_tool(ctx, query="hydraulic", target_uri="viking://resources/raw/")
+
+        assert "outside the allowed prefixes" in result.return_value
+        mock_client.search.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_list_resources_filters_by_prefix(self, mock_client: AsyncMock) -> None:
+        """list_resources narrows resources tree, non-resources trees pass through."""
+        cap = VikingCapability(
+            allowed_uri_prefixes=["viking://resources/wiki/"],
+            user="alice",
+        )
+        cap._client = mock_client
+        mock_client.ls = AsyncMock(return_value=[])
+        resources = await cap.list_resources()
+        assert resources == []
+        ls_uris = [call.args[0] for call in mock_client.ls.await_args_list]
+        assert set(ls_uris) == {
+            "viking://resources/wiki/",
+            "viking://user/alice/sessions/",
+        }
+
+    @pytest.mark.asyncio
+    async def test_list_resources_includes_own_sessions(self, mock_client: AsyncMock) -> None:
+        """list_resources includes the non-resources sessions tree as-is."""
+        cap = VikingCapability(
+            allowed_uri_prefixes=["viking://resources/wiki/"],
+            user="alice",
+        )
+        cap._client = mock_client
+        mock_client.ls = AsyncMock(
+            return_value=[
+                {
+                    "uri": "viking://user/alice/sessions/s1.md",
+                    "name": "s1.md",
+                    "isDir": False,
+                }
+            ]
+        )
+        resources = await cap.list_resources()
+        assert len(resources) == 1
+        assert resources[0].uri == "viking://user/alice/sessions/s1.md"
+
+    @pytest.mark.asyncio
+    async def test_list_resources_includes_allowed_tree(self, mock_client: AsyncMock) -> None:
+        """list_resources lists the allowed prefix tree when it matches."""
+        cap = VikingCapability(allowed_uri_prefixes=["viking://resources/wiki/"])
+        cap._client = mock_client
+        mock_client.ls = AsyncMock(
+            return_value=[
+                {
+                    "uri": "viking://resources/wiki/Device/SY215.md",
+                    "name": "SY215.md",
+                    "isDir": False,
+                }
+            ]
+        )
+        resources = await cap.list_resources()
+        assert len(resources) == 1
+        assert resources[0].uri == "viking://resources/wiki/Device/SY215.md"
+
+    @pytest.mark.asyncio
+    async def test_read_resource_blocks_outside_prefix(self, mock_client: AsyncMock) -> None:
+        """read_resource returns None for URIs outside the allowed prefixes."""
+        cap = VikingCapability(allowed_uri_prefixes=["viking://resources/wiki/"])
+        cap._client = mock_client
+        result = await cap.read_resource("viking://resources/raw/engine.md")
+        assert result is None
+        mock_client.read.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_read_resource_allows_inside_prefix(self, mock_client: AsyncMock) -> None:
+        """read_resource returns content for URIs within the allowed prefixes."""
+        mock_client.read = AsyncMock(return_value="content")
+        cap = VikingCapability(
+            allowed_uri_prefixes=["viking://resources/wiki/"],
+            resource_read_level="read",
+        )
+        cap._client = mock_client
+        result = await cap.read_resource("viking://resources/wiki/a.md")
+        assert result is not None
+        assert result[0].text == "content"
+
+    @pytest.mark.asyncio
+    async def test_resource_exists_blocks_outside_prefix(self, mock_client: AsyncMock) -> None:
+        """resource_exists returns False for URIs outside the allowed prefixes."""
+        cap = VikingCapability(allowed_uri_prefixes=["viking://resources/wiki/"])
+        cap._client = mock_client
+        assert await cap.resource_exists("viking://resources/raw/a.md") is False
+        mock_client.ls.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_for_run_preserves_allowed_prefixes(self, mock_client: AsyncMock) -> None:
+        """for_run() preserves the allowed_uri_prefixes field."""
+        cap = VikingCapability(allowed_uri_prefixes=["viking://resources/wiki/"])
+        cap._client = mock_client
+        ctx = _make_ctx()
+        copy_cap = await cap.for_run(ctx)
+        assert copy_cap.allowed_uri_prefixes == ["viking://resources/wiki/"]
+
+    @pytest.mark.asyncio
+    async def test_auto_recall_fires_when_memories_outside_prefixes(
+        self, mock_client: AsyncMock
+    ) -> None:
+        """auto_recall still fires when memories_uri is not in the allowlist.
+
+        The agent's own memory namespace is implicitly allowed — the
+        knowledge-base allowlist does not gate memory features.
+        """
+        from pydantic_ai.messages import ModelRequest, UserPromptPart
+
+        mock_client.search = AsyncMock(
+            return_value={
+                "results": [
+                    {
+                        "uri": "viking://user/alice/memories/doc.md",
+                        "score": 0.9,
+                        "content": "hydraulic diagnosis info",
+                        "context_type": "memory",
+                    }
+                ]
+            }
+        )
+        cap = VikingCapability(
+            mode="retrieve",
+            auto_recall_enabled=True,
+            allowed_uri_prefixes=["viking://resources/wiki/"],
+        )
+        cap._client = mock_client
+        cap._identity = VikingIdentity(account_id="acct", user_id="alice", role="user")
+
+        ctx = _make_ctx()
+        rc = _make_request_context([ModelRequest(parts=[UserPromptPart(content="query")])])
+        result = await cap._handle_auto_recall(ctx, rc)
+
+        assert result is not rc
+        mock_client.search.assert_called_once()
+        assert mock_client.search.call_args.kwargs["target_uri"] == "viking://user/alice/memories/"
+
+
+# ---------------------------------------------------------------------------
 # 4.7 — viking_forget gating tests (Tasks 4.3-4.4)
 # ---------------------------------------------------------------------------
 
@@ -4538,7 +5341,7 @@ class TestCompaction:
         ctx = _make_ctx()
         result = await expand_tool(ctx, uri="viking://missing.md")
 
-        assert "viking_expand error: not found" in result.return_value
+        assert "viking_expand error (RuntimeError): not found" in result.return_value
 
     @pytest.mark.asyncio
     async def test_viking_expand_tool_empty_content(self, mock_client: AsyncMock) -> None:

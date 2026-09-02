@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta
 import inspect
 from pathlib import Path
@@ -1118,14 +1119,33 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
         )
 
         tool_capabilities.append(create_approval_bridge_capability(self, input_provider))
-        # 4. MCP servers
+        # 4. MCP servers.
+        #    Top-level (non-ACP) providers are injected directly — their tools
+        #    come from McpServerCap.get_toolset(). ACP providers continue via
+        #    the aggregating provider (Path C). Session-scoped configs (session
+        #    + skill) still use get_capabilities() with global configs excluded.
+        from wolfharness.capabilities.mcp_server_cap import McpServerCap
+
+        pool = self._agent_pool
+        if pool is not None:
+            tool_capabilities.extend(
+                provider for provider in pool.mcp.providers if isinstance(provider, McpServerCap)
+            )
+        # Top-level providers are injected directly above. When the agent
+        # shares the pool's MCPManager (no agent-level MCP servers), its
+        # global configs are already covered by ``pool.mcp.providers`` and
+        # must not be re-added via an MCP capability. But an agent with its
+        # own dedicated MCPManager owns its servers exclusively — those
+        # global configs are NOT in ``pool.mcp.providers`` and must still be
+        # processed (RFC-0058 exclude path only dedups the pool-shared case).
+        shares_pool_mcp = pool is not None and self.mcp is pool.mcp
         mcp_capabilities = await self.mcp.get_capabilities(
-            session_id=run_ctx.session_id if run_ctx else None
+            session_id=run_ctx.session_id if run_ctx else None,
+            exclude_global=shares_pool_mcp,
         )
         tool_capabilities.extend(mcp_capabilities)
         # 5. Skill capabilities — from pool-scoped instances created during __aenter__.
         #    Each SkillManagerCap provides tools and MCP servers.
-        pool = self._agent_pool
         if pool is not None:
             pool_capabilities = pool.skill_capabilities
             if pool_capabilities:
@@ -1136,9 +1156,16 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
                 )
             # 6. ResourceCapability — unified resource access tools.
             #    Per-agent opt-out via ``resources.enabled: false`` in YAML.
+            #    Per-agent max_text_chars via ``resources.max_text_chars`` in YAML.
             if self.config is not None and self.config.resources.enabled:
-                resource_cap = pool.resource_capability
-                if resource_cap is not None:
+                from wolfharness.capabilities.resource_capability import (
+                    ResourceCapability,
+                )
+
+                resource_cap = ResourceCapability(
+                    max_text_chars=self.config.resources.max_text_chars
+                )
+                if resource_cap not in self._external_capabilities:
                     tool_capabilities.append(resource_cap)
 
         # Register per-session capabilities (MCP, SkillManagerCap)
@@ -1158,9 +1185,20 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
                         ScopeLevel,
                     )
 
-                    session_scope = Scope(level=ScopeLevel.SESSION, session_id=session_id)
+                    session_scope = Scope(
+                        level=ScopeLevel.SESSION,
+                        agent_name=self.name,
+                        session_id=session_id,
+                    )
                     for cap in mcp_capabilities:
                         registry.register(cap, session_scope)
+                    # Agent/session MCP managers may own additional resource
+                    # providers. Pool-shared providers are already registered
+                    # at POOL scope by AgentFactory and must not be duplicated.
+                    if self.host_context is None or self.mcp is not self.host_context.mcp:
+                        for provider in self.mcp.get_mcp_providers():
+                            if provider.resources_supported is not False:
+                                registry.register(provider, session_scope)
                     if pool is not None:
                         pool_caps = pool.skill_capabilities
                         if pool_caps:
@@ -1268,6 +1306,7 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
                         audio_strategy=cap.audio_strategy,
                         video_strategy=cap.video_strategy,
                         document_strategy=cap.document_strategy,
+                        vision_model=cap.vision_model,
                     )
                     tool_capabilities[i] = populated
                     # Also replace in _external_capabilities so listing
@@ -1296,6 +1335,24 @@ class Agent[TDeps = None, OutputDataT = str](BaseAgent[TDeps, OutputDataT]):
                                 turn_id=turn_id,
                             )
                             registry.register(populated, turn_scope)
+
+                # Populate VikingCapability.model_capabilities with resolved
+                # model capabilities so viking_read can auto-detect whether
+                # to return image bytes (via _should_return_image_bytes).
+                # Like ModalityFilterCapability this is a capability-level
+                # population, not auto-injection of new capabilities.
+                from wolfharness.capabilities.viking import VikingCapability
+
+                if isinstance(cap, VikingCapability):
+                    populated_viking = replace(
+                        cap,
+                        model_capabilities=resolved_caps,
+                    )
+                    tool_capabilities[i] = populated_viking
+                    for j, ext_cap in enumerate(self._external_capabilities):
+                        if ext_cap is cap:
+                            self._external_capabilities[j] = populated_viking
+                            break
 
         # Handle retries parameter: newer pydantic-ai uses dict form for output_retries
         if AgentRetries is not None and self._output_retries is not None:

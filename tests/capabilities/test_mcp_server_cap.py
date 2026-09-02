@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import mcp.types
 from pydantic import AnyUrl
@@ -29,6 +30,8 @@ from wolfharness.capabilities.resource_protocols import (
     CompletionArgument,
     CompletionResult,
     McpResource,
+    McpResourceListPage,
+    McpResourceTemplateListPage,
     ResourceAccess,
     ResourceTemplateAccess,
     ResourceTemplateEntry,
@@ -67,6 +70,7 @@ class FakeMCPClient:
     _prompt_change_callback: Any = None
     _subscribed_uris: list[str] = field(default_factory=list)
     _unsubscribed_uris: list[str] = field(default_factory=list)
+    _supports_resources: bool = True
     config: Any = None
 
     async def __aenter__(self) -> Self:
@@ -86,10 +90,48 @@ class FakeMCPClient:
             raise RuntimeError("Not connected")
         return list(self._resources)
 
+    async def supports_resources(self) -> bool:
+        return self._supports_resources
+
+    async def list_resources_mcp(self, cursor: str | None = None) -> McpResourceListPage:
+        del cursor
+        from wolfharness.capabilities.resource_protocols import ResourceEntry
+
+        return McpResourceListPage(
+            entries=[
+                ResourceEntry(
+                    uri=str(resource.uri),
+                    server=self.config.client_id if self.config is not None else "",
+                    name=resource.name,
+                    description=resource.description,
+                    mime_type=resource.mimeType,
+                )
+                for resource in self._resources
+            ]
+        )
+
     async def list_resource_templates(self) -> list[Any]:
         if not self._connected:
             raise RuntimeError("Not connected")
         return list(self._resource_templates)
+
+    async def list_resource_templates_mcp(
+        self, cursor: str | None = None
+    ) -> McpResourceTemplateListPage:
+        del cursor
+        from wolfharness.capabilities.resource_protocols import ResourceTemplateEntry
+
+        return McpResourceTemplateListPage(
+            entries=[
+                ResourceTemplateEntry(
+                    uri_template=str(template.uriTemplate),
+                    server=self.config.client_id if self.config is not None else "",
+                    name=template.name,
+                    description=template.description,
+                )
+                for template in self._resource_templates
+            ]
+        )
 
     async def read_resource(self, uri: str) -> list[Any]:
         if not self._connected:
@@ -115,6 +157,20 @@ class FakeMCPClient:
 
     def convert_tool(self, tool: Any) -> Any:
         return tool
+
+    def set_notification_callbacks(
+        self,
+        *,
+        tool_change_callback: Any = None,
+        prompt_change_callback: Any = None,
+        resource_list_changed_callback: Any = None,
+        resource_updated_callback: Any = None,
+    ) -> None:
+        """Mirror MCPClient.set_notification_callbacks."""
+        self._tool_change_callback = tool_change_callback
+        self._prompt_change_callback = prompt_change_callback
+        self._resource_list_changed_callback = resource_list_changed_callback
+        self._resource_updated_callback = resource_updated_callback
 
     async def trigger_tool_change(self) -> None:
         """Simulate MCP server sending notifications/tools/list_changed."""
@@ -148,6 +204,7 @@ class FakeSessionPool:
     async def get_client(self, config: Any, skill_name: str | None = None) -> FakeMCPClient:
         self.get_client_call_count += 1
         self._client._connected = True
+        self._client.config = config
         return self._client
 
 
@@ -167,8 +224,11 @@ def _make_resource(
     res = MagicMock()
     res.uri = uri
     res.name = name
+    res.title = None
     res.description = description
     res.mimeType = mime_type
+    res.meta = None
+    res.annotations = None
     return res
 
 
@@ -207,6 +267,7 @@ def _make_resource_template(
     tmpl.description = description
     tmpl.mimeType = mime_type
     tmpl.annotations = None
+    tmpl.meta = None
     return tmpl
 
 
@@ -315,6 +376,121 @@ async def test_lazy_init_connection_on_first_list_tools() -> None:
     assert pool.get_client_call_count == 1
 
 
+@pytest.mark.anyio
+async def test_lazy_init_direct_client_fallback() -> None:
+    """_ensure_client() creates direct MCPClient when no session pool."""
+    from unittest.mock import AsyncMock, patch
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = mock_client
+
+    with patch("wolfharness.mcp_server.client.MCPClient", return_value=mock_client):
+        cap = McpServerCap(config=_make_config())  # No session_pool, no client
+
+        assert cap._client is None
+        assert cap._session_pool is None
+
+        client = await cap._ensure_client()
+
+        assert client is mock_client
+        assert cap._client is mock_client
+        mock_client.__aenter__.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_list_tools_with_direct_client_fallback() -> None:
+    """list_tools() works with MCPClient created via fallback (no session pool)."""
+    from unittest.mock import AsyncMock, patch
+
+    tool = _make_tool("test_tool", "A test tool")
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = mock_client
+    mock_client.list_tools.return_value = [tool]
+
+    with patch("wolfharness.mcp_server.client.MCPClient", return_value=mock_client):
+        cap = McpServerCap(config=_make_config())
+
+        result = await cap.list_tools()
+
+        assert len(result) == 1
+        assert result[0].name == "test_tool"
+        mock_client.list_tools.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_direct_client_fallback_aexit() -> None:
+    """__aexit__ cleans up MCPClient created via fallback (no session pool)."""
+    from unittest.mock import AsyncMock, patch
+
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = mock_client
+
+    with patch("wolfharness.mcp_server.client.MCPClient", return_value=mock_client):
+        cap = McpServerCap(config=_make_config())
+
+        await cap._ensure_client()
+        assert cap._client is mock_client
+
+        await cap.__aexit__(None, None, None)
+
+        assert cap._client is None
+        mock_client.__aexit__.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_dict_config_normalized_at_init() -> None:
+    """Raw dict config is normalized to MCPServerConfig at __init__ time."""
+    from wolfharness_config.mcp_server import StreamableHTTPMCPServerConfig
+
+    raw_dict = {
+        "type": "streamable-http",
+        "name": "knowledge_diag",
+        "url": "http://localhost:9999/test",
+    }
+    cap = McpServerCap(config=raw_dict)
+
+    # MCPServerConfig is an Annotated type alias — can't use isinstance().
+    # Verify by checking the concrete type and attributes.
+    assert isinstance(cap.config, StreamableHTTPMCPServerConfig)
+    assert cap.config.display_name == "knowledge_diag"
+    # Without explicit name, name defaults to config.client_id
+    # (which is auto-generated from type+url, not from the json name field)
+
+
+@pytest.mark.anyio
+async def test_dict_config_ensure_client_creates_mcpclient() -> None:
+    """_ensure_client() works with dict config (normalized at init)."""
+    from unittest.mock import AsyncMock, patch
+
+    from wolfharness_config.mcp_server import StreamableHTTPMCPServerConfig
+
+    raw_dict = {
+        "type": "streamable-http",
+        "name": "knowledge_diag",
+        "url": "http://localhost:9999/test",
+    }
+
+    # Track what MCPClient receives
+    received_config: object = None
+
+    def _capture_config(*args: object, **kwargs: object) -> AsyncMock:
+        nonlocal received_config
+        received_config = kwargs.get("config")
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        return mock_client
+
+    with patch("wolfharness.mcp_server.client.MCPClient", side_effect=_capture_config):
+        cap = McpServerCap(config=raw_dict)
+
+        client = await cap._ensure_client()
+
+        assert client is not None
+        # Verify MCPClient received an MCPServerConfig, not a raw dict
+        assert isinstance(received_config, StreamableHTTPMCPServerConfig)
+        assert received_config.display_name == "knowledge_diag"
+
+
 # ---------------------------------------------------------------------------
 # Delegation tests
 # ---------------------------------------------------------------------------
@@ -341,15 +517,105 @@ async def test_list_resources_delegation() -> None:
         _make_resource("file:///path1", "res1", "Resource 1", "text/plain"),
         _make_resource("file:///path2", "res2"),
     ]
+    resources[0].title = "Resource One"
+    resources[0].size = 42
+    resources[0].annotations = {"audience": ["user"]}
+    resources[0].meta = {"origin": "upstream"}
     client = FakeMCPClient(_resources=resources)
     cap = McpServerCap(config=_make_config(), session_pool=FakeSessionPool(client))
 
     result = await cap.list_resources()
     assert len(result) == 2
     assert result[0].uri == "file:///path1"
-    assert result[0].name == "res1"
+    # Title is preferred as the display name (RFC-0058 / PR #372 behavior);
+    # the raw title is additionally preserved in its own field.
+    assert result[0].name == "Resource One"
     assert result[0].description == "Resource 1"
     assert result[0].mime_type == "text/plain"
+    assert result[0].title == "Resource One"
+    assert result[0].size == 42
+    assert result[0].annotations == {"audience": ["user"]}
+    assert result[0].meta == {"origin": "upstream"}
+
+
+@pytest.mark.anyio
+async def test_paged_resource_contract_preserves_server_and_cursor() -> None:
+    resources = [_make_resource("file:///path1", "res1", "Resource 1", "text/plain")]
+    client = FakeMCPClient(_resources=resources)
+    cap = McpServerCap(config=_make_config(), session_pool=FakeSessionPool(client))
+
+    assert await cap.supports_resources() is True
+    page = await cap.list_resources_page()
+    assert page.entries[0].server == cap.server_name
+    assert page.entries[0].uri == "file:///path1"
+    templates = await cap.list_resource_templates_page()
+    assert templates.entries == []
+
+
+@pytest.mark.anyio
+async def test_resource_capability_negotiation_is_cached() -> None:
+    client = FakeMCPClient(_supports_resources=False)
+    cap = McpServerCap(config=_make_config(), session_pool=FakeSessionPool(client))
+
+    assert cap.client_name == cap.server_name == _make_config().client_id
+    assert await cap.supports_resources() is False
+    assert cap.resources_supported is False
+
+
+class FlakySessionPool(FakeSessionPool):
+    """Session pool that fails the first connection attempt, then succeeds."""
+
+    def __init__(self, client: FakeMCPClient) -> None:
+        super().__init__(client)
+        self.fail_first = True
+
+    async def get_client(self, config: Any, skill_name: str | None = None) -> FakeMCPClient:
+        if self.fail_first:
+            self.fail_first = False
+            raise RuntimeError("connection refused")
+        return await super().get_client(config, skill_name=skill_name)
+
+
+@pytest.mark.anyio
+async def test_reconnect_clears_cached_resources() -> None:
+    """Cache from a previous connection is dropped after a reconnect.
+
+    A restarted server never sends ``resources/list_changed``; serving the
+    old listing would keep ``resource_exists`` returning stale answers.
+    """
+    from wolfharness.capabilities import mcp_server_cap as msc
+
+    client = FakeMCPClient(_resources=[_make_resource("file:///path1", "res1")])
+    cap = McpServerCap(config=_make_config(), session_pool=FlakySessionPool(client))
+
+    resources = await cap.list_resources()
+    assert len(resources) == 1
+    # Force a reconnect by simulating a dropped connection.
+    cap._client = None
+    cap._resources_cache = resources
+
+    with patch.object(msc.asyncio, "sleep", AsyncMock()):
+        await cap._ensure_client()
+
+    assert cap._resources_cache is None
+    assert cap._resource_templates_cache is None
+
+
+@pytest.mark.anyio
+async def test_list_resources_prefers_title() -> None:
+    """Title is used as the ResourceEntry name when present."""
+    titled = MagicMock()
+    titled.uri = "file:///titled"
+    titled.name = "get_titled"
+    titled.title = "Human Readable Title"
+    titled.description = ""
+    titled.mimeType = "text/plain"
+    client = FakeMCPClient(_resources=[titled])
+    cap = McpServerCap(config=_make_config(), session_pool=FakeSessionPool(client))
+
+    result = await cap.list_resources()
+
+    assert result[0].name == "Human Readable Title"
 
 
 @pytest.mark.anyio
@@ -774,7 +1040,7 @@ async def test_message_handler_resource_updated_calls_callback_with_uri() -> Non
 @pytest.mark.anyio
 async def test_message_handler_resource_list_changed_no_callback() -> None:
     """on_resource_list_changed does not raise when callback is None."""
-    handler = MCPMessageHandler(client=MagicMock())
+    handler = MCPMessageHandler(client=SimpleNamespace(_resource_list_changed_callback=None))
 
     notification = mcp.types.ResourceListChangedNotification()
     await handler.on_resource_list_changed(notification)
@@ -783,7 +1049,7 @@ async def test_message_handler_resource_list_changed_no_callback() -> None:
 @pytest.mark.anyio
 async def test_message_handler_resource_updated_no_callback() -> None:
     """on_resource_updated does not raise when callback is None."""
-    handler = MCPMessageHandler(client=MagicMock())
+    handler = MCPMessageHandler(client=SimpleNamespace(_resource_updated_callback=None))
 
     notification = mcp.types.ResourceUpdatedNotification(
         params=mcp.types.ResourceUpdatedNotificationParams(
